@@ -2,7 +2,16 @@
 
 免费的视频分享链接解析 / 下载工具。粘贴分享链接（或整段分享文本），选择清晰度，下载到本地。
 
-## 启动
+## 下载
+
+到 [Releases 发布页](https://github.com/MoyerZhang-Claude/video-downloader/releases/latest) 下载最新版：
+
+- **电脑版**：`VideoDownloader-x.x.x-windows.zip`，**解压整个文件夹**后双击 `视频解析下载器.exe`（Windows 10/11）
+- **安卓版**：`VideoDownloader-x.x.x-android.apk`，手机下载后点击安装
+
+程序没有代码签名，Windows 若提示“已保护你的电脑”，点“更多信息 → 仍要运行”。
+
+## 启动（本地开发）
 
 | 方式 | 说明 |
 | --- | --- |
