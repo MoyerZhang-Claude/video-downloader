@@ -1,0 +1,4 @@
+yt-dlp[default,curl-cffi]
+PySide6-Essentials
+pyinstaller
+segno

@@ -1,0 +1,52 @@
+# Python dependencies and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local secrets and session data
+.env
+.env.*
+!.env.example
+.claude/
+/cookies/
+/签名密钥/
+*.jks
+*.keystore
+*.pem
+*.key
+*.p12
+*.pfx
+keystore.properties
+local.properties
+/config.json
+*.db
+*.db-shm
+*.db-wal
+
+# Downloads, binaries, logs and generated build output
+/Download/
+/logs/
+*.log
+/dist/
+/build/
+/build_single_instance/
+/ffmpeg/
+*.apk
+*.aab
+*.exe
+*.dll
+*.bak
+.gradle/
+/android/build/
+/android/app/build/
+/test.txt
+
+# Superseded artwork and local verification records
+/图标设计/旧图标/
+/图标设计/二次元头像/修改前备份/
+/图标设计/source-baseline.json
+/图标设计/二次元头像/*校验.json
+.DS_Store
+Thumbs.db
