@@ -330,6 +330,73 @@ CUSTOM_EXTRACTORS = (DouyinShareIE, KuaishouShareIE)
 
 def register(ydl):
     """把自定义提取器放到 yt-dlp 内置提取器之前（需以 auto_init=False 创建 YoutubeDL）。"""
+    _patch_bilibili()
     for ie in CUSTOM_EXTRACTORS:
         ydl.add_info_extractor(ie())
     ydl.add_default_info_extractors()
+
+
+# ---------------------------------------------------------------- B站 下载节点
+#
+# B站 给每条视频/音频流一个主地址 + 几个备用地址。主地址大多是 PCDN（借用别人家宽带的 P2P 节点，
+# 如 xy*.mcdn.bilivideo.cn:8082、*.mountaintoys.cn:4483），速度很不稳定，有时只有几十 KB/s；
+# 备用地址里的官方 CDN（upos-sz-*.bilivideo.com、cn-*.bilivideo.com）通常快十几倍。
+# yt-dlp 只用主地址，这里把全部地址收集到 format['url_candidates']，官方节点排前面，
+# 下载前再由 fastdl.rank_urls 实测挑最快的。
+
+_PCDN_HOST = re.compile(r'\.mcdn\.bilivideo\.(?:cn|com)$|\.szbdyd\.com$|mountaintoys\.cn$')
+# 同一个 upos 地址换成这些官方镜像域名也能下（签名不绑定域名），给测速多几个选择
+_BILI_MIRRORS = ('upos-sz-mirrorali.bilivideo.com', 'upos-sz-mirrorhw.bilivideo.com',
+                 'upos-sz-mirrorcos.bilivideo.com')
+
+
+def _is_pcdn(url):
+    from urllib.parse import urlparse
+    p = urlparse(url)
+    return bool(_PCDN_HOST.search(p.hostname or '')) or p.port not in (None, 80, 443)
+
+
+def bili_url_candidates(base, backups):
+    """官方节点（B站 给的备用地址 → 镜像域名）在前，PCDN 节点在后。"""
+    from urllib.parse import urlparse
+    urls = [u for u in [base, *backups] if u]
+    official = [u for u in urls if not _is_pcdn(u)]
+    pcdn = [u for u in urls if _is_pcdn(u)]
+    src = next((u for u in urls if urlparse(u).path.startswith('/upgcxcode/')), None)
+    mirrors = []
+    if src:
+        p = urlparse(src)
+        mirrors = [p._replace(scheme='https', netloc=h).geturl() for h in _BILI_MIRRORS]
+    return list(dict.fromkeys(official + mirrors + pcdn))
+
+
+def _patch_bilibili():
+    from yt_dlp.extractor import bilibili as bili
+    orig = bili.BilibiliBaseIE.extract_formats
+    if getattr(orig, '_vd_patched', False):
+        return
+
+    def extract_formats(self, play_info):
+        formats = orig(self, play_info)
+        backups = {}
+        streams = list(traverse_obj(play_info, ('dash', (None, 'dolby'), ('video', 'audio'), ..., {dict})) or [])
+        flac = traverse_obj(play_info, ('dash', 'flac', 'audio', {dict}))
+        if flac:
+            streams.append(flac)
+        for s in streams:
+            base = traverse_obj(s, 'baseUrl', 'base_url', 'url')
+            if base:
+                backups[base] = list(traverse_obj(s, 'backupUrl', 'backup_url', default=None) or [])
+        for d in play_info.get('durl') or []:
+            if d.get('url'):
+                backups[d['url']] = list(d.get('backup_url') or [])
+        for f in formats:
+            if f.get('url') in backups and not f.get('fragments'):
+                cands = bili_url_candidates(f['url'], backups[f['url']])
+                if len(cands) > 1:
+                    f['url_candidates'] = cands
+                    f['url'] = cands[0]          # 不测速时也至少避开 PCDN
+        return formats
+
+    extract_formats._vd_patched = True
+    bili.BilibiliBaseIE.extract_formats = extract_formats

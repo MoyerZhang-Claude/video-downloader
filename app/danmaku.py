@@ -55,7 +55,7 @@ def parse_xml(data):
 
 def to_ass(items, width=1920, height=1080, font='Microsoft YaHei', base_size=None):
     width, height = int(width or 1920), int(height or 1080)
-    base = base_size or round(min(width, height) / 1080 * 46)
+    base = base_size or _base_size(width, height)
     alpha = f'{round((1 - OPACITY) * 255):02X}'
     header = f"""[Script Info]
 ; 由 视频解析下载器 从 B站弹幕生成
@@ -73,31 +73,55 @@ Style: Danmaku,{font},{base},&H{alpha}FFFFFF,&H{alpha}FFFFFF,&H{alpha}000000,&H0
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     row_h = base + 6
+    lines = []
+    for t, kind, fs, color, raw, w, row in _place(items, width, height, base):
+        text = _escape(raw)
+        color_tag = '' if color == 0xFFFFFF else \
+            f'\\c&H{color & 0xFF:02X}{(color >> 8) & 0xFF:02X}{(color >> 16) & 0xFF:02X}&'
+        size_tag = '' if fs == base else f'\\fs{fs}'
+        if kind in ('top', 'bottom'):
+            if kind == 'top':
+                pos = f'\\an8\\pos({width // 2},{row * row_h})'
+            else:
+                pos = f'\\an2\\pos({width // 2},{height - row * row_h})'
+            lines.append(f'Dialogue: 2,{_ass_time(t)},{_ass_time(t + FIXED_SECONDS)},Danmaku,,0,0,0,,'
+                         f'{{{pos}{color_tag}{size_tag}}}{text}')
+            continue
+        y = row * row_h
+        if kind == 'rscroll':       # 逆向弹幕：从左往右
+            move = f'\\move({-w:.0f},{y},{width},{y})'
+        else:
+            move = f'\\move({width},{y},{-w:.0f},{y})'
+        lines.append(f'Dialogue: 1,{_ass_time(t)},{_ass_time(t + SCROLL_SECONDS)},Danmaku,,0,0,0,,'
+                     f'{{{move}{color_tag}{size_tag}}}{text}')
+    return header + '\n'.join(lines) + '\n'
+
+
+def _base_size(width, height):
+    return round(min(width, height) / 1080 * 46)
+
+
+def _place(items, width, height, base):
+    """给每条弹幕分配轨道（自动避让、满屏丢弃）。to_ass 和手机端的 layout 共用这套规则。
+
+    产出 (出现时间, 类型, 字号, 颜色, 原文, 估算宽度, 行号)；类型：scroll / rscroll(逆向) / top / bottom
+    """
+    row_h = base + 6
     scroll_rows = max(1, int(height * SCROLL_AREA // row_h))
     fixed_rows = max(1, int(height // row_h))
     scroll_lane = [None] * scroll_rows       # (开始时间, 宽度, 速度)
     top_lane = [0.0] * fixed_rows            # 占用到的时间
     bottom_lane = [0.0] * fixed_rows
-    lines = []
     for t, mode, size, color, raw in items:
-        text = _escape(raw)
         fs = max(12, round(base * size / 25))
         w = _text_width(raw, fs)
-        color_tag = '' if color == 0xFFFFFF else \
-            f'\\c&H{color & 0xFF:02X}{(color >> 8) & 0xFF:02X}{(color >> 16) & 0xFF:02X}&'
-        size_tag = '' if fs == base else f'\\fs{fs}'
         if mode in (4, 5):
             lane = top_lane if mode == 5 else bottom_lane
             row = next((i for i, busy in enumerate(lane) if busy <= t), None)
             if row is None:
                 continue                     # 满屏时丢弃，避免糊成一片
             lane[row] = t + FIXED_SECONDS
-            if mode == 5:
-                pos = f'\\an8\\pos({width // 2},{row * row_h})'
-            else:
-                pos = f'\\an2\\pos({width // 2},{height - row * row_h})'
-            lines.append(f'Dialogue: 2,{_ass_time(t)},{_ass_time(t + FIXED_SECONDS)},Danmaku,,0,0,0,,'
-                         f'{{{pos}{color_tag}{size_tag}}}{text}')
+            yield t, ('top' if mode == 5 else 'bottom'), fs, color, raw, w, row
             continue
         speed = (width + w) / SCROLL_SECONDS
         row = None
@@ -114,14 +138,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if row is None:
             continue
         scroll_lane[row] = (t, w, speed)
-        y = row * row_h
-        if mode == 6:       # 逆向弹幕：从左往右
-            move = f'\\move({-w:.0f},{y},{width},{y})'
-        else:
-            move = f'\\move({width},{y},{-w:.0f},{y})'
-        lines.append(f'Dialogue: 1,{_ass_time(t)},{_ass_time(t + SCROLL_SECONDS)},Danmaku,,0,0,0,,'
-                     f'{{{move}{color_tag}{size_tag}}}{text}')
-    return header + '\n'.join(lines) + '\n'
+        yield t, ('rscroll' if mode == 6 else 'scroll'), fs, color, raw, w, row
+
+
+def layout(xml_data, video_width, video_height):
+    """手机端烧录弹幕用：排好位置的弹幕（坐标基于 canvas 画布，绘制时再按视频实际大小缩放）。
+
+    items 每项：[出现时间, 类型(0 滚动 1 逆向 2 顶部 3 底部), 字号, 颜色, 估算宽度, 行号, 文本]
+    """
+    width, height = canvas_size(video_width, video_height)
+    base = _base_size(width, height)
+    kinds = {'scroll': 0, 'rscroll': 1, 'top': 2, 'bottom': 3}
+    placed = [[round(t, 3), kinds[k], fs, color, round(w, 1), row, raw]
+              for t, k, fs, color, raw, w, row in _place(parse_xml(xml_data), width, height, base)]
+    return {'canvas': [width, height], 'base': base, 'row_h': base + 6, 'scroll_seconds': SCROLL_SECONDS,
+            'fixed_seconds': FIXED_SECONDS, 'opacity': OPACITY, 'items': placed}
 
 
 def convert_file(xml_path, ass_path, width=1920, height=1080, section=None):

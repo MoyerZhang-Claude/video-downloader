@@ -15,6 +15,8 @@ object PyBridge {
         synchronized(this) {
             if (!initialized) {
                 module.callAttr("init", ctx.filesDir.absolutePath, ctx.cacheDir.absolutePath)
+                JsEngine.attach(ctx)
+                module.callAttr("set_js_engine", JsEngine)      // YouTube 的 JS 验证交给系统 V8
                 initialized = true
             }
         }
@@ -29,14 +31,26 @@ object PyBridge {
     fun download(key: String, index: Int, outDir: String, cb: DownloadCallback, wantSubs: Boolean): JSONObject =
         JSONObject(module.callAttr("download", key, index, outDir, cb, wantSubs).toString())
 
+    /** 下载封面原图到 outDir：{path, ext} 或 {error} */
+    fun cover(key: String, outDir: String): JSONObject = JSONObject(module.callAttr("cover", key, outDir).toString())
+
+    /** 弹幕版：下载弹幕并排好位置：{xml, layout, count} 或 {error} */
+    fun danmakuPrepare(key: String, index: Int, outDir: String): JSONObject =
+        JSONObject(module.callAttr("danmaku_prepare", key, index, outDir).toString())
+
     // ---------------------------------------------------------- 下载历史
-    fun historyAdd(key: String, index: Int, uri: String, size: Long) {
-        module.callAttr("history_add", key, index, uri, size)
+    fun historyAdd(key: String, index: Int, uri: String, size: Long, suffix: String = "") {
+        module.callAttr("history_add", key, index, uri, size, suffix)
     }
 
     fun historyList(search: String = ""): JSONArray = JSONArray(module.callAttr("history_list", search).toString())
     fun historyDelete(id: Long) { module.callAttr("history_delete", id) }
     fun historyClear() { module.callAttr("history_clear") }
+
+    // ---------------------------------------------------------- 网站登录信息（导入的 cookies）
+    fun cookiesImport(path: String): JSONObject = JSONObject(module.callAttr("cookies_import", path).toString())
+    fun cookiesStatus(): JSONObject = JSONObject(module.callAttr("cookies_status").toString())
+    fun cookiesClear(site: String = ""): JSONObject = JSONObject(module.callAttr("cookies_clear", site).toString())
 
     // ---------------------------------------------------------- B站登录
     /** 保存 App 内网页登录得到的 cookies，返回账号状态 JSON 字符串。 */

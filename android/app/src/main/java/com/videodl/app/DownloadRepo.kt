@@ -6,6 +6,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -16,23 +17,33 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 
-class DownloadTask(val id: Long, val item: VideoItem, val optIndex: Int) {
+/**
+ * [burn]：生成弹幕版（只保留弹幕版）；[saveCover]：同时把封面存到相册。都在加入下载时按当时的开关决定。
+ */
+class DownloadTask(val id: Long, val item: VideoItem, val optIndex: Int, val burn: Boolean, val saveCover: Boolean) {
     val tag = item.options[optIndex].tag
+    var savedTag = tag                              // 实际下载的格式（自动换格式重试时会变）
     val title = item.title
-    var status by mutableStateOf("queued")         // queued / running / merging / saving / done / failed / cancelled
+    var status by mutableStateOf("queued")         // queued / running / merging / converting / burning / saving / done / failed / cancelled
     var progress by mutableStateOf(0f)
     var done by mutableStateOf(0L)
     var total by mutableStateOf(item.options[optIndex].size)
     var speed by mutableStateOf(0L)
     var stage by mutableStateOf("")
     var error by mutableStateOf("")
+    var note by mutableStateOf("")                  // 完成时的补充说明（如弹幕版失败改存原视频）
     var savedUri by mutableStateOf<Uri?>(null)
     var mime = "video/mp4"
     var subCount by mutableStateOf(0)
+    var coverSaved by mutableStateOf(false)
+    var burned by mutableStateOf(false)
     var callback: DownloadCallback? = null
     val active get() = status in ACTIVE
 
-    companion object { val ACTIVE = setOf("queued", "running", "merging", "saving") }
+    companion object {
+        val ACTIVE = setOf("queued", "running", "merging", "converting", "burning", "saving")
+        const val DANMAKU_SUFFIX = " 弹幕版"      // 历史记录里的清晰度后缀，用来区分原视频和弹幕版
+    }
 }
 
 /**
@@ -44,8 +55,10 @@ object DownloadRepo {
     var onMessage: ((String) -> Unit)? = null
     /** 下载完成：界面据此刷新「已下载」标记、历史记录。 */
     var onDone: ((DownloadTask) -> Unit)? = null
-    /** 是否同时下载字幕（界面上的开关）。 */
+    /** 界面上的开关（加入下载时读取） */
     @Volatile var wantSubs = true
+    @Volatile var wantCover = false
+    @Volatile var wantDanmaku = false
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val slots = Semaphore(2)
@@ -56,14 +69,18 @@ object DownloadRepo {
 
     val activeTasks get() = tasks.filter { it.active }
 
+    /** 这个选项下载时会不会生成弹幕版 */
+    fun willBurn(item: VideoItem, index: Int) =
+        wantDanmaku && item.danmaku && item.options.getOrNull(index)?.kind == "video"
+
     fun enqueue(item: VideoItem, index: Int) {
-        val task = DownloadTask(ids.getAndIncrement(), item, index)
+        val task = DownloadTask(ids.getAndIncrement(), item, index, willBurn(item, index), wantCover)
         tasks.add(0, task)
         start(task)
     }
 
     fun retry(task: DownloadTask) {
-        task.status = "queued"; task.error = ""; task.progress = 0f; task.done = 0
+        task.status = "queued"; task.error = ""; task.note = ""; task.progress = 0f; task.done = 0
         start(task)
     }
 
@@ -98,14 +115,60 @@ object DownloadRepo {
                     }
                     val files = r.getJSONArray("files").let { a -> List(a.length()) { File(a.getString(it)) } }
                     var ext = r.optString("ext", "mp4")
-                    val output = if (files.size == 2) {
+                    var output = if (files.size == 2) {
                         setStatus(task, "merging")
                         File(work, "merged.mp4").also { Muxer.merge(files[0], files[1], it); ext = "mp4" }
                     } else files[0]
-                    setStatus(task, "saving")
+                    // HLS 下载得到的往往是 MPEG-TS（哪怕名字叫 .mp4）：重新封装成标准 MP4，相册缩略图、拖动进度都正常
+                    if (files.size == 1 && Muxer.isMpegTs(output)) {
+                        setStatus(task, "converting")
+                        val mp4 = File(work, "remux.mp4")
+                        try {
+                            Muxer.remux(output, mp4)
+                            output = mp4
+                            ext = "mp4"
+                        } catch (e: Exception) {
+                            mp4.delete()
+                            ext = "ts"        // 封装不了就按实际格式保存，文件名和内容一致
+                        }
+                    }
                     val base = Storage.safeName(r.getString("title")) + " [${r.getString("tag")}]"
+                    val usedIndex = r.optInt("index", task.optIndex)
+                    r.optString("fallback").takeIf { it.isNotEmpty() }?.let { orig ->
+                        withContext(Dispatchers.Main) { task.note = "$orig 下载失败，已自动改为 ${r.getString("tag")}" }
+                    }
+                    var name = "$base.$ext"
+                    var danmakuXml: File? = null
+
+                    // ---- 弹幕版：把弹幕画进视频；失败就保存原视频，不让用户白等
+                    if (task.burn) {
+                        setStatus(task, "burning")
+                        try {
+                            val burned = burnDanmaku(task, work, output, files[0].length())
+                            output = burned.first
+                            danmakuXml = burned.second
+                            ext = "mp4"
+                            name = "$base [弹幕版].mp4"
+                            withContext(Dispatchers.Main) { task.burned = true }
+                        } catch (e: CancellationException) {
+                            setStatus(task, "cancelled", "已取消")
+                            return@withPermit
+                        } catch (e: Exception) {
+                            withContext(Dispatchers.Main) {
+                                task.note = listOf(task.note, "弹幕版生成失败，已保存原视频（${e.message ?: e.javaClass.simpleName}）")
+                                    .filter { it.isNotEmpty() }.joinToString("；")
+                            }
+                        }
+                    }
+
+                    setStatus(task, "saving")
                     task.mime = Storage.mimeOf(ext)
-                    val uri = Storage.saveToDownloads(app, output, "$base.$ext", task.mime)
+                    val uri = Storage.saveToDownloads(app, output, name, task.mime)
+                    val savedBase = name.substringBeforeLast('.')
+                    // 原始弹幕存进「弹幕数据」文件夹（和电脑版一样，留给以后的播放器用）
+                    danmakuXml?.let { xml ->
+                        runCatching { Storage.saveToDownloads(app, xml, "$savedBase.xml", "text/xml", Storage.DANMAKU_FOLDER) }
+                    }
                     // 字幕和视频同名放在一起（如 标题 [1080P].zh-CN.srt），播放器会自动加载
                     val subs = r.optJSONArray("subs")
                     var subCount = 0
@@ -113,17 +176,27 @@ object DownloadRepo {
                         val sub = subs!!.getJSONObject(i)
                         runCatching {
                             Storage.saveToDownloads(app, File(sub.getString("path")),
-                                "$base.${sub.getString("lang")}.${sub.optString("ext", "srt")}", "application/x-subrip")
+                                "$savedBase.${sub.getString("lang")}.${sub.optString("ext", "srt")}", "application/x-subrip")
                             subCount++
                         }
                     }
-                    runCatching { PyBridge.historyAdd(task.item.key, task.optIndex, uri.toString(), output.length()) }
+                    val coverOk = task.saveCover && saveCover(task.item, Storage.safeName(r.getString("title")), work)
+                    val suffix = if (task.burned) DownloadTask.DANMAKU_SUFFIX else ""
+                    runCatching { PyBridge.historyAdd(task.item.key, usedIndex, uri.toString(), output.length(), suffix) }
                     withContext(Dispatchers.Main) {
                         task.savedUri = uri
+                        task.savedTag = r.getString("tag")
                         task.subCount = subCount
+                        task.coverSaved = coverOk
                         task.progress = 1f
                         task.status = "done"
-                        onMessage?.invoke("✓ 已保存到「下载/${Storage.FOLDER}」" + if (subCount > 0) "（含 $subCount 个字幕）" else "")
+                        val extras = listOfNotNull(
+                            if (task.burned) "弹幕版" else null,
+                            if (subCount > 0) "$subCount 个字幕" else null,
+                            if (coverOk) "封面" else null,
+                        )
+                        onMessage?.invoke("✓ 已保存到「下载/${Storage.FOLDER}」" +
+                            if (extras.isNotEmpty()) "（${extras.joinToString("、")}）" else "")
                         onDone?.invoke(task)
                     }
                     Notifier.done(app, task)
@@ -136,6 +209,28 @@ object DownloadRepo {
             }
         }
     }
+
+    /** 返回 (弹幕版视频, 原始弹幕 XML) */
+    private suspend fun burnDanmaku(task: DownloadTask, work: File, video: File, videoStreamBytes: Long): Pair<File, File> {
+        withContext(Dispatchers.Main) { task.stage = "获取弹幕"; task.progress = 0f }
+        val dm = PyBridge.danmakuPrepare(task.item.key, task.optIndex, File(work, "dm").absolutePath)
+        if (dm.has("error")) error(dm.getString("error"))
+        val layout = DanmakuBurner.loadLayout(File(dm.getString("layout")))
+        val out = File(work, "danmaku.mp4")
+        withContext(Dispatchers.Main) { task.stage = "${layout.items.size} 条弹幕" }
+        DanmakuBurner.burn(app, video, out, layout, videoStreamBytes,
+            onProgress = { p -> task.progress = p / 100f },
+            isCancelled = { task.callback?.cancelled == true })
+        return out to File(dm.getString("xml"))
+    }
+
+    /** 下载封面并存到相册；失败不影响视频。 */
+    fun saveCover(item: VideoItem, safeTitle: String, work: File): Boolean = runCatching {
+        val r = PyBridge.cover(item.key, File(work, "cover").absolutePath)
+        if (r.has("error")) error(r.getString("error"))
+        Storage.saveCover(app, File(r.getString("path")), "$safeTitle [封面]")
+        true
+    }.getOrDefault(false)
 
     private suspend fun setStatus(task: DownloadTask, status: String, error: String = "") =
         withContext(Dispatchers.Main) { task.status = status; task.error = error; if (status != "running") task.speed = 0 }

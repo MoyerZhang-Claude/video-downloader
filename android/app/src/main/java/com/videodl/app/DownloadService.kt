@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
@@ -33,6 +34,7 @@ class DownloadService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var job: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLocks: List<WifiManager.WifiLock> = emptyList()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -44,6 +46,13 @@ class DownloadService : Service() {
         // 锁屏后 CPU 也保持运行，下载不会被系统挂起（下完自动释放）
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "videodl:download").apply { acquire(6 * 60 * 60 * 1000L) }
+        // 锁屏后 Wi-Fi 也保持高性能（不进省电模式），避免后台下载被限速
+        val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+        @Suppress("DEPRECATION")
+        wifiLocks = listOf(WifiManager.WIFI_MODE_FULL_HIGH_PERF, WifiManager.WIFI_MODE_FULL_LOW_LATENCY).mapNotNull { mode ->
+            runCatching { wifi.createWifiLock(mode, "videodl:download:$mode").apply { setReferenceCounted(false); acquire() } }
+                .getOrNull()
+        }
         job = scope.launch {
             var idle = 0
             while (true) {
@@ -68,6 +77,7 @@ class DownloadService : Service() {
     override fun onDestroy() {
         job?.cancel()
         wakeLock?.takeIf { it.isHeld }?.release()
+        wifiLocks.forEach { runCatching { if (it.isHeld) it.release() } }
         super.onDestroy()
     }
 }
@@ -91,22 +101,27 @@ object Notifier {
     fun progress(ctx: Context, active: List<DownloadTask>): Notification {
         val running = active.filter { it.status != "queued" }
         val total = active.sumOf { it.total }
-        val done = active.sumOf { if (it.status in setOf("merging", "saving")) it.total else it.done }
+        val done = active.sumOf { if (it.status in setOf("merging", "converting", "burning", "saving")) it.total else it.done }
         val speed = running.sumOf { it.speed }
         val title = when {
             active.isEmpty() -> "准备下载…"
             active.size == 1 -> active[0].title
             else -> "正在下载 ${active.size} 个视频"
         }
+        val one = active.singleOrNull()
         val text = when {
-            active.size == 1 && active[0].status == "merging" -> "合并音视频…"
-            active.size == 1 && active[0].status == "saving" -> "保存到下载文件夹…"
+            one?.status == "merging" -> "合并音视频…"
+            one?.status == "converting" -> "转换为 MP4…"
+            one?.status == "burning" -> "生成弹幕版 ${(one.progress * 100).toInt()}%"
+            one?.status == "saving" -> "保存到下载文件夹…"
             else -> listOfNotNull(
                 if (total > 0) "${fmtSize(done)} / ${fmtSize(total)}" else null,
                 if (speed > 0) "${fmtSize(speed)}/s" else null,
+                active.count { it.status == "burning" }.takeIf { it > 0 }?.let { "$it 个正在生成弹幕版" },
             ).joinToString("  ·  ").ifEmpty { "等待中" }
         }
-        val pct = if (total > 0) (done * 100 / total).toInt().coerceIn(0, 100) else 0
+        val pct = if (one?.status == "burning") (one.progress * 100).toInt()
+                  else if (total > 0) (done * 100 / total).toInt().coerceIn(0, 100) else 0
         return NotificationCompat.Builder(ctx, CH_PROGRESS)
             .setSmallIcon(R.drawable.ic_stat_download)
             .setContentTitle(title)

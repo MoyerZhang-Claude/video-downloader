@@ -3,6 +3,7 @@ package com.videodl.app
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import android.os.PowerManager
 import android.webkit.CookieManager
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -40,6 +41,7 @@ class VideoItem(val id: Long, val url: String) {
     var subs by mutableStateOf(listOf<String>())
     var history by mutableStateOf(listOf<HistoryHit>())
     var collection by mutableStateOf<CollectionInfo?>(null)
+    var danmaku by mutableStateOf(false)           // B站 视频有弹幕（可以生成弹幕版）
     var key = ""
     var fromCollection = false
     var autoRes: Int? = null          // 从选集加入且勾了「自动下载」：解析完按这个清晰度下载（0 = 最高）
@@ -47,6 +49,11 @@ class VideoItem(val id: Long, val url: String) {
 
 /** 选集窗口的内容 */
 class EpisodeSheet(val kind: String, val title: String, val current: Int, val episodes: List<Episode>)
+
+/** 导入的某个网站的登录信息：ageDays 导入了几天；expires 最早过期的 cookie（秒，0 未知） */
+data class CookieSite(val site: String, val name: String, val count: Int, val ageDays: Int, val expires: Long) {
+    val expired get() = expires > 0 && expires * 1000 < System.currentTimeMillis()
+}
 
 data class BiliAccount(val loggedIn: Boolean, val name: String = "", val vipLabel: String = "", val expired: Boolean = false)
 
@@ -62,6 +69,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var duplicate by mutableStateOf<Pair<VideoItem, HistoryHit>?>(null)
     var wantSubs by mutableStateOf(true)
         private set
+    var wantCover by mutableStateOf(false)
+        private set
+    var wantDanmaku by mutableStateOf(false)
+        private set
+    /** 后台下载是否已经不受电池优化限制 */
+    var bgUnrestricted by mutableStateOf(true)
+        private set
+    var askBattery by mutableStateOf(false)
+    /** 正在预览封面的视频 */
+    var coverItem by mutableStateOf<VideoItem?>(null)
+    var cookieSites by mutableStateOf(listOf<CookieSite>())
+        private set
+    var showCookieManager by mutableStateOf(false)
+    var showCookieHelp by mutableStateOf(false)
 
     private val prefs = app.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private val ids = AtomicLong(1)
@@ -69,14 +90,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         wantSubs = prefs.getBoolean("want_subs", true)
+        wantCover = prefs.getBoolean("want_cover", false)
+        wantDanmaku = prefs.getBoolean("want_danmaku", false)
         DownloadRepo.attach(app)
         DownloadRepo.wantSubs = wantSubs
+        DownloadRepo.wantCover = wantCover
+        DownloadRepo.wantDanmaku = wantDanmaku
+        refreshBattery()
         DownloadRepo.onMessage = { message = it }
         DownloadRepo.onDone = { task -> onDownloaded(task) }
         viewModelScope.launch(Dispatchers.IO) {
             PyBridge.init(getApplication())      // 第一次启动要解压 Python 运行环境，稍慢
             withContext(Dispatchers.Main) { ready = true }
             refreshBili()
+            refreshCookies()
             loadHistory()
         }
     }
@@ -93,6 +120,140 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         wantSubs = on
         DownloadRepo.wantSubs = on
         prefs.edit().putBoolean("want_subs", on).apply()
+    }
+
+    fun toggleCover(on: Boolean) {
+        wantCover = on
+        DownloadRepo.wantCover = on
+        prefs.edit().putBoolean("want_cover", on).apply()
+    }
+
+    fun toggleDanmaku(on: Boolean) {
+        wantDanmaku = on
+        DownloadRepo.wantDanmaku = on
+        prefs.edit().putBoolean("want_danmaku", on).apply()
+        toast(if (on) "B站视频将只下载弹幕版（下载完会在手机上生成，需要等一会儿）" else "将只下载原视频")
+    }
+
+    // ------------------------------------------------------------ 后台不限速
+
+    fun refreshBattery() {
+        val pm = getApplication<Application>().getSystemService(Context.POWER_SERVICE) as PowerManager
+        bgUnrestricted = pm.isIgnoringBatteryOptimizations(getApplication<Application>().packageName)
+    }
+
+    /** 第一次下载时提醒一次：允许后台运行，锁屏后才不会被系统限速 */
+    private fun maybeAskBattery() {
+        refreshBattery()
+        if (!bgUnrestricted && !prefs.getBoolean("asked_battery", false)) {
+            prefs.edit().putBoolean("asked_battery", true).apply()
+            askBattery = true
+        }
+    }
+
+    // ------------------------------------------------------------ 网站登录信息（导入的 cookies）
+
+    fun refreshCookies() {
+        viewModelScope.launch(Dispatchers.IO) {
+            awaitReady()
+            val st = runCatching { PyBridge.cookiesStatus() }.getOrNull() ?: return@launch
+            withContext(Dispatchers.Main) { cookieSites = parseCookies(st) }
+        }
+    }
+
+    private fun parseCookies(st: JSONObject): List<CookieSite> {
+        val arr = st.optJSONArray("sites") ?: return emptyList()
+        return List(arr.length()) { i ->
+            arr.getJSONObject(i).let {
+                CookieSite(it.getString("site"), it.optString("name"), it.optInt("count"), it.optInt("age_days"),
+                    it.optLong("expires"))
+            }
+        }
+    }
+
+    /** 导入用户选的 cookies 文件（文件选择器或「分享到本应用」），任意网站都行 */
+    fun importCookies(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            awaitReady()
+            val tmp = java.io.File(getApplication<Application>().cacheDir, "import_cookies.txt")
+            val r = runCatching {
+                getApplication<Application>().contentResolver.openInputStream(uri)!!.use { input ->
+                    tmp.outputStream().use { input.copyTo(it) }
+                }
+                PyBridge.cookiesImport(tmp.absolutePath)
+            }.getOrElse {
+                android.util.Log.w("videodl", "导入 cookies 读取失败", it)
+                JSONObject().put("error", "读取文件失败：${it.message}")
+            }
+            tmp.delete()          // 临时副本立刻删除
+            withContext(Dispatchers.Main) {
+                if (r.has("error")) {
+                    android.util.Log.w("videodl", "导入 cookies 失败：${r.getString("error")}")
+                    toast(r.getString("error"))
+                    return@withContext
+                }
+                cookieSites = parseCookies(r)
+                val names = r.optJSONArray("imported")?.let { a -> List(a.length()) { a.getString(it) } }.orEmpty()
+                // 之前失败的链接（可能就是因为没登录）：自动重新解析
+                val failed = items.filter { it.state == "error" }
+                failed.forEach { parse(it) }
+                toast("✓ 已导入 ${names.joinToString("、")} 的登录信息" +
+                    if (failed.isNotEmpty()) "，正在重新解析 ${failed.size} 个失败的链接" else "")
+            }
+        }
+    }
+
+    fun clearCookies(site: CookieSite) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.cookiesClear(site.site) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                r?.let { cookieSites = parseCookies(it) }
+                if (cookieSites.isEmpty()) showCookieManager = false
+                toast("已清除 ${site.name} 的登录信息")
+            }
+        }
+    }
+
+    /** 别的 App 分享过来一个文本文件：是 cookies 就导入，否则当作文字提取链接。 */
+    fun handleSharedFile(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val head = runCatching {
+                getApplication<Application>().contentResolver.openInputStream(uri)!!.use { input ->
+                    val buf = ByteArray(256 * 1024)
+                    val n = input.read(buf).coerceAtLeast(0)
+                    String(buf, 0, n)
+                }
+            }.getOrElse {
+                android.util.Log.w("videodl", "读取分享的文件失败：$uri", it)
+                ""
+            }
+            withContext(Dispatchers.Main) {
+                // Netscape cookies 格式：每行 7 列，用 Tab 分隔，第一列是域名
+                val isCookies = "Netscape HTTP Cookie" in head || head.lineSequence().count {
+                    val cols = it.removePrefix("#HttpOnly_").split('\t')
+                    cols.size == 7 && '.' in cols[0]
+                } >= 2
+                when {
+                    isCookies -> importCookies(uri)
+                    head.isNotBlank() -> submit(head)
+                    else -> toast("无法读取分享的文件")
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ 封面
+
+    fun saveCoverNow(item: VideoItem) {
+        if (item.key.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val work = java.io.File(getApplication<Application>().cacheDir, "cover_${item.id}")
+            val ok = DownloadRepo.saveCover(item, Storage.safeName(item.title), work)
+            work.deleteRecursively()
+            withContext(Dispatchers.Main) {
+                toast(if (ok) "✓ 封面已保存到相册「${Storage.FOLDER}」" else "保存封面失败，请稍后重试")
+            }
+        }
     }
 
     private suspend fun awaitReady() { while (!ready) delay(100) }
@@ -199,6 +360,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             QualityOpt(o.getString("label"), o.getString("tag"), o.getString("kind"), o.optLong("size"),
                 o.optInt("res"), o.optInt("streams", 1))
         }
+        item.danmaku = r.optBoolean("danmaku")
         item.subs = r.optJSONArray("subs")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList()
         item.history = r.optJSONArray("history")?.let { a ->
             List(a.length()) { a.getJSONObject(it).let { h -> HistoryHit(h.getString("quality"), h.getString("uri"), h.getDouble("ts")) } }
@@ -211,7 +373,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         item.autoRes?.let { res ->
             item.autoRes = null
             item.selected = pickByRes(item.options, res)
-            if (item.history.none { it.quality == item.options[item.selected].tag }) startDownload(item)
+            if (item.history.none { it.quality == effectiveTag(item) }) startDownload(item)
         }
     }
 
@@ -256,12 +418,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun download(item: VideoItem) {
         if (item.state != "ok") return
-        val tag = item.options[item.selected].tag
+        val tag = effectiveTag(item)
         val hit = item.history.firstOrNull { it.quality == tag }
         if (hit != null) { duplicate = item to hit; return }       // 下载过：先问一下
         startDownload(item)
-        toast("✓ 已加入下载，可以切到别的 App，进度在通知栏")
+        toast(if (DownloadRepo.willBurn(item, item.selected)) "✓ 已加入下载，下载完会生成弹幕版，进度在通知栏"
+              else "✓ 已加入下载，可以切到别的 App，进度在通知栏")
+        maybeAskBattery()
     }
+
+    /** 历史记录里的清晰度：弹幕版带后缀，和原视频分开判断「下载过没有」 */
+    fun effectiveTag(item: VideoItem): String =
+        item.options[item.selected].tag + if (DownloadRepo.willBurn(item, item.selected)) DownloadTask.DANMAKU_SUFFIX else ""
 
     fun startDownload(item: VideoItem) = DownloadRepo.enqueue(item, item.selected)
 
@@ -271,8 +439,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun onDownloaded(task: DownloadTask) {
         val uri = task.savedUri?.toString() ?: return
-        task.item.history = listOf(HistoryHit(task.tag, uri, System.currentTimeMillis() / 1000.0)) +
-            task.item.history.filter { it.quality != task.tag }
+        val q = task.savedTag + if (task.burned) DownloadTask.DANMAKU_SUFFIX else ""
+        task.item.history = listOf(HistoryHit(q, uri, System.currentTimeMillis() / 1000.0)) +
+            task.item.history.filter { it.quality != q }
         loadHistory()
     }
 

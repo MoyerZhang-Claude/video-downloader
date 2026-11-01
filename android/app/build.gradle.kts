@@ -14,8 +14,8 @@ android {
         applicationId = "com.videodl.app"
         minSdk = 29                 // Android 10+：可以免权限写入「下载」文件夹
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.0.0"
+        versionCode = 6
+        versionName = "1.2.0"
         ndk {
             abiFilters += listOf("arm64-v8a")     // 手机基本都是 arm64，只打这一种，安装包小一半
         }
@@ -55,7 +55,7 @@ android {
 val syncPythonCore = tasks.register<Sync>("syncPythonCore") {
     from(rootProject.file("../app")) {
         include("__init__.py", "core.py", "extractors.py", "collection.py", "bilibili.py", "danmaku.py", "config.py",
-            "history.py")
+            "history.py", "fastdl.py")
     }
     into(layout.buildDirectory.dir("pycore/app"))
 }
@@ -67,7 +67,9 @@ chaquopy {
         version = "3.13"
         buildPython("D:/AI/Python/Python313/python.exe")
         pip {
-            install("yt-dlp")
+            // 版本和电脑版一致；yt-dlp-ejs（YouTube 验证脚本）必须和 yt-dlp 配套，升级时两个一起改
+            install("yt-dlp==2026.10.21")
+            install("yt-dlp-ejs==0.8.0")
             install("requests")
             install("segno")
         }
@@ -93,4 +95,11 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("io.coil-kt.coil3:coil-compose:3.6.3")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.6.3")
+    // 弹幕版：用手机硬件编码器把弹幕画进视频（谷歌官方 Media3）
+    val media3 = "1.11.1"
+    implementation("androidx.media3:media3-transformer:$media3")
+    implementation("androidx.media3:media3-effect:$media3")
+    implementation("androidx.media3:media3-common:$media3")
+    // YouTube 的 JS 验证：借用系统 WebView 的 V8 引擎（手机上没有 Node.js）
+    implementation("androidx.javascriptengine:javascriptengine:1.1.1")
 }

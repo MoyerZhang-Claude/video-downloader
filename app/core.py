@@ -74,7 +74,9 @@ def platform_name(info):
 _ERROR_HINTS = [
     (r'Unsupported URL', '暂不支持这个网站/链接'),
     (r'Requested format is not available', '所选清晰度已不可用，请重新解析'),
-    (r"not a bot|confirm you.re not a bot", 'YouTube 要求人机验证：请在设置里配置 cookies，或更换代理节点'),
+    (r"not a bot|confirm you.re not a bot",
+     'YouTube 暂时拦截了当前网络（多半是代理 / VPN 节点被风控）：换一个节点后重试；'
+     '经常出现的话，把 YouTube 的 cookies 放进 cookies 文件夹（设置 → Cookies 有说明）'),
     (r'Log ?in|login|logged|sign in|cookies|authentication|premium member|会员',
      '该内容需要登录：把该网站导出的 cookies.txt 放进程序目录的 cookies 文件夹（或已过期，请重新导出）'),
     (r'Private video', '视频为私密内容，需要有权限的账号 cookies'),
@@ -218,6 +220,39 @@ def cookie_file_names():
         return sorted(n for n in os.listdir(COOKIE_DIR) if n.lower().endswith('.txt') and n.lower() != 'bilibili.txt')
     except OSError:
         return []
+
+
+def ydl_opener(ydl):
+    """给 fastdl 用的 urlopen(url, headers)：走 yt-dlp 的网络层（代理、Cookie 和解析时一致）。"""
+    from yt_dlp.networking import Request
+
+    def urlopen(url, headers):
+        return ydl.urlopen(Request(url, headers=headers))
+    return urlopen
+
+
+def pick_fast_urls(info, format_ids, ydl, is_cancelled=None):
+    """有多个候选地址的格式（目前是 B站）：并行测速，把最快的地址设为下载地址。返回选中的域名列表。"""
+    from urllib.parse import urlparse
+
+    from . import fastdl
+    fmts = {f.get('format_id'): f for f in info.get('formats') or []}
+    chosen = []
+    for fid in format_ids:
+        f = fmts.get(fid)
+        cands = (f or {}).get('url_candidates') or []
+        if len(cands) < 2:
+            continue
+        headers = {k: v for k, v in (f.get('http_headers') or info.get('http_headers') or {}).items()
+                   if k.lower() != 'cookie'}
+        try:
+            ranked = fastdl.rank_urls(cands, headers, ydl_opener(ydl), is_cancelled=is_cancelled)
+        except Exception:  # noqa: BLE001 - 测速失败就用原来的顺序
+            continue
+        f['url_candidates'] = ranked
+        f['url'] = ranked[0]
+        chosen.append(urlparse(ranked[0]).hostname)
+    return chosen
 
 
 def new_ydl(opts):
@@ -750,7 +785,10 @@ class DownloadManager:
             try:
                 with new_ydl(self._build_opts(task, logger)) as ydl:
                     task._expected_name = ydl.prepare_filename(info)
-                    result = ydl.process_ie_result(copy.deepcopy(info), download=True)
+                    job = copy.deepcopy(info)
+                    for host in pick_fast_urls(job, [fid for fid, _ in task.option.streams], ydl):
+                        self.log('info', f'[任务{task.id}] 已选用较快的下载节点 {host}')
+                    result = ydl.process_ie_result(job, download=True)
                 path = (result.get('requested_downloads') or [{}])[0].get('filepath') or result.get('filepath')
                 if path:
                     task.filepath = path
