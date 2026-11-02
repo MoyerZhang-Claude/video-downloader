@@ -5,25 +5,31 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color as AColor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -31,10 +37,14 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -43,20 +53,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val Indigo = Color(0xFF6366F1)
-private val Violet = Color(0xFFA855F7)
-private val Ink = Color(0xFF1E1B4B)
-private val Soft = Color(0xFF6B6F99)
-private val GradientBrush = Brush.linearGradient(listOf(Indigo, Violet))
-private val BgBrush = Brush.linearGradient(listOf(Color(0xFFE0E7FF), Color(0xFFF3E8FF), Color(0xFFFCE7F3)))
-private val PlatformColors = mapOf(
-    "B站" to Color(0xFFFB7299), "抖音" to Color(0xFF161823), "快手" to Color(0xFFFF5000),
-    "YouTube" to Color(0xFFFF0033), "X" to Color(0xFF0F1419), "TikTok" to Color(0xFFFE2C55),
-)
+const val GITHUB_URL = "https://github.com/MoyerZhang-Claude/video-downloader"
 
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
@@ -73,12 +75,13 @@ class MainActivity : ComponentActivity() {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             askNotify.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        setContent { App(vm) }
+        setContent { App(vm, this) }
     }
 
     override fun onResume() {
         super.onResume()
         vm.refreshBattery()       // 从系统设置回来后更新「后台不限速」状态
+        vm.refreshGreeting()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -105,45 +108,80 @@ fun openUri(ctx: Context, uri: Uri, mime: String, vm: MainViewModel) {
     }.onFailure { vm.toast("没有能打开这个文件的应用") }
 }
 
-@Composable
-fun App(vm: MainViewModel) {
-    val ctx = LocalContext.current
-    LaunchedEffect(vm.message) {
-        if (vm.message.isNotEmpty()) {
-            Toast.makeText(ctx, vm.message, Toast.LENGTH_SHORT).show()
-            vm.message = ""
-        }
-    }
-    var tab by rememberSaveable { mutableIntStateOf(0) }
-    // 加入下载后自动切到「下载」页；从分享进来的链接切回「解析」页
-    val activeCount = vm.tasks.count { it.active }
+fun openWeb(ctx: Context, url: String) {
+    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+}
 
-    MaterialTheme(colorScheme = lightColorScheme(primary = Indigo, secondary = Violet)) {
-        Scaffold(
-            containerColor = Color.Transparent,
-            modifier = Modifier.background(BgBrush),
-            bottomBar = {
-                NavigationBar(containerColor = Color.White.copy(alpha = 0.75f), tonalElevation = 0.dp) {
-                    listOf("解析" to "🔗", "下载" to "⬇", "历史" to "🕘").forEachIndexed { i, (name, icon) ->
-                        NavigationBarItem(
-                            selected = tab == i, onClick = { tab = i; if (i == 2) vm.loadHistory() },
-                            icon = {
-                                BadgedBox(badge = { if (i == 1 && activeCount > 0) Badge { Text("$activeCount") } }) {
-                                    Text(icon, fontSize = 18.sp)
-                                }
-                            },
-                            label = { Text(name) },
-                            colors = NavigationBarItemDefaults.colors(indicatorColor = Color(0xFFE0E7FF)),
-                        )
-                    }
-                }
+fun fmtSize(n: Long): String = when {
+    n <= 0 -> ""
+    n < 1024 * 1024 -> "%.0f KB".format(n / 1024.0)
+    n < 1024L * 1024 * 1024 -> "%.1f MB".format(n / 1048576.0)
+    else -> "%.2f GB".format(n / 1073741824.0)
+}
+
+private fun fmtDuration(sec: Double): String {
+    val s = sec.toInt(); if (s <= 0) return ""
+    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%02d:%02d".format(s / 60, s % 60)
+}
+
+private fun fmtTime(ts: Double): String = SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(Date((ts * 1000).toLong()))
+
+private fun fmtAgo(ts: Double): String {
+    val d = System.currentTimeMillis() / 1000.0 - ts
+    return when {
+        d < 60 -> "刚刚"
+        d < 3600 -> "${(d / 60).toInt()} 分钟前"
+        d < 86400 -> "${(d / 3600).toInt()} 小时前"
+        d < 7 * 86400 -> "${(d / 86400).toInt()} 天前"
+        else -> fmtTime(ts).substring(0, 5)
+    }
+}
+
+private fun clipboardText(ctx: Context): String {
+    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    return cm.primaryClip?.getItemAt(0)?.coerceToText(ctx)?.toString().orEmpty()
+}
+
+// ================================================================ 整体框架
+
+@Composable
+fun App(vm: MainViewModel, activity: ComponentActivity) {
+    val dark = isDarkMode(vm.themeMode)
+    LaunchedEffect(dark) {
+        val style = if (dark) SystemBarStyle.dark(AColor.TRANSPARENT)
+                    else SystemBarStyle.light(AColor.TRANSPARENT, AColor.TRANSPARENT)
+        activity.enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+    }
+    VdTheme(vm.themeMode) {
+        var page by rememberSaveable { mutableStateOf("home") }
+        val drawer = rememberDrawerState(DrawerValue.Closed)
+        val scope = rememberCoroutineScope()
+        val focus = remember { FocusRequester() }
+        fun go(p: String) { page = p; scope.launch { drawer.close() }; if (p == "history") vm.loadHistory() }
+        BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }
+        BackHandler(enabled = page != "home" && !drawer.isOpen) { page = "home" }
+
+        ModalNavigationDrawer(
+            drawerState = drawer,
+            gesturesEnabled = page == "home" || drawer.isOpen,
+            scrimColor = P.scrim,
+            drawerContent = {
+                Drawer(vm, page, onNavigate = ::go, onNew = {
+                    vm.newSession()          // 像 Claude 的「新建」：回到首页
+                    go("home")
+                    runCatching { focus.requestFocus() }
+                })
             },
-        ) { pad ->
-            Box(Modifier.fillMaxSize().padding(pad)) {
-                when (tab) {
-                    0 -> ParsePage(vm) { tab = 1 }
-                    1 -> TasksPage(vm)
-                    else -> HistoryPage(vm) { tab = 0 }
+        ) {
+            Box(Modifier.fillMaxSize().background(P.bg)) {
+                when (page) {
+                    "tasks" -> TasksScreen(vm) { page = "home" }
+                    "history" -> HistoryScreen(vm) { page = "home" }
+                    "settings" -> SettingsScreen(vm) { page = "home" }
+                    else -> HomeScreen(vm, focus, openDrawer = { scope.launch { drawer.open() } }, goTasks = { go("tasks") })
+                }
+                Box(Modifier.navigationBarsPadding().imePadding()) {
+                    ToastHost(vm.message, vm.toastSeq, bottom = if (page == "home") 130.dp else 32.dp)
                 }
             }
         }
@@ -156,263 +194,726 @@ fun App(vm: MainViewModel) {
     }
 }
 
-// ================================================================ 公共小组件
+// ================================================================ 侧边栏（像 Claude 手机版的侧边栏）
 
 @Composable
-private fun Glass(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(18.dp),
-        color = Color.White.copy(alpha = 0.72f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.9f)),
-        shadowElevation = 0.dp,
-        tonalElevation = 0.dp,
-        modifier = modifier.fillMaxWidth(),
-    ) { Column(Modifier.padding(14.dp), content = content) }
-}
-
-@Composable
-private fun GradientButton(text: String, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
-    Box(
-        modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (enabled) GradientBrush else Brush.linearGradient(listOf(Color(0xFFC7C9E8), Color(0xFFC7C9E8))))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 10.dp),
-        contentAlignment = Alignment.Center,
-    ) { Text(text, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp) }
-}
-
-@Composable
-private fun Chip(text: String, bg: Color, fg: Color = Color.White, onClick: (() -> Unit)? = null) {
-    Text(text, color = fg, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1,
-        modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(bg)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 8.dp, vertical = 2.dp))
-}
-
-@Composable
-private fun PlatformChip(name: String) = Chip(name.ifEmpty { "网页" }, PlatformColors[name] ?: Indigo)
-
-@Composable
-private fun SectionTitle(text: String) =
-    Text(text, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color(0xFF312E81), modifier = Modifier.padding(start = 4.dp))
-
-private fun fmtDuration(sec: Double): String {
-    val s = sec.toInt(); if (s <= 0) return ""
-    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%02d:%02d".format(s / 60, s % 60)
-}
-
-fun fmtSize(n: Long): String = when {
-    n <= 0 -> ""
-    n < 1024 * 1024 -> "%.0f KB".format(n / 1024.0)
-    n < 1024L * 1024 * 1024 -> "%.1f MB".format(n / 1048576.0)
-    else -> "%.2f GB".format(n / 1073741824.0)
-}
-
-private fun fmtTime(ts: Double): String =
-    SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(Date((ts * 1000).toLong()))
-
-// ================================================================ 解析页
-
-@Composable
-private fun ParsePage(vm: MainViewModel, goTasks: () -> Unit) {
-    LazyColumn(
-        Modifier.fillMaxSize().imePadding(),
-        contentPadding = PaddingValues(14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        item { Header(vm) }
-        item { InputCard(vm) }
-        item { OptionsCard(vm) }
-        if (vm.items.isNotEmpty()) {
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    SectionTitle("解析结果")
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { vm.items.clear() }) { Text("清空", color = Soft) }
+private fun Drawer(vm: MainViewModel, page: String, onNavigate: (String) -> Unit, onNew: () -> Unit) {
+    val ctx = LocalContext.current
+    ModalDrawerSheet(drawerContainerColor = P.bg, drawerShape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp),
+        modifier = Modifier.width(310.dp)) {
+        Column(Modifier.fillMaxHeight().statusBarsPadding().navigationBarsPadding().padding(horizontal = 14.dp)) {
+            Row(Modifier.height(72.dp).padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Spark(26.dp)
+                Spacer(Modifier.width(10.dp))
+                Text("视频解析下载器", fontFamily = Serif, fontSize = 26.sp, color = P.text)
+            }
+            val active = vm.tasks.count { it.active }
+            DrawerItem(LineIcons.Download, "下载", page == "tasks", if (active > 0) "$active" else "") { onNavigate("tasks") }
+            DrawerItem(LineIcons.Clock, "历史记录", page == "history") { onNavigate("history") }
+            DrawerItem(LineIcons.Settings, "设置", page == "settings") { onNavigate("settings") }
+            Box(Modifier.padding(vertical = 12.dp).fillMaxWidth().height(1.dp).background(P.border))
+            Text("最近下载", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = P.text3,
+                modifier = Modifier.padding(start = 10.dp, bottom = 6.dp))
+            LazyColumn(Modifier.weight(1f)) {
+                if (vm.history.isEmpty()) item {
+                    Text("下载过的视频会出现在这里", fontSize = 14.sp, color = P.text4, modifier = Modifier.padding(10.dp))
+                }
+                items(vm.history.take(40), key = { "r${it.id}" }) { h ->
+                    Text(h.title, fontSize = 15.sp, color = if (h.exists) P.text else P.text3, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                            .clickable {
+                                if (h.exists) openUri(ctx, Uri.parse(h.uri), "video/*", vm)
+                                else vm.toast("文件已被删除，可以在「历史记录」里重新解析")
+                            }
+                            .padding(horizontal = 10.dp, vertical = 11.dp))
                 }
             }
-            items(vm.items, key = { "v${it.id}" }) { VideoCard(it, vm, goTasks) }
+            Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                val b = vm.bili
+                Box(Modifier.clip(CircleShape).clickable { onNavigate("settings") }) {
+                    Avatar(if (b?.loggedIn == true) b.name else vm.nickname, 44.dp)
+                }
+                Spacer(Modifier.weight(1f))
+                PrimaryButton("解析新链接", icon = LineIcons.Plus, onClick = onNew)
+            }
         }
-        item { Spacer(Modifier.height(20.dp)) }
     }
 }
 
 @Composable
-private fun Header(vm: MainViewModel) {
+private fun DrawerItem(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, selected: Boolean,
+                       badge: String = "", onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (selected) P.selected else Color.Transparent)
+        .clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+        LIcon(icon, P.text, 22.dp)
+        Spacer(Modifier.width(16.dp))
+        Text(text, fontSize = 17.sp, color = P.text, modifier = Modifier.weight(1f))
+        if (badge.isNotEmpty()) Text(badge, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clip(CircleShape).background(P.brand).padding(horizontal = 8.dp, vertical = 1.dp))
+    }
+}
+
+// ================================================================ 首页：问候语 / 解析结果 + 底部输入框
+
+@Composable
+private fun HomeScreen(vm: MainViewModel, focus: FocusRequester, openDrawer: () -> Unit, goTasks: () -> Unit) {
+    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
+        Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            RoundIcon(LineIcons.Menu, openDrawer, size = 46.dp, iconSize = 26.dp, tint = P.text)
+            Spacer(Modifier.weight(1f))
+            val active = vm.tasks.count { it.active }
+            Box {
+                RoundIcon(LineIcons.Download, goTasks, size = 46.dp, iconSize = 24.dp, tint = P.text)
+                if (active > 0) Text("$active", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 4.dp).clip(CircleShape)
+                        .background(P.brand).widthIn(min = 16.dp).padding(horizontal = 4.dp))
+            }
+        }
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            if (vm.items.isEmpty() || vm.fresh) EmptyHome(vm) else ResultList(vm)
+        }
+        Composer(vm, focus)
+    }
+}
+
+@Composable
+private fun EmptyHome(vm: MainViewModel) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 28.dp), verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally) {
+        Spark(46.dp, busy = !vm.ready)       // 首次启动准备解析引擎时，星芒在「思考」
+        Spacer(Modifier.height(18.dp))
+        Text(vm.greeting, fontFamily = Serif, fontSize = 30.sp, lineHeight = 40.sp, color = P.text, textAlign = TextAlign.Center)
+        if (vm.fresh && vm.items.isNotEmpty()) {
+            Spacer(Modifier.height(22.dp))
+            OutlineButton("回到刚才的 ${vm.items.size} 个解析结果", icon = LineIcons.List) { vm.backToResults() }
+        }
+        Spacer(Modifier.height(60.dp))
+    }
+}
+
+@Composable
+private fun ResultList(vm: MainViewModel) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 2.dp, bottom = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 4.dp)) {
+                val ok = vm.items.count { it.state == "ok" }
+                val busy = vm.items.count { it.state == "parsing" }
+                Column(Modifier.weight(1f)) {
+                    Text("解析结果", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = P.text)
+                    Text("$ok / ${vm.items.size} 个视频" + if (busy > 0) " · 正在解析 $busy 个" else "", fontSize = 12.sp, color = P.text3)
+                }
+                RoundIcon(LineIcons.Trash, { vm.clearItems() }, size = 38.dp, iconSize = 19.dp)
+                Spacer(Modifier.width(4.dp))
+                PrimaryButton("全部下载", icon = LineIcons.Download, enabled = ok > 0) { vm.downloadAll() }
+            }
+        }
+        items(vm.items, key = { "v${it.id}" }) { VideoCard(it, vm) }
+    }
+}
+
+/** Claude 式输入框：圆角大框，左下「+」和选项胶囊，右下黑色按钮（空着时一键粘贴解析，有字时变成橙色发送箭头）。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun Composer(vm: MainViewModel, focus: FocusRequester) {
+    val ctx = LocalContext.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    var text by rememberSaveable { mutableStateOf("") }
+    var plusMenu by remember { mutableStateOf(false) }
+    var sheet by remember { mutableStateOf(false) }
+    fun pasteAndParse() {
+        val clip = clipboardText(ctx)
+        if (clip.isBlank()) vm.toast("剪贴板里没有文字，先去 App 里复制链接") else vm.submit(clip)
+    }
+    Surface(shape = RoundedCornerShape(26.dp), color = P.surface, border = BorderStroke(1.dp, P.border), shadowElevation = 3.dp,
+        modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 8.dp)) {
+        Column(Modifier.padding(start = 16.dp, end = 10.dp, top = 14.dp, bottom = 10.dp)) {
+            BasicTextField(value = text, onValueChange = { text = it }, maxLines = 5,
+                textStyle = TextStyle(fontSize = 16.sp, color = P.text, lineHeight = 22.sp), cursorBrush = SolidColor(P.accent),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                decorationBox = { inner ->
+                    Box {
+                        if (text.isEmpty()) Text("粘贴视频链接或分享文字…", fontSize = 16.sp, color = P.text4, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis)
+                        inner()
+                    }
+                })
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box {
+                    RoundIcon(LineIcons.Plus, { plusMenu = true }, style = "outline", size = 38.dp, iconSize = 20.dp)
+                    DropdownMenu(plusMenu, { plusMenu = false }, containerColor = P.surface, shape = RoundedCornerShape(14.dp)) {
+                        MenuItem(LineIcons.Clipboard, "粘贴剪贴板里的链接") { plusMenu = false; pasteAndParse() }
+                        MenuItem(LineIcons.Settings, "下载选项") { plusMenu = false; sheet = true }
+                        MenuItem(LineIcons.Globe, "网站登录信息") { plusMenu = false; vm.showCookieHelp = true }
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                val summary = listOfNotNull(if (vm.wantSubs) "字幕" else null, if (vm.wantCover) "封面" else null,
+                    if (vm.wantDanmaku) "弹幕版" else null).joinToString(" · ").ifEmpty { "仅视频" }
+                Row(Modifier.clip(CircleShape).background(P.chip).clickable { sheet = true }
+                    .padding(start = 14.dp, end = 10.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(summary, fontSize = 14.sp, color = P.text2, maxLines = 1)
+                    Spacer(Modifier.width(4.dp))
+                    LIcon(LineIcons.ChevronDown, P.text3, 16.dp)
+                }
+                Spacer(Modifier.weight(1f))
+                if (text.isBlank()) RoundIcon(LineIcons.Clipboard, { pasteAndParse() }, style = "primary", size = 40.dp, iconSize = 20.dp)
+                else RoundIcon(LineIcons.ArrowUp, { vm.submit(text); text = ""; keyboard?.hide() }, style = "accent",
+                    size = 40.dp, iconSize = 21.dp)
+            }
+        }
+    }
+    if (sheet) ModalBottomSheet(onDismissRequest = { sheet = false }, containerColor = P.bg) {
+        Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 28.dp).verticalScroll(rememberScrollState())) {
+            Text("下载选项", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = P.text,
+                modifier = Modifier.padding(start = 6.dp, bottom = 12.dp))
+            SettingsGroup { DownloadOptionRows(vm) }
+            Spacer(Modifier.height(16.dp))
+            SettingsGroup { BackgroundRows(vm) }
+        }
+    }
+}
+
+@Composable
+private fun MenuItem(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, color: Color = P.text, onClick: () -> Unit) {
+    DropdownMenuItem(text = { Text(text, color = color, fontSize = 15.sp) }, onClick = onClick,
+        leadingIcon = { LIcon(icon, if (color == P.text) P.text2 else color, 19.dp) })
+}
+
+@Composable
+private fun DownloadOptionRows(vm: MainViewModel) {
+    SettingsRow(LineIcons.Subtitles, "同时下载字幕", "有中文 / 原语言字幕时，和视频同名保存") {
+        Switch(vm.wantSubs, { vm.toggleSubs(it) })
+    }
+    SettingsRow(LineIcons.Image, "同时保存封面", "下载视频时把封面原图存到相册") {
+        Switch(vm.wantCover, { vm.toggleCover(it) })
+    }
+    SettingsRow(LineIcons.Danmaku, "B站弹幕版", if (vm.wantDanmaku) "开：只下载弹幕版（弹幕画进视频，下载完需等一会儿）"
+                else "关：只下载原视频", divider = false) {
+        Switch(vm.wantDanmaku, { vm.toggleDanmaku(it) })
+    }
+}
+
+@Composable
+private fun BackgroundRows(vm: MainViewModel) {
+    val ctx = LocalContext.current
+    SettingsRow(LineIcons.Bell, "后台下载不限速", if (vm.bgUnrestricted) "已开启：锁屏后也全速下载" else "未开启：锁屏后可能被系统限速",
+        subtitleColor = if (vm.bgUnrestricted) P.ok else P.warn, onClick = if (vm.bgUnrestricted) null else ({ requestUnrestricted(ctx, vm) })) {
+        if (!vm.bgUnrestricted) Text("去开启", color = P.accent, fontSize = 14.sp)
+    }
+    val sites = vm.cookieSites
+    val expired = sites.filter { it.expired }
+    SettingsRow(LineIcons.Globe, "网站登录信息", when {
+        sites.isEmpty() -> "未导入：网站提示「需要登录」「人机验证」时导入"
+        expired.isNotEmpty() -> "已导入 ${sites.joinToString("、") { it.name }}（${expired.joinToString("、") { it.name }} 已过期）"
+        else -> "已导入：${sites.joinToString("、") { it.name }}"
+    }, subtitleColor = if (sites.isNotEmpty() && expired.isEmpty()) P.ok else null, divider = false,
+        onClick = { if (sites.isEmpty()) vm.showCookieHelp = true else vm.showCookieManager = true }) {
+        LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
+    }
+}
+
+// ================================================================ 视频卡片
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun VideoCard(item: VideoItem, vm: MainViewModel) {
     val ctx = LocalContext.current
     val login = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         if (it.resultCode == android.app.Activity.RESULT_OK) vm.onBiliLoggedIn()
     }
-    var menu by remember { mutableStateOf(false) }
-    Column(Modifier.padding(horizontal = 4.dp, vertical = 6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("视频解析下载器", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFF312E81),
-                modifier = Modifier.weight(1f))
-            val b = vm.bili
-            val label = when {
-                b == null -> "B站"
-                b.loggedIn -> "B站 · ${b.name.take(8)}" + if (b.vipLabel.isNotEmpty()) "（${b.vipLabel}）" else ""
-                b.expired -> "B站登录已失效"
-                else -> "B站登录"
+    CardBox(padding = 12.dp) {
+        Row {
+            Box(Modifier.size(width = 124.dp, height = 70.dp).clip(RoundedCornerShape(10.dp)).background(P.subtle)
+                .border(1.dp, P.border, RoundedCornerShape(10.dp))
+                .clickable(enabled = item.state == "ok" && item.thumbnail.isNotEmpty()) { vm.coverItem = item },
+                contentAlignment = Alignment.Center) {
+                when {
+                    item.thumbnail.isNotEmpty() -> AsyncImage(item.thumbnail, null, contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize())
+                    item.state == "parsing" -> Spark(30.dp, busy = true)
+                    item.state == "error" -> Text("解析失败", color = P.text3, fontSize = 12.sp)
+                    else -> Text(item.platform, color = P.text3, fontSize = 12.sp)
+                }
             }
-            Box {
-                Text(label, color = Color(0xFF3730A3), fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
-                    modifier = Modifier.clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = 0.8f))
-                        .clickable {
-                            if (b?.loggedIn == true) menu = true
-                            else login.launch(Intent(ctx, BiliLoginActivity::class.java))
-                        }
-                        .padding(horizontal = 12.dp, vertical = 6.dp))
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("重新登录") }, onClick = {
-                        menu = false; login.launch(Intent(ctx, BiliLoginActivity::class.java))
-                    })
-                    DropdownMenuItem(text = { Text("退出登录") }, onClick = { menu = false; vm.logoutBili() })
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 15.sp, lineHeight = 20.sp,
+                    fontWeight = if (item.state == "ok") FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (item.state == "ok") P.text else P.text3)
+                Spacer(Modifier.height(5.dp))
+                when (item.state) {
+                    "parsing" -> Text("正在解析…", color = P.text3, fontSize = 13.sp)
+                    "error" -> Row {
+                        LIcon(LineIcons.Alert, P.err, 15.dp, Modifier.padding(top = 2.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(item.error, color = P.err, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    }
+                    else -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        PlatformTag(item.platform)
+                        Text("  " + listOf(item.uploader, fmtDuration(item.duration)).filter { it.isNotEmpty() }.joinToString(" · "),
+                            color = P.text3, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             }
         }
-        Text(if (vm.ready) "在抖音、B站等 App 里点「分享 → 视频解析下载器」，或粘贴链接" else "首次启动，正在准备解析引擎…",
-            fontSize = 13.sp, color = Soft)
-    }
-}
-
-@Composable
-private fun InputCard(vm: MainViewModel) {
-    val ctx = LocalContext.current
-    var text by remember { mutableStateOf("") }
-    Glass {
-        OutlinedTextField(
-            value = text, onValueChange = { text = it },
-            placeholder = { Text("粘贴分享链接，或 App 里「复制链接」得到的整段文字", fontSize = 14.sp) },
-            modifier = Modifier.fillMaxWidth().heightIn(min = 90.dp),
-            shape = RoundedCornerShape(12.dp),
-            colors = OutlinedTextFieldDefaults.colors(
-                unfocusedContainerColor = Color.White.copy(alpha = 0.7f), focusedContainerColor = Color.White,
-                unfocusedBorderColor = Color.White, focusedBorderColor = Color(0xFFA5B4FC)),
-        )
-        Spacer(Modifier.height(10.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedButton(onClick = {
-                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val clip = cm.primaryClip?.getItemAt(0)?.coerceToText(ctx)?.toString().orEmpty()
-                if (clip.isBlank()) vm.toast("剪贴板里没有文字") else vm.submit(clip)
-            }, shape = RoundedCornerShape(12.dp)) { Text("粘贴并解析") }
-            Spacer(Modifier.weight(1f))
-            GradientButton("解  析", enabled = text.isNotBlank()) { vm.submit(text); text = "" }
-        }
-    }
-}
-
-@Composable
-private fun OptionRow(title: String, desc: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()
-        .clip(RoundedCornerShape(10.dp)).clickable { onChange(!checked) }.padding(vertical = 4.dp)) {
-        Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 14.sp, color = Ink, fontWeight = FontWeight.Medium)
-            Text(desc, fontSize = 11.sp, color = Soft, lineHeight = 15.sp)
-        }
-        Switch(checked = checked, onCheckedChange = onChange)
-    }
-}
-
-@Composable
-private fun OptionsCard(vm: MainViewModel) {
-    val ctx = LocalContext.current
-    Glass {
-        Text("下载选项", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF312E81))
-        OptionRow("同时下载字幕", "有中文 / 原语言字幕时，和视频同名保存", vm.wantSubs) { vm.toggleSubs(it) }
-        OptionRow("同时保存封面", "下载视频时把封面原图存到相册", vm.wantCover) { vm.toggleCover(it) }
-        OptionRow("B站弹幕版", if (vm.wantDanmaku) "开：只下载弹幕版（弹幕画进视频，下载完需等一会儿）"
-                   else "关：只下载原视频", vm.wantDanmaku) { vm.toggleDanmaku(it) }
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
-            Column(Modifier.weight(1f)) {
-                Text("后台下载不限速", fontSize = 14.sp, color = Ink, fontWeight = FontWeight.Medium)
-                Text(if (vm.bgUnrestricted) "已开启：锁屏后也全速下载" else "未开启：锁屏后可能被系统限速",
-                    fontSize = 11.sp, color = if (vm.bgUnrestricted) Color(0xFF059669) else Color(0xFFD97706))
+        if (item.state == "ok") {
+            val hasChips = item.history.isNotEmpty() || item.subs.isNotEmpty() || item.collection != null || item.danmaku
+            if (hasChips) FlowRow(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (item.history.isNotEmpty()) Tag("✓ 已下载 " + item.history.joinToString("、") { it.quality }, P.tintOk, P.ok)
+                if (item.subs.isNotEmpty()) Tag("字幕 " + item.subs.joinToString("/"), P.tintInfo, P.info)
+                if (item.danmaku) Tag(if (vm.wantDanmaku) "弹幕版" else "有弹幕", P.tintAccent, P.accent) {
+                    vm.toast(if (vm.wantDanmaku) "将生成弹幕版（只保存弹幕版）。不想要可以在输入框的选项里关掉"
+                             else "这个视频有弹幕。在输入框的选项里打开「B站弹幕版」可以下载弹幕版")
+                }
+                item.collection?.let { c ->
+                    val pos = when {
+                        c.count < 0 -> ""
+                        c.current >= 0 -> " ${c.current + 1}/${c.count}"
+                        else -> " ${c.count} 个"
+                    }
+                    Row(Modifier.clip(RoundedCornerShape(6.dp)).border(1.dp, P.borderStrong, RoundedCornerShape(6.dp))
+                        .clickable { vm.openCollection(item) }.padding(horizontal = 7.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        LIcon(LineIcons.List, P.text2, 13.dp)
+                        Text(" ${c.kind}$pos · 选集", fontSize = 12.sp, color = P.text2)
+                    }
+                }
             }
-            if (!vm.bgUnrestricted) TextButton(onClick = { requestUnrestricted(ctx, vm) }) { Text("去开启") }
+            Spacer(Modifier.height(10.dp))
+            QualitySelector(item)
+            if (item.locked.isNotEmpty()) Text(
+                "🔒 ${item.locked}：" + if (vm.bili?.loggedIn == true) "需要大会员账号" else "点这里登录 B站 解锁",
+                color = P.text3, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)
+                    .then(if (vm.bili?.loggedIn == true) Modifier else Modifier.clickable {
+                        login.launch(Intent(ctx, BiliLoginActivity::class.java))
+                    }))
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (item.thumbnail.isNotEmpty()) RoundIcon(LineIcons.Image, { vm.coverItem = item }, size = 38.dp, iconSize = 19.dp)
+                RoundIcon(LineIcons.X, { vm.remove(item) }, size = 38.dp, iconSize = 19.dp)
+                Spacer(Modifier.weight(1f))
+                PrimaryButton("下载", icon = LineIcons.Download) { vm.download(item) }
+            }
+        } else {
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { vm.remove(item) }) { Text("移除", color = P.text3) }
+                if (item.state == "error") OutlineButton("重试", icon = LineIcons.Refresh) { vm.parse(item) }
+            }
         }
-        CookieRow(vm)
+        // 这个视频的下载进度
+        vm.tasks.filter { it.item === item }.forEach { TaskLine(it, vm) }
     }
 }
 
 @Composable
-private fun CookieRow(vm: MainViewModel) {
-    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { vm.importCookies(it) }
-    }
-    val sites = vm.cookieSites
-    val expired = sites.filter { it.expired }
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
-        Column(Modifier.weight(1f)) {
-            Text("网站登录信息", fontSize = 14.sp, color = Ink, fontWeight = FontWeight.Medium)
-            Text(when {
-                sites.isEmpty() -> "未导入：网站提示「需要登录」「人机验证」时导入"
-                expired.isNotEmpty() -> "已导入 ${sites.joinToString("、") { it.name }}（${expired.joinToString("、") { it.name }} 已过期）"
-                else -> "已导入：${sites.joinToString("、") { it.name }}"
-            }, fontSize = 11.sp, color = if (sites.isNotEmpty() && expired.isEmpty()) Color(0xFF059669) else Soft,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
+private fun QualitySelector(item: VideoItem) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).border(1.dp, P.borderStrong, RoundedCornerShape(12.dp))
+            .clickable { open = true }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(item.options.getOrNull(item.selected)?.label ?: "", fontSize = 14.sp, color = P.text, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            LIcon(LineIcons.ChevronDown, P.text3, 18.dp)
         }
-        TextButton(onClick = { vm.showCookieHelp = true }) { Text("说明", color = Soft) }
-        if (sites.isNotEmpty()) TextButton(onClick = { vm.showCookieManager = true }) { Text("管理", color = Soft) }
-        TextButton(onClick = { pick.launch(arrayOf("text/plain", "text/*", "application/octet-stream", "*/*")) }) {
-            Text("导入")
+        DropdownMenu(open, { open = false }, containerColor = P.surface, shape = RoundedCornerShape(14.dp)) {
+            item.options.forEachIndexed { i, o ->
+                DropdownMenuItem(text = { Text(o.label, fontSize = 14.sp, color = P.text) },
+                    trailingIcon = { if (i == item.selected) LIcon(LineIcons.Check, P.accent, 18.dp) },
+                    onClick = { item.selected = i; open = false })
+            }
         }
     }
 }
+
+// ================================================================ 下载进度
+
+@Composable
+private fun taskStatus(task: DownloadTask): Pair<String, Color> = when (task.status) {
+    "queued" -> "等待中" to P.text3
+    "running" -> ("${(task.progress * 100).toInt()}%" + if (task.stage.isNotEmpty()) " · ${task.stage}" else "") to P.brand
+    "merging" -> "合并音视频…" to P.info
+    "converting" -> "转换为 MP4…" to P.info
+    "burning" -> ("生成弹幕版 ${(task.progress * 100).toInt()}%" + if (task.stage.isNotEmpty()) " · ${task.stage}" else "") to P.accent
+    "saving" -> "保存到下载文件夹…" to P.info
+    "done" -> (if (task.note.isNotEmpty()) "已完成 · ${task.note}" else "已完成") to (if (task.note.isNotEmpty()) P.warn else P.ok)
+    "cancelled" -> "已取消" to P.text3
+    else -> "失败：${task.error}" to P.err
+}
+
+@Composable
+private fun taskBarColor(task: DownloadTask) = when (task.status) {
+    "done" -> P.ok
+    "failed" -> P.err
+    "cancelled" -> P.text4
+    "burning" -> P.accent
+    "merging", "converting", "saving" -> P.info
+    else -> P.brand
+}
+
+private fun taskDetail(task: DownloadTask) = listOfNotNull(
+    if (task.total > 0 && task.status == "running") "${fmtSize(task.done).ifEmpty { "0 MB" }} / ${fmtSize(task.total)}"
+    else if (task.total > 0 && task.status == "done") fmtSize(task.total) else null,
+    if (task.status == "running" && task.speed > 0) "${fmtSize(task.speed)}/s" else null,
+).joinToString(" · ")
+
+/** 嵌在视频卡片里的一行进度 */
+@Composable
+private fun TaskLine(task: DownloadTask, vm: MainViewModel) {
+    val ctx = LocalContext.current
+    Column(Modifier.padding(top = 10.dp)) {
+        Box(Modifier.fillMaxWidth().height(1.dp).background(P.border))
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val (status, color) = taskStatus(task)
+            Text(task.tag + if (task.burn) " 弹幕版" else "", fontSize = 13.sp, color = P.text2)
+            Spacer(Modifier.width(8.dp))
+            Text(status, fontSize = 13.sp, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false))
+            Spacer(Modifier.width(6.dp))
+            Text(taskDetail(task), fontSize = 12.sp, color = P.text3, maxLines = 1, modifier = Modifier.weight(1f))
+            when {
+                task.active -> RoundIcon(LineIcons.X, { vm.cancel(task) }, size = 32.dp, iconSize = 17.dp)
+                task.status == "done" -> RoundIcon(LineIcons.PlayCircle, { task.savedUri?.let { openUri(ctx, it, task.mime, vm) } },
+                    size = 32.dp, iconSize = 19.dp, tint = P.ok)
+                else -> RoundIcon(LineIcons.Refresh, { vm.retry(task) }, size = 32.dp, iconSize = 17.dp)
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        ProgressLine(if (task.status == "done") 1f else task.progress, taskBarColor(task),
+            indeterminate = task.status in setOf("merging", "converting", "saving"))
+    }
+}
+
+// ================================================================ 下载页
+
+@Composable
+private fun TasksScreen(vm: MainViewModel, back: () -> Unit) {
+    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+        TopBar("下载", back) {
+            if (vm.tasks.any { !it.active }) TextButton(onClick = { vm.tasks.filter { !it.active }.forEach { vm.removeTask(it) } }) {
+                Text("清除已结束", color = P.text2)
+            }
+        }
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (vm.tasks.isEmpty()) item {
+                EmptyState("还没有下载任务", "在首页粘贴链接，选好清晰度点「下载」；下载在后台进行，通知栏显示进度")
+            }
+            items(vm.tasks.reversed(), key = { "t${it.id}" }) { TaskCard(it, vm) }
+        }
+    }
+}
+
+@Composable
+private fun EmptyState(title: String, sub: String) {
+    Column(Modifier.fillMaxWidth().padding(top = 90.dp, start = 20.dp, end = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Spark(38.dp, color = P.text4)
+        Spacer(Modifier.height(14.dp))
+        Text(title, fontFamily = Serif, fontSize = 20.sp, color = P.text2)
+        Spacer(Modifier.height(8.dp))
+        Text(sub, fontSize = 13.sp, color = P.text3, textAlign = TextAlign.Center, lineHeight = 19.sp)
+    }
+}
+
+@Composable
+private fun TaskCard(task: DownloadTask, vm: MainViewModel) {
+    val ctx = LocalContext.current
+    CardBox(padding = 12.dp) {
+        Row {
+            Box(Modifier.size(width = 96.dp, height = 54.dp).clip(RoundedCornerShape(8.dp)).background(P.subtle)) {
+                if (task.item.thumbnail.isNotEmpty()) AsyncImage(task.item.thumbnail, null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize())
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(task.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold, color = P.text,
+                    fontSize = 14.sp, lineHeight = 19.sp)
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    PlatformTag(task.item.platform)
+                    val extras = listOfNotNull(if (task.burn) "弹幕版" else null,
+                        if (task.subCount > 0) "+${task.subCount} 个字幕" else null, if (task.coverSaved) "+封面" else null)
+                    Text("  ${task.tag}" + extras.joinToString("") { "  $it" }, color = P.text3, fontSize = 12.sp, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        ProgressLine(if (task.status == "done") 1f else task.progress, taskBarColor(task), height = 6.dp,
+            indeterminate = task.status in setOf("merging", "converting", "saving"))
+        val (status, color) = taskStatus(task)
+        Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(status + if (task.status == "done" && task.note.isEmpty()) " · 已保存到「下载/${Storage.FOLDER}」" else "",
+                    color = color, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                val detail = taskDetail(task)
+                if (detail.isNotEmpty() && task.status != "done") Text(detail, color = P.text3, fontSize = 12.sp)
+            }
+            when {
+                task.active -> OutlineButton("取消") { vm.cancel(task) }
+                task.status == "done" -> {
+                    TextButton(onClick = { vm.removeTask(task) }) { Text("移除", color = P.text3) }
+                    PrimaryButton("打开", icon = LineIcons.PlayCircle) { task.savedUri?.let { openUri(ctx, it, task.mime, vm) } }
+                }
+                else -> {
+                    TextButton(onClick = { vm.removeTask(task) }) { Text("移除", color = P.text3) }
+                    OutlineButton("重试", icon = LineIcons.Refresh) { vm.retry(task) }
+                }
+            }
+        }
+    }
+}
+
+// ================================================================ 历史页
+
+@Composable
+private fun HistoryScreen(vm: MainViewModel, back: () -> Unit) {
+    val ctx = LocalContext.current
+    var confirmClear by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
+        TopBar("历史记录", back) {
+            if (vm.history.isNotEmpty()) RoundIcon(LineIcons.Trash, { confirmClear = true }, size = 44.dp, iconSize = 21.dp)
+        }
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp).fillMaxWidth().clip(RoundedCornerShape(14.dp))
+            .background(P.surface).border(1.dp, P.border, RoundedCornerShape(14.dp)).padding(horizontal = 12.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            LIcon(LineIcons.Search, P.text3, 19.dp)
+            Spacer(Modifier.width(10.dp))
+            BasicTextField(value = vm.historySearch, onValueChange = { vm.historySearch = it; vm.loadHistory(it) }, singleLine = true,
+                textStyle = TextStyle(fontSize = 15.sp, color = P.text), cursorBrush = SolidColor(P.accent),
+                modifier = Modifier.weight(1f),
+                decorationBox = { inner -> Box { if (vm.historySearch.isEmpty()) Text("搜索标题、作者或平台", color = P.text4, fontSize = 15.sp); inner() } })
+        }
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 20.dp)) {
+            item {
+                Text("共 ${vm.history.size} 条下载记录", fontSize = 12.sp, color = P.text3, modifier = Modifier.padding(start = 22.dp, top = 6.dp, bottom = 4.dp))
+            }
+            if (vm.history.isEmpty()) item {
+                EmptyState(if (vm.historySearch.isEmpty()) "还没有下载记录" else "没有找到记录",
+                    if (vm.historySearch.isEmpty()) "下载完成的视频会记录在这里，方便再次打开或重新下载" else "换个关键词试试")
+            }
+            items(vm.history, key = { "h${it.id}" }) { h ->
+                var menu by remember { mutableStateOf(false) }
+                Row(Modifier.fillMaxWidth().clickable {
+                    if (h.exists) openUri(ctx, Uri.parse(h.uri), "video/*", vm) else menu = true
+                }.padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(h.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 15.sp, lineHeight = 20.sp,
+                            color = if (h.exists) P.text else P.text3)
+                        Spacer(Modifier.height(5.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            PlatformTag(h.platform)
+                            Text("  " + listOf(h.quality, fmtSize(h.size), fmtAgo(h.ts)).filter { it.isNotEmpty() }.joinToString(" · ") +
+                                if (!h.exists) " · 文件已删除" else "", fontSize = 12.sp, color = P.text3, maxLines = 1,
+                                overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    Box {
+                        RoundIcon(LineIcons.More, { menu = true }, size = 40.dp, iconSize = 20.dp)
+                        DropdownMenu(menu, { menu = false }, containerColor = P.surface, shape = RoundedCornerShape(14.dp)) {
+                            if (h.exists) MenuItem(LineIcons.PlayCircle, "打开") { menu = false; openUri(ctx, Uri.parse(h.uri), "video/*", vm) }
+                            if (h.url.isNotEmpty()) MenuItem(LineIcons.Refresh, "重新解析") { menu = false; vm.submitUrls(listOf(h.url)); back() }
+                            MenuItem(LineIcons.Trash, "删除记录", P.err) { menu = false; vm.deleteHistory(h) }
+                        }
+                    }
+                }
+                Box(Modifier.padding(start = 20.dp, end = 20.dp).fillMaxWidth().height(1.dp).background(P.border))
+            }
+        }
+    }
+    if (confirmClear) VdAlert(
+        title = "清空下载历史？", text = "只删除记录，不会删除已经下载的视频文件。",
+        confirm = "清空", danger = true, onConfirm = { confirmClear = false; vm.clearHistory() }, onDismiss = { confirmClear = false })
+}
+
+// ================================================================ 设置页（Claude 手机版设置的样子）
+
+@Composable
+private fun SettingsScreen(vm: MainViewModel, back: () -> Unit) {
+    val ctx = LocalContext.current
+    val login = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (it.resultCode == android.app.Activity.RESULT_OK) vm.onBiliLoggedIn()
+    }
+    var accountMenu by remember { mutableStateOf(false) }
+    var editName by remember { mutableStateOf(false) }
+    var credits by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+        TopBar("设置", back)
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            // 账号卡片
+            val b = vm.bili
+            Box {
+                Surface(shape = RoundedCornerShape(18.dp), color = P.surface, border = BorderStroke(1.dp, P.border),
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).clickable {
+                        if (b?.loggedIn == true) accountMenu = true else login.launch(Intent(ctx, BiliLoginActivity::class.java))
+                    }) {
+                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Avatar(if (b?.loggedIn == true) b.name else vm.nickname, 44.dp)
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(when {
+                                b?.loggedIn == true -> b.name
+                                b?.expired == true -> "B站登录已失效"
+                                else -> "未登录 B站"
+                            }, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = P.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(if (b?.loggedIn == true) "B站账号 · 点击管理" else "扫码登录，解锁 1080P 高码率 / 4K 等大会员画质",
+                                fontSize = 12.sp, color = P.text3)
+                        }
+                        if (b?.loggedIn == true && b.vipLabel.isNotEmpty()) Text(b.vipLabel, color = P.onPrimary, fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold, modifier = Modifier.clip(CircleShape).background(P.primary)
+                                .padding(horizontal = 10.dp, vertical = 4.dp))
+                        Spacer(Modifier.width(6.dp))
+                        LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
+                    }
+                }
+                DropdownMenu(accountMenu, { accountMenu = false }, containerColor = P.surface, shape = RoundedCornerShape(14.dp)) {
+                    MenuItem(LineIcons.Tv, "重新扫码登录") { accountMenu = false; login.launch(Intent(ctx, BiliLoginActivity::class.java)) }
+                    MenuItem(LineIcons.LogOut, "退出 B站登录", P.err) { accountMenu = false; vm.logoutBili() }
+                }
+            }
+            SettingsGroup("下载") { DownloadOptionRows(vm) }
+            SettingsGroup("后台与登录") {
+                BackgroundRows(vm)
+            }
+            SettingsGroup("外观") {
+                SettingsRow(LineIcons.Monitor, "主题", when (vm.themeMode) { "light" -> "浅色"; "dark" -> "深色"; else -> "跟随系统" }) {
+                    Row(Modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, P.borderStrong, RoundedCornerShape(12.dp)).padding(3.dp)) {
+                        listOf("system" to LineIcons.Monitor, "light" to LineIcons.Sun, "dark" to LineIcons.Moon).forEach { (m, icon) ->
+                            Box(Modifier.size(36.dp).clip(RoundedCornerShape(9.dp))
+                                .background(if (vm.themeMode == m) P.selected else Color.Transparent)
+                                .clickable { vm.changeTheme(m) }, contentAlignment = Alignment.Center) {
+                                LIcon(icon, if (vm.themeMode == m) P.text else P.text3, 19.dp)
+                            }
+                        }
+                    }
+                }
+                SettingsRow(LineIcons.User, "首页该怎么称呼你？", vm.nickname.ifEmpty { "未设置：首页只打招呼，不带名字" }, divider = false,
+                    onClick = { editName = true }) { LIcon(LineIcons.ChevronRight, P.text3, 18.dp) }
+            }
+            SettingsGroup("关于") {
+                SettingsRow(LineIcons.Info, "版本", "视频解析下载器 ${vm.appVersion}")
+                SettingsRow(LineIcons.Github, "GitHub 项目主页", "源码、更新说明和电脑版下载", onClick = { openWeb(ctx, GITHUB_URL) }) {
+                    LIcon(LineIcons.External, P.text3, 18.dp)
+                }
+                SettingsRow(LineIcons.Heart, "致谢与开源许可", "yt-dlp、FFmpeg、思源宋体等", divider = false, onClick = { credits = true }) {
+                    LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
+                }
+            }
+            Text("这个软件的代码几乎全部由 Claude 编写。图标「星芒落点」和界面风格是向 Claude 应用致敬的原创设计，" +
+                "不是 Anthropic 的官方作品，本项目与 Anthropic 没有任何官方关系。",
+                fontSize = 12.sp, color = P.text3, lineHeight = 18.sp, modifier = Modifier.padding(horizontal = 6.dp))
+            Spacer(Modifier.height(20.dp))
+        }
+    }
+    if (editName) {
+        var name by remember { mutableStateOf(vm.nickname) }
+        AlertDialog(onDismissRequest = { editName = false }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
+            title = { Text("首页该怎么称呼你？", color = P.text, fontSize = 18.sp) },
+            text = {
+                Column {
+                    Text("显示在首页的问候语里，比如「晚上好，Moyer」。留空就只打招呼。", fontSize = 13.sp, color = P.text3)
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(name, { name = it.take(20) }, singleLine = true, placeholder = { Text("例如：Moyer") },
+                        shape = RoundedCornerShape(12.dp))
+                }
+            },
+            confirmButton = { TextButton(onClick = { vm.changeNickname(name); editName = false }) { Text("保存", color = P.accent) } },
+            dismissButton = { TextButton(onClick = { editName = false }) { Text("取消", color = P.text2) } })
+    }
+    if (credits) VdAlert(title = "致谢与开源许可",
+        text = "· yt-dlp：视频解析核心（Unlicense）\n· FFmpeg：音视频处理（电脑版内置，GPL）\n" +
+            "· Media3 / Compose / Coil：安卓界面与视频处理（Apache 2.0）\n" +
+            "· Chaquopy：在安卓上运行 Python\n· 思源宋体（Noto Serif SC）：标题字体，截取常用字后改名 VDSerif（SIL Open Font License 1.1）",
+        confirm = "知道了", onConfirm = { credits = false }, onDismiss = { credits = false })
+}
+
+@Composable
+private fun VdAlert(title: String, text: String, confirm: String, danger: Boolean = false, dismiss: String? = "取消",
+                    onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
+        title = { Text(title, color = P.text, fontSize = 18.sp) },
+        text = { Text(text, color = P.text2, fontSize = 14.sp, lineHeight = 21.sp, modifier = Modifier.verticalScroll(rememberScrollState())) },
+        confirmButton = { TextButton(onClick = onConfirm) { Text(confirm, color = if (danger) P.err else P.accent) } },
+        dismissButton = if (dismiss != null && confirm != "知道了") ({ TextButton(onClick = onDismiss) { Text(dismiss, color = P.text2) } }) else null)
+}
+
+// ================================================================ 登录信息 / 后台 / 封面 / 重复下载
 
 @Composable
 private fun CookieManagerDialog(vm: MainViewModel) {
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.importCookies(it) } }
     AlertDialog(
-        onDismissRequest = { vm.showCookieManager = false },
-        title = { Text("已导入的登录信息") },
+        onDismissRequest = { vm.showCookieManager = false }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
+        title = { Text("已导入的登录信息", color = P.text, fontSize = 18.sp) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 vm.cookieSites.forEach { s ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
                         Column(Modifier.weight(1f)) {
-                            Text(s.name, fontSize = 14.sp, color = Ink, fontWeight = FontWeight.Medium)
+                            Text(s.name, fontSize = 15.sp, color = P.text)
                             Text((if (s.ageDays > 0) "${s.ageDays} 天前导入" else "今天导入") + " · ${s.count} 条" +
-                                if (s.expired) " · 已过期" else "",
-                                fontSize = 11.sp, color = if (s.expired) Color(0xFFD97706) else Soft)
+                                if (s.expired) " · 已过期" else "", fontSize = 12.sp, color = if (s.expired) P.warn else P.text3)
                         }
-                        TextButton(onClick = { vm.clearCookies(s) }) { Text("清除", color = Color(0xFFDC2626)) }
+                        TextButton(onClick = { vm.clearCookies(s) }) { Text("清除", color = P.err) }
                     }
                 }
-                Text("过期或失效后，重新导出再导入即可（同一网站会自动替换）。", fontSize = 11.sp, color = Soft,
+                Text("过期或失效后，重新导出再导入即可（同一网站会自动替换）。", fontSize = 12.sp, color = P.text3,
                     modifier = Modifier.padding(top = 6.dp))
             }
         },
-        confirmButton = { TextButton(onClick = { vm.showCookieManager = false }) { Text("关闭") } },
+        confirmButton = {
+            TextButton(onClick = { pick.launch(arrayOf("text/plain", "text/*", "application/octet-stream", "*/*")) }) {
+                Text("导入", color = P.accent)
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { vm.showCookieManager = false; vm.showCookieHelp = true }) { Text("说明", color = P.text2) }
+                TextButton(onClick = { vm.showCookieManager = false }) { Text("关闭", color = P.text2) }
+            }
+        },
     )
 }
 
 @Composable
 private fun CookieHelpDialog(vm: MainViewModel) {
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { vm.showCookieHelp = false; vm.importCookies(it) }
+    }
     AlertDialog(
-        onDismissRequest = { vm.showCookieHelp = false },
-        title = { Text("导入网站登录信息") },
+        onDismissRequest = { vm.showCookieHelp = false }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
+        title = { Text("导入网站登录信息", color = P.text, fontSize = 18.sp) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text("有些网站要登录才能下载（如 TikTok、Vimeo），YouTube 有时会拦截 VPN 节点要求「人机验证」。" +
-                    "这些网站没法在 App 里直接登录，可以借电脑浏览器导出登录信息：", fontSize = 13.sp)
+                    "这些网站没法在 App 里直接登录，可以借电脑浏览器导出登录信息：", fontSize = 14.sp, color = P.text2, lineHeight = 21.sp)
                 Spacer(Modifier.height(8.dp))
                 listOf(
                     "电脑浏览器（Chrome / Edge / Firefox）安装扩展「Get cookies.txt LOCALLY」",
                     "在浏览器里登录这个网站（YouTube 建议用小号、在无痕窗口里登录），打开网站首页",
                     "点扩展图标 → Export，得到类似 www.tiktok.com_cookies.txt 的文件",
                     "YouTube：导出后关掉无痕窗口（继续用它浏览会让导出的登录信息失效）",
-                    "把文件传到手机（微信 / QQ 文件传输都行），在这里点「导入」选中它；也可以在文件管理器里把它「分享」给本应用",
+                    "把文件传到手机（微信 / QQ 文件传输都行），点下面的「导入」选中它；也可以在文件管理器里把它「分享」给本应用",
                 ).forEachIndexed { i, t ->
-                    Text("${i + 1}. $t", fontSize = 13.sp, modifier = Modifier.padding(vertical = 2.dp))
+                    Text("${i + 1}. $t", fontSize = 14.sp, color = P.text2, lineHeight = 21.sp, modifier = Modifier.padding(vertical = 2.dp))
                 }
                 Spacer(Modifier.height(8.dp))
-                Text("登录信息只保存在本机这个 App 里，每个网站单独保存，可以随时在「管理」里清除。B站 不用这样，点右上角「B站登录」扫码即可。",
-                    fontSize = 12.sp, color = Soft)
+                Text("登录信息只保存在本机这个 App 里，每个网站单独保存，可以随时在「设置 → 网站登录信息」里清除。" +
+                    "B站 不用这样，在设置页顶部扫码登录即可。", fontSize = 12.sp, color = P.text3, lineHeight = 18.sp)
             }
         },
-        confirmButton = { TextButton(onClick = { vm.showCookieHelp = false }) { Text("知道了") } },
+        confirmButton = {
+            TextButton(onClick = { pick.launch(arrayOf("text/plain", "text/*", "application/octet-stream", "*/*")) }) {
+                Text("导入", color = P.accent)
+            }
+        },
+        dismissButton = { TextButton(onClick = { vm.showCookieHelp = false }) { Text("关闭", color = P.text2) } },
     )
 }
 
@@ -430,119 +931,48 @@ private fun requestUnrestricted(ctx: Context, vm: MainViewModel) {
 @Composable
 private fun BatteryDialog(vm: MainViewModel) {
     val ctx = LocalContext.current
-    AlertDialog(
-        onDismissRequest = { vm.askBattery = false },
-        title = { Text("让后台下载不被限速？") },
-        text = { Text("很多手机锁屏后会限制后台 App 的网速，下载会变得很慢。\n\n" +
-            "点「去开启」，在弹出的窗口里选「允许」即可。之后也可以在「下载选项」里开启。") },
-        confirmButton = { TextButton(onClick = { vm.askBattery = false; requestUnrestricted(ctx, vm) }) { Text("去开启") } },
-        dismissButton = { TextButton(onClick = { vm.askBattery = false }) { Text("以后再说") } },
-    )
+    VdAlert(title = "让后台下载不被限速？",
+        text = "很多手机锁屏后会限制后台 App 的网速，下载会变得很慢。\n\n点「去开启」，在弹出的窗口里选「允许」即可。之后也可以在「设置」里开启。",
+        confirm = "去开启", dismiss = "以后再说", onConfirm = { vm.askBattery = false; requestUnrestricted(ctx, vm) },
+        onDismiss = { vm.askBattery = false })
 }
 
 @Composable
 private fun CoverDialog(item: VideoItem, vm: MainViewModel) {
     Dialog(onDismissRequest = { vm.coverItem = null }) {
-        Surface(shape = RoundedCornerShape(18.dp), color = Color.White) {
-            Column(Modifier.padding(14.dp)) {
-                Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold,
-                    color = Ink, fontSize = 14.sp)
-                Spacer(Modifier.height(10.dp))
+        Surface(shape = RoundedCornerShape(22.dp), color = P.surface) {
+            Column(Modifier.padding(16.dp)) {
+                Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold, color = P.text, fontSize = 15.sp)
+                Spacer(Modifier.height(12.dp))
                 AsyncImage(item.thumbnail, "封面", contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(10.dp)))
-                Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("保存原图到相册（JPG）", fontSize = 11.sp, color = Soft, modifier = Modifier.weight(1f))
-                    TextButton(onClick = { vm.coverItem = null }) { Text("关闭", color = Soft) }
-                    GradientButton("保存封面") { vm.saveCoverNow(item); vm.coverItem = null }
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(12.dp)))
+                Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("保存原图到相册（JPG）", fontSize = 12.sp, color = P.text3, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { vm.coverItem = null }) { Text("关闭", color = P.text2) }
+                    PrimaryButton("保存封面", icon = LineIcons.Download) { vm.saveCoverNow(item); vm.coverItem = null }
                 }
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-private fun VideoCard(item: VideoItem, vm: MainViewModel, goTasks: () -> Unit) {
-    Glass {
-        Row {
-            Box(Modifier.size(width = 128.dp, height = 72.dp).clip(RoundedCornerShape(10.dp))
-                .background(Brush.linearGradient(listOf(Color(0xFFC7D2FE), Color(0xFFE9D5FF))))
-                .clickable(enabled = item.state == "ok" && item.thumbnail.isNotEmpty()) { vm.coverItem = item }) {
-                if (item.thumbnail.isNotEmpty()) AsyncImage(item.thumbnail, null, contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize())
-                else Text(when (item.state) { "parsing" -> "解析中"; "error" -> "失败"; else -> item.platform },
-                    color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.Center))
+private fun DuplicateDialog(item: VideoItem, hit: HistoryHit, vm: MainViewModel) {
+    val ctx = LocalContext.current
+    AlertDialog(
+        onDismissRequest = { vm.duplicate = null }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
+        title = { Text("已经下载过了", color = P.text, fontSize = 18.sp) },
+        text = { Text("「${item.title}」的「${hit.quality}」在 ${fmtTime(hit.ts)} 下载过，还要再下载一次吗？", color = P.text2, fontSize = 14.sp) },
+        confirmButton = {
+            TextButton(onClick = { vm.duplicate = null; vm.startDownload(item); vm.toast("✓ 已加入下载") }) { Text("重新下载", color = P.accent) }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { vm.duplicate = null }) { Text("取消", color = P.text2) }
+                TextButton(onClick = { vm.duplicate = null; openUri(ctx, Uri.parse(hit.uri), "video/*", vm) }) { Text("打开已有文件", color = P.text) }
             }
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(item.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold,
-                    color = if (item.state == "ok") Ink else Soft, fontSize = 14.sp)
-                Spacer(Modifier.height(4.dp))
-                when (item.state) {
-                    "parsing" -> Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                        Text("  正在解析…", color = Indigo, fontSize = 12.sp)
-                    }
-                    "error" -> Text(item.error, color = Color(0xFFDC2626), fontSize = 12.sp, maxLines = 2)
-                    else -> Row(verticalAlignment = Alignment.CenterVertically) {
-                        PlatformChip(item.platform)
-                        Text("  " + listOf(item.uploader, fmtDuration(item.duration)).filter { it.isNotEmpty() }
-                            .joinToString(" · "), color = Soft, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                }
-            }
-        }
-        if (item.state == "ok") {
-            // 标签：已下载 / 字幕 / 合集
-            val chips = item.history.isNotEmpty() || item.subs.isNotEmpty() || item.collection != null
-            if (chips) {
-                FlowRow(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (item.history.isNotEmpty()) Chip("✓ 已下载 " + item.history.joinToString("、") { it.quality },
-                        Color(0xFFD1FAE5), Color(0xFF047857))
-                    if (item.subs.isNotEmpty()) Chip("字幕 " + item.subs.joinToString("/"), Color(0xFFDBEAFE), Color(0xFF1D4ED8))
-                    if (item.danmaku) Chip(if (vm.wantDanmaku) "弹幕版" else "有弹幕", Color(0xFFFCE7F3), Color(0xFFBE185D)) {
-                        vm.toast(if (vm.wantDanmaku) "将生成弹幕版（只保存弹幕版）。不想要可以在「下载选项」里关掉"
-                                 else "这个视频有弹幕。打开「下载选项 → B站弹幕版」可以下载弹幕版")
-                    }
-                    item.collection?.let { c ->
-                        val pos = when {
-                            c.count < 0 -> ""
-                            c.current >= 0 -> " ${c.current + 1}/${c.count}"
-                            else -> " ${c.count} 个"
-                        }
-                        Chip("${c.kind}$pos · 选集 ›", Color(0xFFEDE9FE), Color(0xFF6D28D9)) { vm.openCollection(item) }
-                    }
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-            var expanded by remember { mutableStateOf(false) }
-            ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
-                OutlinedTextField(
-                    value = item.options.getOrNull(item.selected)?.label ?: "", onValueChange = {}, readOnly = true,
-                    label = { Text("清晰度 / 格式") },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth().menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
-                )
-                ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    item.options.forEachIndexed { i, o ->
-                        DropdownMenuItem(text = { Text(o.label) }, onClick = { item.selected = i; expanded = false })
-                    }
-                }
-            }
-            if (item.locked.isNotEmpty()) Text(
-                "🔒 ${item.locked}：" + if (vm.bili?.loggedIn == true) "需要大会员账号" else "点右上角「B站登录」解锁",
-                color = Soft, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { vm.remove(item) }) { Text("移除", color = Soft) }
-            if (item.state == "ok" && item.thumbnail.isNotEmpty()) TextButton(onClick = { vm.coverItem = item }) { Text("封面") }
-            if (item.state == "error") TextButton(onClick = { vm.parse(item) }) { Text("重试") }
-            Spacer(Modifier.weight(1f))
-            if (item.state == "ok") GradientButton("下载") { vm.download(item); if (vm.duplicate == null) goTasks() }
-        }
-    }
+        },
+    )
 }
 
 // ================================================================ 选集
@@ -559,59 +989,63 @@ private fun EpisodeDialog(sheet: EpisodeSheet, vm: MainViewModel) {
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = maxOf(0, sheet.current - 2))
 
     Dialog(onDismissRequest = { vm.episodeSheet = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(Modifier.fillMaxSize().background(BgBrush).systemBarsPadding().padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("选集", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF312E81))
-                    Text("${sheet.kind}：${sheet.title.ifEmpty { "未命名" }}（共 ${sheet.episodes.size} 个）",
-                        fontSize = 12.sp, color = Soft, maxLines = 2)
-                }
-                TextButton(onClick = { vm.episodeSheet = null }) { Text("关闭") }
+        Column(Modifier.fillMaxSize().background(P.bg).systemBarsPadding().padding(horizontal = 14.dp)) {
+            TopBar("选集", { vm.episodeSheet = null })
+            Text("${sheet.kind}：${sheet.title.ifEmpty { "未命名" }}（共 ${sheet.episodes.size} 个）", fontSize = 13.sp, color = P.text3,
+                maxLines = 2, modifier = Modifier.padding(horizontal = 6.dp))
+            Row(Modifier.padding(vertical = 10.dp).fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(P.surface)
+                .border(1.dp, P.border, RoundedCornerShape(14.dp)).padding(horizontal = 12.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                LIcon(LineIcons.Search, P.text3, 19.dp)
+                Spacer(Modifier.width(10.dp))
+                BasicTextField(search, { search = it }, singleLine = true, textStyle = TextStyle(fontSize = 15.sp, color = P.text),
+                    cursorBrush = SolidColor(P.accent), modifier = Modifier.weight(1f),
+                    decorationBox = { inner -> Box { if (search.isEmpty()) Text("搜索标题…", color = P.text4, fontSize = 15.sp); inner() } })
             }
-            OutlinedTextField(value = search, onValueChange = { search = it }, singleLine = true,
-                placeholder = { Text("搜索标题…") }, shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                fun setAll(f: (Episode) -> Boolean) = sheet.episodes.forEach { e ->
-                    if (e.url !in known && e.index != sheet.current) checked[e.index] = f(e)
-                }
-                Chip("全选", Color.White, Indigo) { visible.forEach { if (it.url !in known && it.index != sheet.current) checked[it.index] = true } }
-                Chip("全不选", Color.White, Indigo) { setAll { false } }
-                Chip("反选", Color.White, Indigo) { visible.forEach { if (it.url !in known && it.index != sheet.current) checked[it.index] = !checked[it.index] } }
-                if (sheet.current >= 0) Chip("当前之后全部", Color.White, Indigo) { setAll { it.index > sheet.current } }
+                fun ok(e: Episode) = e.url !in known && e.index != sheet.current
+                fun setAll(f: (Episode) -> Boolean) = sheet.episodes.forEach { e -> if (ok(e)) checked[e.index] = f(e) }
+                SmallChip("全选") { visible.forEach { if (ok(it)) checked[it.index] = true } }
+                SmallChip("全不选") { setAll { false } }
+                SmallChip("反选") { visible.forEach { if (ok(it)) checked[it.index] = !checked[it.index] } }
+                if (sheet.current >= 0) SmallChip("当前之后") { setAll { it.index > sheet.current } }
                 Spacer(Modifier.weight(1f))
-                Text("已选 $count", fontSize = 12.sp, color = Soft)
+                Text("已选 $count", fontSize = 12.sp, color = P.text3)
             }
             LazyColumn(Modifier.weight(1f).padding(vertical = 6.dp), state = listState) {
                 items(visible, key = { it.index }) { e ->
                     val have = e.url in known || e.index == sheet.current
-                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-                        .background(if (checked[e.index]) Color(0xFFE0E7FF) else Color.Transparent)
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                        .background(if (checked[e.index]) P.tintAccent else Color.Transparent)
                         .clickable(enabled = !have) { checked[e.index] = !checked[e.index] }
                         .padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = checked[e.index], onCheckedChange = { checked[e.index] = it }, enabled = !have)
                         Column(Modifier.weight(1f)) {
                             Text("${e.index + 1}. ${e.title}", fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                                color = if (have) Soft else Ink)
+                                color = if (have) P.text3 else P.text)
                             val meta = listOfNotNull(fmtDuration(e.duration).ifEmpty { null },
                                 if (e.index == sheet.current) "▶ 当前" else null, if (e.url in known) "已在列表里" else null)
-                            if (meta.isNotEmpty()) Text(meta.joinToString(" · "), fontSize = 11.sp, color = Soft)
+                            if (meta.isNotEmpty()) Text(meta.joinToString(" · "), fontSize = 12.sp, color = P.text3)
                         }
                     }
                 }
             }
-            Glass {
+            CardBox(Modifier.padding(bottom = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("解析完自动下载", fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    Text("解析完自动下载", fontSize = 15.sp, color = P.text, modifier = Modifier.weight(1f))
                     Switch(checked = autoDl, onCheckedChange = { autoDl = it })
                 }
                 if (autoDl) Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     listOf(0 to "最高", 1080 to "1080p", 720 to "720p", 480 to "480p").forEach { (v, name) ->
-                        FilterChip(selected = res == v, onClick = { res = v }, label = { Text(name) })
+                        Text(name, fontSize = 13.sp, color = if (res == v) P.accent else P.text2,
+                            modifier = Modifier.clip(CircleShape)
+                                .background(if (res == v) P.tintAccent else Color.Transparent)
+                                .border(1.dp, if (res == v) P.accent.copy(alpha = 0.4f) else P.borderStrong, CircleShape)
+                                .clickable { res = v }.padding(horizontal = 12.dp, vertical = 6.dp))
                     }
                 }
-                Spacer(Modifier.height(6.dp))
-                GradientButton(if (count > 0) "加入解析（$count）" else "请勾选要下载的视频", Modifier.fillMaxWidth(), enabled = count > 0) {
+                Spacer(Modifier.height(10.dp))
+                PrimaryButton(if (count > 0) "加入解析（$count）" else "请勾选要下载的视频", Modifier.fillMaxWidth(), enabled = count > 0) {
                     vm.addEpisodes(sheet.episodes.filter { checked[it.index] }, autoDl, res)
                 }
             }
@@ -620,164 +1054,7 @@ private fun EpisodeDialog(sheet: EpisodeSheet, vm: MainViewModel) {
 }
 
 @Composable
-private fun DuplicateDialog(item: VideoItem, hit: HistoryHit, vm: MainViewModel) {
-    val ctx = LocalContext.current
-    AlertDialog(
-        onDismissRequest = { vm.duplicate = null },
-        title = { Text("已经下载过了") },
-        text = { Text("「${item.title}」的「${hit.quality}」在 ${fmtTime(hit.ts)} 下载过，还要再下载一次吗？") },
-        confirmButton = {
-            TextButton(onClick = { vm.duplicate = null; vm.startDownload(item); vm.toast("✓ 已加入下载") }) { Text("重新下载") }
-        },
-        dismissButton = {
-            Row {
-                TextButton(onClick = { vm.duplicate = null }) { Text("取消") }
-                TextButton(onClick = { vm.duplicate = null; openUri(ctx, Uri.parse(hit.uri), "video/*", vm) }) { Text("打开已有文件") }
-            }
-        },
-    )
-}
-
-// ================================================================ 下载页
-
-@Composable
-private fun TasksPage(vm: MainViewModel) {
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                SectionTitle("下载任务")
-                Spacer(Modifier.weight(1f))
-                if (vm.tasks.any { !it.active }) TextButton(onClick = {
-                    vm.tasks.filter { !it.active }.forEach { vm.removeTask(it) }
-                }) { Text("清除已结束", color = Soft) }
-            }
-        }
-        if (vm.tasks.isEmpty()) item {
-            Text("还没有下载任务。在「解析」页选好清晰度点「下载」，下载会在后台进行，通知栏显示进度。",
-                color = Soft, fontSize = 13.sp, modifier = Modifier.padding(8.dp))
-        }
-        items(vm.tasks, key = { "t${it.id}" }) { TaskCard(it, vm) }
-    }
-}
-
-@Composable
-private fun TaskCard(task: DownloadTask, vm: MainViewModel) {
-    val ctx = LocalContext.current
-    Glass {
-        Text(task.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold, color = Ink, fontSize = 14.sp)
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
-            PlatformChip(task.item.platform)
-            val extras = listOfNotNull(
-                if (task.burn) "弹幕版" else null,
-                if (task.subCount > 0) "+${task.subCount} 个字幕" else null,
-                if (task.coverSaved) "+封面" else null,
-            )
-            Text("  ${task.tag}" + extras.joinToString("") { "  $it" }, color = Soft, fontSize = 12.sp)
-        }
-        val (statusText, color) = when (task.status) {
-            "queued" -> "等待中" to Soft
-            "running" -> ("下载中" + if (task.stage.isNotEmpty()) " · ${task.stage}" else "") to Indigo
-            "merging" -> "合并音视频…" to Color(0xFF9333EA)
-            "converting" -> "转换为 MP4…" to Color(0xFF9333EA)
-            "burning" -> ("生成弹幕版 ${(task.progress * 100).toInt()}%" +
-                if (task.stage.isNotEmpty()) " · ${task.stage}" else "") to Color(0xFFBE185D)
-            "saving" -> "保存到下载文件夹…" to Color(0xFF9333EA)
-            "done" -> (if (task.note.isNotEmpty()) "已完成 · ${task.note}"
-                       else "已完成 · 已保存到「下载/${Storage.FOLDER}」") to
-                if (task.note.isNotEmpty()) Color(0xFFD97706) else Color(0xFF059669)
-            "cancelled" -> "已取消" to Soft
-            else -> "失败：${task.error}" to Color(0xFFDC2626)
-        }
-        LinearProgressIndicator(
-            progress = { if (task.status == "done") 1f else task.progress },
-            modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
-            color = when (task.status) { "done" -> Color(0xFF10B981); "burning" -> Color(0xFFEC4899); else -> Indigo },
-            trackColor = Color.White,
-        )
-        val detail = listOfNotNull(
-            if (task.total > 0) "${fmtSize(task.done)} / ${fmtSize(task.total)}" else null,
-            if (task.status == "running" && task.speed > 0) "${fmtSize(task.speed)}/s" else null,
-        ).joinToString("  ·  ")
-        Text(statusText + if (detail.isNotEmpty() && task.status == "running") "    $detail" else "",
-            color = color, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp), maxLines = 2)
-        Row {
-            Spacer(Modifier.weight(1f))
-            when {
-                task.active -> TextButton(onClick = { vm.cancel(task) }) { Text("取消") }
-                task.status == "done" -> {
-                    TextButton(onClick = { vm.removeTask(task) }) { Text("移除", color = Soft) }
-                    GradientButton("打开") { task.savedUri?.let { openUri(ctx, it, task.mime, vm) } }
-                }
-                else -> {
-                    TextButton(onClick = { vm.removeTask(task) }) { Text("移除", color = Soft) }
-                    TextButton(onClick = { vm.retry(task) }) { Text("重试") }
-                }
-            }
-        }
-    }
-}
-
-// ================================================================ 历史页
-
-@Composable
-private fun HistoryPage(vm: MainViewModel, goParse: () -> Unit) {
-    val ctx = LocalContext.current
-    var confirmClear by remember { mutableStateOf(false) }
-    LazyColumn(
-        Modifier.fillMaxSize().imePadding(),
-        contentPadding = PaddingValues(14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                SectionTitle("下载历史")
-                Text("  ${vm.history.size} 条", fontSize = 12.sp, color = Soft)
-                Spacer(Modifier.weight(1f))
-                if (vm.history.isNotEmpty()) TextButton(onClick = { confirmClear = true }) { Text("清空", color = Soft) }
-            }
-        }
-        item {
-            OutlinedTextField(value = vm.historySearch, onValueChange = { vm.historySearch = it; vm.loadHistory(it) },
-                singleLine = true, placeholder = { Text("搜索标题 / 作者 / 平台") }, shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(unfocusedContainerColor = Color.White.copy(alpha = 0.7f),
-                    focusedContainerColor = Color.White, unfocusedBorderColor = Color.White))
-        }
-        if (vm.history.isEmpty()) item {
-            Text("还没有下载记录。", color = Soft, fontSize = 13.sp, modifier = Modifier.padding(8.dp))
-        }
-        items(vm.history, key = { "h${it.id}" }) { h ->
-            Glass {
-                Text(h.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold,
-                    color = if (h.exists) Ink else Soft, fontSize = 14.sp)
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
-                    PlatformChip(h.platform)
-                    Text("  ${h.quality} · ${fmtSize(h.size)} · ${fmtTime(h.ts)}" + if (!h.exists) " · 文件已删除" else "",
-                        fontSize = 12.sp, color = Soft, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                Row {
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { vm.deleteHistory(h) }) { Text("删除记录", color = Soft) }
-                    if (h.url.isNotEmpty()) TextButton(onClick = { vm.submitUrls(listOf(h.url)); goParse() }) { Text("重新解析") }
-                    if (h.exists) GradientButton("打开") { openUri(ctx, Uri.parse(h.uri), "video/*", vm) }
-                }
-            }
-        }
-        item {
-            val ver = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() }
-            Text("视频解析下载器 v${ver ?: "?"}", fontSize = 11.sp, color = Soft.copy(alpha = 0.7f),
-                modifier = Modifier.fillMaxWidth().padding(top = 12.dp), textAlign = TextAlign.Center)
-        }
-    }
-    if (confirmClear) AlertDialog(
-        onDismissRequest = { confirmClear = false },
-        title = { Text("清空下载历史？") },
-        text = { Text("只删除记录，不会删除已经下载的视频文件。") },
-        confirmButton = { TextButton(onClick = { confirmClear = false; vm.clearHistory() }) { Text("清空") } },
-        dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("取消") } },
-    )
+private fun SmallChip(text: String, onClick: () -> Unit) {
+    Text(text, fontSize = 13.sp, color = P.text2, modifier = Modifier.clip(CircleShape).border(1.dp, P.borderStrong, CircleShape)
+        .clickable(onClick = onClick).padding(horizontal = 11.dp, vertical = 5.dp))
 }

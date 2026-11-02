@@ -6,37 +6,47 @@ import sys
 import threading
 import time
 import traceback
+import weakref
 from logging.handlers import RotatingFileHandler
 
 import shiboken6
-from PySide6.QtCore import QByteArray, QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import QByteArray, QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal, QObject
+from PySide6.QtGui import (
+    QAction, QActionGroup, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon, QKeySequence, QPainter,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSplitter,
-    QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
-from . import APP_NAME, APP_VERSION, bilibili, core, task_store, theme
+from . import APP_NAME, APP_VERSION, bilibili, core, greetings, icons, task_store, theme, ui
 from .bili_dialog import BiliLoginDialog
+from .config import ROOT, Settings, ffmpeg_dir
 from .episode_dialog import EpisodeDialog
+from .history import History
 from .hotkey import GlobalHotkey
 from .section_dialog import SectionDialog
-from .config import ROOT, Settings, ffmpeg_dir
-from .history import History
-from .settings_dialog import SettingsDialog
-from .widgets import (
-    SPINNER, CoverDialog, CoverView, ElidedLabel, GlassCard, GradientBackground, ThumbLoader, Toast, cover_url,
-    platform_pill, save_cover_bytes,
-)
+from .settings_dialog import SettingsPanel
+from .theme import c
+from .ui import Card, Chip, Combo, Composer, HLine, IconButton, NavItem, PlatformTag, ProgressLine, SelectButton, Spark
+from .widgets import CoverDialog, CoverView, ElidedLabel, ThumbLoader, cover_url, save_cover_bytes
 
 log = logging.getLogger('app')
 
-PRESETS = [('逐个选择（默认最高）', None), ('全部最高画质', 'best'), ('全部 1080p', 1080), ('全部 720p', 720),
-           ('全部 480p', 480), ('全部 360p', 360), ('全部仅音频 MP3', 'mp3')]
+GITHUB_URL = 'https://github.com/MoyerZhang-Claude/video-downloader'
+
+# 输入框下方的清晰度预设：(键, 名称, 取值, 说明)
+PRESETS = [('pick', '逐个选择', None, '每个视频默认最高画质，可在卡片里单独改'),
+           ('best', '全部最高画质', 'best', ''), ('1080', '全部 1080p', 1080, '没有时取更低一档'),
+           ('720', '全部 720p', 720, ''), ('480', '全部 480p', 480, ''), ('360', '全部 360p', 360, ''),
+           ('mp3', '全部仅音频 MP3', 'mp3', '')]
+PRESET_BY_KEY = {k: (name, val, tip) for k, name, val, tip in PRESETS}
 
 PROGRESS_STATE = {core.DONE: 'done', core.EXISTS: 'done', core.FAILED: 'failed', core.PAUSED: 'paused',
                   core.CANCELED: 'paused', core.MERGING: 'merging'}
+
+COLUMN = 860        # 中间内容列的最大宽度
 
 
 def fmt_duration(sec):
@@ -52,6 +62,26 @@ def fmt_speed(bps):
     return f'{core.fmt_size(bps)}/s' if bps else ''
 
 
+def fmt_ago(ts):
+    d = time.time() - ts
+    if d < 60:
+        return '刚刚'
+    if d < 3600:
+        return f'{int(d // 60)} 分钟前'
+    then = datetime.datetime.fromtimestamp(ts)
+    days = (datetime.date.today() - then.date()).days
+    if days == 0:
+        return f'{int(d // 3600)} 小时前'
+    if days == 1:
+        return f'昨天 {then:%H:%M}'
+    if days < 7:
+        return f'{days} 天前'
+    return f'{then:%Y-%m-%d}' if then.year != datetime.date.today().year else f'{then:%m-%d}'
+
+
+greeting = greetings.greeting       # 首页问候语：按时间、星期、节日随机（见 greetings.py）
+
+
 def reveal_in_explorer(path):
     if path and os.path.exists(path):
         subprocess.Popen(['explorer', '/select,', os.path.normpath(path)])
@@ -65,6 +95,82 @@ def app_icon_path():
         if os.path.isfile(p):
             return p
     return ''
+
+
+# ---------------------------------------------------------------- 小工具
+
+_themed_buttons = weakref.WeakKeyDictionary()     # 带图标的按钮 → (图标名, 颜色令牌)，换主题时重新着色
+
+
+def set_btn_icon(btn, name, role):
+    _themed_buttons[btn] = (name, role)
+    btn.setIcon(icons.icon(name, c(role), 16))
+    btn.setIconSize(QSize(16, 16))
+
+
+def _refresh_btn_icons():
+    for btn, (name, role) in list(_themed_buttons.items()):
+        if shiboken6.isValid(btn):
+            btn.setIcon(icons.icon(name, c(role), 16))
+
+
+def button(text, slot=None, name='', tip='', icon=None, icon_role='text2'):
+    b = QPushButton(text)
+    if name:
+        b.setObjectName(name)
+    b.setCursor(Qt.PointingHandCursor)
+    if tip:
+        b.setToolTip(tip)
+    if slot:
+        b.clicked.connect(slot)
+    if icon:
+        set_btn_icon(b, icon, {'primary': 'on_primary', 'accent': 'on_accent'}.get(name, icon_role))
+    return b
+
+
+def label(text='', name='', wrap=False):
+    lab = QLabel(text)
+    if name:
+        lab.setObjectName(name)
+    lab.setWordWrap(wrap)
+    return lab
+
+
+def restyle(w, name=None):
+    if name is not None:
+        w.setObjectName(name)
+    w.style().unpolish(w)
+    w.style().polish(w)
+
+
+def clear_widget(name='clear'):
+    w = QWidget()
+    w.setObjectName(name)
+    return w
+
+
+def centered(inner, max_w=COLUMN, margins=(24, 0, 24, 0)):
+    """把 inner 放在居中、有最大宽度的一列里。"""
+    outer = clear_widget()
+    h = QHBoxLayout(outer)
+    h.setContentsMargins(*margins)
+    h.setSpacing(0)
+    inner.setMaximumWidth(max_w)
+    h.addStretch(1)
+    h.addWidget(inner, 100)
+    h.addStretch(1)
+    return outer
+
+
+def scroll_area(content):
+    sa = QScrollArea()
+    sa.setWidgetResizable(True)
+    sa.setFrameShape(QFrame.NoFrame)
+    sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    sa.viewport().setAutoFillBackground(False)
+    sa.setWidget(content)
+    sa.verticalScrollBar().setSingleStep(24)
+    return sa
 
 
 class Bridge(QObject):
@@ -87,10 +193,12 @@ class ResultRow:
         self.video = None
         self.error = ''
         self.error_raw = ''
+        self.card = None
         self.combo = None
         self.cover = None
-        self.busy_label = None
         self.badge = None
+        self.dl_btn = None
+        self.spark = None
         self.auto_download = False   # 从选集加入：解析完自动下载
         self.from_collection = False
 
@@ -99,56 +207,294 @@ class ResultRow:
         return cover_url(self.video.info) if self.video else ''
 
 
-def button(text, slot, name='small', tip=''):
-    b = QPushButton(text)
-    b.setObjectName(name)
-    b.setCursor(Qt.PointingHandCursor)
-    if tip:
-        b.setToolTip(tip)
-    b.clicked.connect(slot)
-    return b
+# ---------------------------------------------------------------- 卡片
+
+class ResultCard(Card):
+    """一条解析结果：上半部分随解析状态重建，下半部分是这个视频的下载进度（一直保留）。"""
+
+    def __init__(self):
+        super().__init__(radius=16)
+        self.v = QVBoxLayout(self)
+        self.v.setContentsMargins(14, 14, 16, 14)
+        self.v.setSpacing(12)
+        self.body = None
+        self.tasks = QVBoxLayout()
+        self.tasks.setSpacing(10)
+        self.v.addLayout(self.tasks)
+
+    def set_body(self, w):
+        if self.body is not None:
+            self.v.removeWidget(self.body)
+            for sp in self.body.findChildren(Spark):
+                sp.set_busy(False)
+            self.body.deleteLater()
+        self.body = w
+        self.v.insertWidget(0, w)
 
 
-def restyle(w, name=None, **props):
-    if name is not None:
-        w.setObjectName(name)
-    for k, v in props.items():
-        w.setProperty(k, v)
-    w.style().unpolish(w)
-    w.style().polish(w)
+class TaskView(Card):
+    """一个下载任务。compact=True：嵌在解析结果卡片里的进度条；否则是「下载」页里的一张卡片。"""
 
-
-def hbox_cell(*widgets, margins=(6, 0, 6, 0), spacing=6, stretch_end=True):
-    w = QWidget()
-    h = QHBoxLayout(w)
-    h.setContentsMargins(*margins)
-    h.setSpacing(spacing)
-    for x in widgets:
-        h.addWidget(x)
-    if stretch_end:
-        h.addStretch(1)
-    return w
-
-
-def vbox_cell(*widgets, margins=(6, 8, 6, 8), spacing=4):
-    w = QWidget()
-    v = QVBoxLayout(w)
-    v.setContentsMargins(*margins)
-    v.setSpacing(spacing)
-    v.addStretch(1)
-    for x in widgets:
-        if isinstance(x, QWidget):
-            v.addWidget(x)
+    def __init__(self, win, task, compact):
+        super().__init__(radius=14, fill=None if compact else 'surface', border=None if compact else 'border')
+        self.win, self.task, self.compact = win, task, compact
+        self.state = None
+        self.b1 = IconButton('pause', '暂停', size=30, icon_size=17)
+        self.b2 = IconButton('x', '取消', size=30, icon_size=17)
+        self.b3 = IconButton('folder', '打开所在文件夹', size=30, icon_size=17)
+        self.b1.clicked.connect(lambda: win._task_primary(self.task))
+        self.b2.clicked.connect(lambda: win._task_secondary(self.task))
+        self.b3.clicked.connect(lambda: reveal_in_explorer(self.task.filepath or self.task._expected_name
+                                                           or self.task.out_dir))
+        self.bar = ProgressLine(height=5 if compact else 6)
+        self.status = label('', 'metaStrong')
+        self.detail = ElidedLabel('', 'meta')
+        self.name = None
+        self.cover = None
+        btns = QHBoxLayout()
+        btns.setSpacing(2)
+        for b in (self.b1, self.b2, self.b3):
+            btns.addWidget(b)
+        if compact:
+            v = QVBoxLayout(self)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(6)
+            v.addWidget(HLine())
+            top = QHBoxLayout()
+            top.setSpacing(8)
+            icon = QLabel()
+            icon.setPixmap(icons.pixmap('download', c('text3'), 15))
+            self._icon = icon
+            self.tag = label(self._tag_text(), 'metaStrong')
+            top.addWidget(icon)
+            top.addWidget(self.tag)
+            top.addWidget(self.status)
+            top.addWidget(self.detail, 1)
+            top.addLayout(btns)
+            v.addLayout(top)
+            v.addWidget(self.bar)
         else:
-            v.addLayout(x)
-    v.addStretch(1)
-    return w
+            h = QHBoxLayout(self)
+            h.setContentsMargins(12, 12, 12, 12)
+            h.setSpacing(14)
+            url = cover_url(task.video.info)
+            self.cover = CoverView(112, 63, radius=8)
+            self.cover.set_placeholder(task.video.platform)
+            self.cover_url = url
+            if win.thumbs.get(url):
+                self.cover.set_pixmap(win.thumbs.get(url))
+            elif url:
+                win.thumbs.request(url, task.video.info.get('webpage_url') or task.video.url)
+            h.addWidget(self.cover, 0, Qt.AlignTop)
+            col = QVBoxLayout()
+            col.setSpacing(6)
+            self.name = ElidedLabel(task.video.title, 'cardTitle')
+            col.addWidget(self.name)
+            line = QHBoxLayout()
+            line.setSpacing(8)
+            line.addWidget(PlatformTag(task.video.platform))
+            self.tag = ElidedLabel(self._tag_text(), 'meta')
+            line.addWidget(self.tag, 1)
+            col.addLayout(line)
+            col.addWidget(self.bar)
+            bottom = QHBoxLayout()
+            bottom.setSpacing(8)
+            bottom.addWidget(self.status)
+            bottom.addWidget(self.detail, 1)
+            col.addLayout(bottom)
+            h.addLayout(col, 1)
+            h.addLayout(btns)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(lambda pos: win._task_menu(self.task, self.mapToGlobal(pos)))
+        self.refresh()
 
+    def _tag_text(self):
+        task = self.task
+        s = self.win.settings
+        extras = ['封面'] if task.save_cover else []
+        if task.save_danmaku and s.save_danmaku and core.has_danmaku(task.video.info):
+            extras.append('弹幕')
+        if task.save_subs and s.save_subs and any(core.pick_subtitles(task.video.info, s.sub_langs)):
+            extras.append('字幕')
+        return task.tag.replace('] [', ' · ') + ''.join(f' + {x}' for x in extras)
+
+    def mouseDoubleClickEvent(self, e):
+        if self.task.status in (core.DONE, core.EXISTS):
+            self.win._open_file(self.task)
+
+    def refresh(self):
+        task = self.task
+        s = task.status
+        if self.name is not None and task.filepath:
+            self.name.set_full_text(os.path.basename(task.filepath), task.filepath)
+        if self.compact:
+            self._icon.setPixmap(icons.pixmap('download', c('text3'), 15))
+        state = PROGRESS_STATE.get(s, 'running')
+        role = {'done': 'ok', 'failed': 'err', 'paused': 'text4', 'merging': 'info'}.get(state, 'brand')
+        self.bar.set_state(task.progress, role, indeterminate=(s == core.MERGING))
+
+        parts = []
+        if task.total:
+            parts.append(f'{core.fmt_size(task.downloaded) if task.downloaded else "0 MB"} / {core.fmt_size(task.total)}'
+                         if s in (core.RUNNING, core.PAUSED) and task.downloaded < task.total
+                         else core.fmt_size(task.total))
+        elif task.downloaded:
+            parts.append(core.fmt_size(task.downloaded))
+        if s in (core.DONE, core.EXISTS) and task.extras:
+            subs = [core.sub_name(x) for x in task.extras if x not in ('danmaku', 'burned')]
+            bits = (['字幕 ' + '/'.join(subs)] if subs else []) + (['弹幕'] if 'danmaku' in task.extras else []) \
+                + (['弹幕版视频'] if 'burned' in task.extras else [])
+            parts.append('已存 ' + ' + '.join(bits))
+        if s == core.RUNNING:
+            if task.speed:
+                parts.append(fmt_speed(task.speed))
+            if task.eta:
+                parts.append(f'剩余 {fmt_duration(task.eta)}')
+        self.detail.set_full_text('  ·  '.join(parts), task.error_raw or None)
+
+        status = core.STATUS_TEXT.get(s, s)
+        if s == core.RUNNING:
+            status = f'{task.progress * 100:.0f}%' + (f' · {task.stage}' if task.stage else '')
+        elif s == core.MERGING and task.stage:
+            status = f'{task.stage}…'
+        if s == core.FAILED and task.error:
+            status = f'失败：{task.error}'
+        self.status.setText(status)
+        self.status.setToolTip(task.error_raw or task.error or status)
+        self.status.setStyleSheet(f'color: {c(theme.STATUS_ROLE.get(s, "text2")).name()};')
+        self.status.setMaximumWidth(460 if s == core.FAILED else 16777215)
+
+        b1 = {core.QUEUED: ('pause', '暂停'), core.RUNNING: ('pause', '暂停'), core.PAUSED: ('play', '继续'),
+              core.FAILED: ('refresh', '重试'), core.CANCELED: ('refresh', '重试'),
+              core.DONE: ('play_circle', '打开文件'), core.EXISTS: ('play_circle', '打开文件')}.get(s, ('pause', '暂停'))
+        self.b1.set_icon(*b1)
+        self.b1.color_role = 'ok' if s in (core.DONE, core.EXISTS) else None
+        self.b1.setEnabled(s != core.MERGING)
+        finished = s in (core.DONE, core.EXISTS, core.CANCELED, core.FAILED)
+        self.b2.set_icon('trash' if finished else 'x', '从列表移除' if finished else '取消')
+        self.b2.setEnabled(s != core.MERGING or task.stage.startswith('弹幕版'))   # 生成弹幕版时可以取消
+
+
+class HistoryRow(QWidget):
+    """历史记录里的一行：平台、标题、清晰度 · 大小 · 时间；悬停时出现操作按钮。"""
+
+    def __init__(self, win, h):
+        super().__init__()
+        self.win, self.h = win, h
+        self.setAttribute(Qt.WA_Hover)
+        self.setFixedHeight(62)
+        exists = bool(h['filepath']) and os.path.exists(h['filepath'])
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 8, 10, 8)
+        lay.setSpacing(12)
+        tag_box = clear_widget()
+        tag_box.setFixedWidth(92)
+        tl = QHBoxLayout(tag_box)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.addWidget(PlatformTag(h['platform']))
+        tl.addStretch(1)
+        lay.addWidget(tag_box, 0, Qt.AlignVCenter)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        title = ElidedLabel(h['title'] or h['url'], 'rowLabel')
+        title.set_full_text(h['title'] or h['url'], f'{h["title"]}\n{h["filepath"]}' +
+                            ('' if exists else '\n（文件已被移动或删除）'))
+        if not exists:
+            title.setStyleSheet(f'color: {c("text3").name()};')
+        bits = [(h['quality'] or '').replace('] [', ' · '), core.fmt_size(h['size']) if h['size'] else '',
+                fmt_ago(h['ts'])] + ([] if exists else ['文件已不在原位置'])
+        col.addWidget(title)
+        col.addWidget(ElidedLabel('  ·  '.join(b for b in bits if b), 'meta'))
+        lay.addLayout(col, 1)
+        self.ops = clear_widget()
+        oh = QHBoxLayout(self.ops)
+        oh.setContentsMargins(0, 0, 0, 0)
+        oh.setSpacing(2)
+        for icon, tip, slot, ok in (
+                ('play_circle', '打开', lambda: os.startfile(h['filepath']), exists),
+                ('folder', '打开所在文件夹', lambda: reveal_in_explorer(h['filepath']), exists),
+                ('refresh', '重新解析', lambda: win._reparse_url(h['url']), True),
+                ('trash', '删除这条记录（不删文件）', lambda: win._delete_history(h['id']), True)):
+            b = IconButton(icon, tip, size=30, icon_size=17)
+            b.clicked.connect(slot)
+            b.setEnabled(ok)
+            oh.addWidget(b)
+        self.ops.setVisible(False)
+        lay.addWidget(self.ops)
+        self.exists = exists
+
+    def enterEvent(self, e):
+        self.ops.setVisible(True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.ops.setVisible(False)
+        super().leaveEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if self.exists:
+            os.startfile(self.h['filepath'])
+
+    def paintEvent(self, e):
+        if self.underMouse():
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(Qt.NoPen)
+            p.setBrush(c('hover'))
+            p.drawRoundedRect(QRectF(self.rect()), 10, 10)
+
+
+class AccountButton(ui._HoverButton):
+    """侧边栏左下角：头像 + 名字 + B站状态，点击弹出菜单（像 Claude 的账号菜单）。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(52)
+        self.avatar = ui.Avatar(32, self)
+        self.avatar.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.name, self.sub = '', ''
+        self.collapsed = False
+
+    def set_info(self, name, sub, initial):
+        self.name, self.sub = name, sub
+        self.avatar.set_text(initial)
+        self.setToolTip(f'{name}\n{sub}')
+        self.update()
+
+    def set_collapsed(self, on):
+        self.collapsed = on
+        self.resizeEvent(None)
+        self.update()
+
+    def resizeEvent(self, e):
+        self.avatar.move((self.width() - 32) // 2 if self.collapsed else 8, 10)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        if self._hov() or self.isDown():
+            p.setPen(Qt.NoPen)
+            p.setBrush(c('press' if self.isDown() else 'hover'))
+            p.drawRoundedRect(QRectF(self.rect()), 10, 10)
+        if self.collapsed:
+            return
+        x, w = 50, self.width() - 50 - 30
+        f = ui.px_font(13, 600)
+        p.setFont(f)
+        p.setPen(c('text'))
+        p.drawText(QRectF(x, 7, w, 20), int(Qt.AlignLeft | Qt.AlignVCenter),
+                   QFontMetrics(f).elidedText(self.name, Qt.ElideRight, w))
+        f2 = ui.px_font(12)
+        p.setFont(f2)
+        p.setPen(c('text3'))
+        p.drawText(QRectF(x, 26, w, 18), int(Qt.AlignLeft | Qt.AlignVCenter),
+                   QFontMetrics(f2).elidedText(self.sub, Qt.ElideRight, w))
+        icons.paint(p, 'chevron_down', QRectF(self.width() - 26, 18, 16, 16), c('text3'))
+
+
+# ---------------------------------------------------------------- 主窗口
 
 class MainWindow(QMainWindow):
-    R_COVER, R_VIDEO, R_QUALITY, R_OPS = range(4)
-    T_COVER, T_FILE, T_PROGRESS, T_STATUS, T_OPS = range(5)
-
     def __init__(self):
         super().__init__()
         self.settings = Settings.load()
@@ -160,7 +506,9 @@ class MainWindow(QMainWindow):
         self.thumbs.loaded.connect(self._on_thumb_loaded)
         self.rows = {}              # token -> ResultRow
         self._next_token = 1
-        self.task_widgets = {}      # task.id -> dict
+        self.task_views = {}        # task.id -> TaskView（下载页）
+        self.task_lines = {}        # task.id -> TaskView（解析结果卡片里）
+        self.task_row = {}          # task.id -> 解析结果 token
         # 启动时剪贴板里已有的内容一律不理会，只提示之后新复制的链接
         self._last_clip = QGuiApplication.clipboard().text()
         self._clip_urls = []
@@ -168,6 +516,10 @@ class MainWindow(QMainWindow):
         self.bili_account = None
         self._prev_status = {}           # task.id -> 上一次的状态（判断「刚完成」）
         self._batch_done = 0             # 本轮完成数，全部完成时提示
+        self._hist_limit = 150
+        self.page = 'parse'
+        self.fresh = False               # 点了「解析新链接」：显示首页，之前的结果暂时收起
+        self.settings_panel = None
         try:
             self.history = History()
         except Exception as e:  # noqa: BLE001 - 历史库打不开时不影响下载
@@ -184,21 +536,19 @@ class MainWindow(QMainWindow):
         self.bridge.core_update.connect(self._on_core_update)
 
         self.setWindowTitle(f'{APP_NAME} {APP_VERSION}')
+        self.setMinimumSize(980, 640)
         self._build_ui()
+        theme.signals.changed.connect(self._on_theme_changed)
         if self.settings.window_geometry:
             self.restoreGeometry(QByteArray.fromBase64(self.settings.window_geometry.encode()))
         else:
             avail = QGuiApplication.primaryScreen().availableGeometry()
-            self.resize(min(1240, int(avail.width() * 0.9)), min(820, int(avail.height() * 0.9)))
+            self.resize(min(1280, int(avail.width() * 0.9)), min(860, int(avail.height() * 0.9)))
             self.move(avail.center() - self.rect().center())
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh_status)
         self.timer.start(600)
-        self.spin_timer = QTimer(self)
-        self.spin_timer.setInterval(90)
-        self.spin_timer.timeout.connect(self._spin)
-        self._spin_i = 0
         QGuiApplication.instance().applicationStateChanged.connect(self._on_app_state)
         self._really_quit = False
         self.hotkey = GlobalHotkey(QApplication.instance(), self)
@@ -223,296 +573,638 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 界面
     def _build_ui(self):
-        bg = GradientBackground()
-        self.bg = bg
-        root = QVBoxLayout(bg)
-        root.setContentsMargins(18, 12, 18, 12)
-        root.setSpacing(12)
+        central = clear_widget('central')
+        self.central = central
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self._build_sidebar())
+        self.stack = QStackedWidget()
+        root.addWidget(self.stack, 1)
+        self.pages = {'parse': self._build_parse_page(), 'tasks': self._build_tasks_page(),
+                      'history': self._build_history_page(), 'log': self._build_log_page()}
+        for w in self.pages.values():
+            self.stack.addWidget(w)
+        self.setCentralWidget(central)
+        self.toast = ui.Toast(central)
+        QShortcut(QKeySequence('Ctrl+,'), self, activated=self._open_settings)
+        QShortcut(QKeySequence('Ctrl+L'), self, activated=self._new_parse)
+        self._set_collapsed(self.settings.sidebar_collapsed)
+        self._update_parse_mode()
+        self._refresh_recents()
+        self._go('parse')
 
-        # 标题栏
-        head = QHBoxLayout()
-        head.setSpacing(10)
-        icon = QLabel()
-        if app_icon_path():
-            icon.setPixmap(QIcon(app_icon_path()).pixmap(34, 34))
-        title = QLabel(APP_NAME)
-        title.setObjectName('appTitle')
-        sub = QLabel('粘贴分享链接 · 选择清晰度 · 一键下载')
-        sub.setObjectName('appSub')
-        tl = QVBoxLayout()
-        tl.setSpacing(0)
-        tl.addWidget(title)
-        tl.addWidget(sub)
-        head.addWidget(icon)
-        head.addLayout(tl)
-        head.addStretch(1)
-        self.bili_btn = button('B站登录', self._bili_clicked, 'pill', '扫码登录 B站，解锁 1080P 高码率 / 4K 等大会员画质')
-        head.addWidget(self.bili_btn)
-        head.addWidget(button('⚙  设置', self._open_settings, 'pill'))
-        root.addLayout(head)
+    # 侧边栏 ----------------------------------------------------------
+    def _build_sidebar(self):
+        sb = QFrame()
+        sb.setObjectName('sidebar')
+        self.sidebar = sb
+        v = QVBoxLayout(sb)
+        v.setContentsMargins(10, 12, 10, 10)
+        v.setSpacing(2)
+        top = QHBoxLayout()
+        top.setContentsMargins(6, 0, 0, 0)
+        top.setSpacing(8)
+        self.side_spark = Spark(24)
+        self.brand = label('视频解析下载器', 'brandName')
+        self.collapse_btn = IconButton('sidebar', '收起侧边栏', size=32, icon_size=18)
+        self.collapse_btn.clicked.connect(lambda: self._set_collapsed(not self.settings.sidebar_collapsed, save=True))
+        top.addWidget(self.side_spark)
+        top.addWidget(self.brand)
+        top.addStretch(1)
+        top.addWidget(self.collapse_btn)
+        self.side_top = top
+        v.addLayout(top)
+        v.addSpacing(16)
+        self.nav_new = NavItem('解析新链接', special=True)
+        self.nav_new.setCheckable(True)
+        self.nav_new.clicked.connect(self._new_parse)
+        self.nav_tasks = NavItem('下载', 'download')
+        self.nav_tasks.clicked.connect(lambda: self._go('tasks'))
+        self.nav_hist = NavItem('历史记录', 'clock')
+        self.nav_hist.clicked.connect(lambda: self._go('history'))
+        self.navs = {'parse': self.nav_new, 'tasks': self.nav_tasks, 'history': self.nav_hist}
+        for n in self.navs.values():
+            v.addWidget(n)
+        v.addSpacing(18)
+        self.recent_label = label('最近下载', 'sideSection')
+        v.addWidget(self.recent_label)
+        v.addSpacing(4)
+        rc = clear_widget()
+        self.recent_box = QVBoxLayout(rc)
+        self.recent_box.setContentsMargins(0, 0, 0, 0)
+        self.recent_box.setSpacing(1)
+        self.recent_box.addStretch(1)
+        self.recent_scroll = scroll_area(rc)
+        v.addWidget(self.recent_scroll, 1)
+        self.side_fill = QWidget()        # 收起时代替最近列表占位
+        self.side_fill.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        v.addWidget(self.side_fill, 1)
+        v.addSpacing(6)
+        self.account = AccountButton()
+        self.account.clicked.connect(self._account_menu)
+        v.addWidget(self.account)
+        self._update_account()
+        return sb
 
-        # 输入卡片
-        card = GlassCard()
-        bg.add_card(card)
-        cl = QHBoxLayout(card)
-        cl.setContentsMargins(14, 12, 14, 12)
-        cl.setSpacing(14)
-        left = QVBoxLayout()
-        left.setSpacing(6)
-        self.input = QPlainTextEdit()
-        self.input.setObjectName('input')
-        self.input.setPlaceholderText('在这里粘贴视频分享链接，或 App 里“复制链接”得到的整段文字……')
-        self.input.setFixedHeight(68)
-        hint = QLabel('支持 抖音 · 快手 · B站 · YouTube · X · TikTok 等上千个网站，可一次粘贴多条　　Ctrl+Enter 解析')
-        hint.setObjectName('hint')
-        left.addWidget(self.input)
-        hint_row = QHBoxLayout()
-        hint_row.setSpacing(8)
-        hint_row.addWidget(hint)
-        # 剪贴板提示条：复制了新链接后切回窗口时出现，点了才解析
-        self.clip_bar = QWidget()
-        cb = QHBoxLayout(self.clip_bar)
-        cb.setContentsMargins(0, 0, 0, 0)
-        cb.setSpacing(6)
-        self.clip_label = QLabel()
-        self.clip_label.setObjectName('metaBusy')
-        cb.addWidget(self.clip_label)
-        cb.addWidget(button('解析', self._parse_clip, 'accent'))
-        cb.addWidget(button('忽略', self._hide_clip_bar))
-        self.clip_bar.hide()
-        self._hint = hint
-        hint_row.addWidget(self.clip_bar)
-        hint_row.addStretch(1)
-        left.addLayout(hint_row)
-        right = QVBoxLayout()
-        right.setSpacing(8)
-        self.parse_btn = button('解  析', self._parse_input, 'primary')
-        self.parse_btn.setMinimumWidth(150)
-        sub_row = QHBoxLayout()
-        sub_row.setSpacing(8)
-        sub_row.addWidget(button('粘贴并解析', self._paste_and_parse))
-        sub_row.addWidget(button('清空', self.input.clear))
-        right.addWidget(self.parse_btn)
-        right.addLayout(sub_row)
-        right.addStretch(1)
-        cl.addLayout(left, 1)
-        cl.addLayout(right)
-        root.addWidget(card)
-        QShortcut(QKeySequence('Ctrl+Return'), self.input, activated=self._parse_input)
-        QShortcut(QKeySequence('Ctrl+Enter'), self.input, activated=self._parse_input)
+    def _set_collapsed(self, on, save=False):
+        self.settings.sidebar_collapsed = on
+        self.sidebar.setFixedWidth(60 if on else 260)
+        for w in (self.brand, self.side_spark, self.recent_label, self.recent_scroll):
+            w.setVisible(not on)
+        self.side_fill.setVisible(on)
+        self.side_top.setContentsMargins(0 if on else 6, 0, 0, 0)
+        for n in self.navs.values():
+            n.set_collapsed(on)
+        self.account.set_collapsed(on)
+        self.collapse_btn.setToolTip('展开侧边栏' if on else '收起侧边栏')
+        if save:
+            self._save_settings()
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(12)
+    def _go(self, page):
+        if self.settings_panel is not None and self.settings_panel.isVisible():
+            self.settings_panel.close_panel()
+        self.page = page
+        self.stack.setCurrentWidget(self.pages[page])
+        for key, n in self.navs.items():
+            n.setChecked(key == page)
+        if page == 'history':
+            self._refresh_history()
+        self._place_toast()
 
-        # 解析结果卡片
-        rcard = GlassCard()
-        bg.add_card(rcard)
-        rv = QVBoxLayout(rcard)
-        rv.setContentsMargins(14, 10, 14, 6)
-        rv.setSpacing(6)
-        rhead = QHBoxLayout()
-        rhead.setSpacing(8)
-        sec = QLabel('解析结果')
-        sec.setObjectName('section')
-        self.res_label = QLabel('')
-        self.res_label.setObjectName('meta')
-        rhead.addWidget(sec)
-        rhead.addWidget(self.res_label)
-        rhead.addStretch(1)
-        lab = QLabel('清晰度')
-        lab.setObjectName('meta')
-        rhead.addWidget(lab)
-        self.preset = QComboBox()
-        for name, val in PRESETS:
-            self.preset.addItem(name, val)
-        self.preset.currentIndexChanged.connect(self._apply_preset_all)
-        rhead.addWidget(self.preset)
-        self.cover_check = QCheckBox('同时保存封面')
-        self.cover_check.setToolTip('下载视频时，把封面另存为与视频同名的 JPG')
-        self.cover_check.setChecked(self.settings.save_cover)
-        self.cover_check.toggled.connect(self._toggle_save_cover)
-        rhead.addSpacing(6)
-        rhead.addWidget(self.cover_check)
-        self.dm_check = QCheckBox('弹幕')
-        self.dm_check.setToolTip('B站视频同时下载弹幕（转成 .danmaku.ass，PotPlayer / VLC 等播放器自动加载）')
-        self.dm_check.setChecked(self.settings.save_danmaku)
-        self.dm_check.toggled.connect(lambda v: self._toggle_setting('save_danmaku', v))
-        self.sub_check = QCheckBox('字幕')
-        self.sub_check.setToolTip('同时下载字幕（B站 CC 字幕、YouTube 字幕等，SRT 格式；语言可在设置里选）')
-        self.sub_check.setChecked(self.settings.save_subs)
-        self.sub_check.toggled.connect(lambda v: self._toggle_setting('save_subs', v))
-        rhead.addWidget(self.dm_check)
-        rhead.addWidget(self.sub_check)
-        rhead.addSpacing(6)
-        rhead.addWidget(button('全部下载', self._download_all, 'accent'))
-        rhead.addWidget(button('清空结果', self._clear_results))
-        rv.addLayout(rhead)
-        self.res_table = QTableWidget(0, 4)
-        self.res_table.setHorizontalHeaderLabels(['封面', '视频', '清晰度 / 格式', '操作'])
-        self._setup_table(self.res_table, row_height=88, stretch=self.R_VIDEO,
-                          widths={self.R_COVER: 146, self.R_QUALITY: 300, self.R_OPS: 250})
-        self.res_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.res_table.customContextMenuRequested.connect(self._result_menu)
-        rv.addWidget(self.res_table)
-        splitter.addWidget(rcard)
+    def _new_parse(self):
+        """像 Claude 的「新建」：回到首页（问候语 + 居中输入框）。
+        之前的解析结果先留着（首页有「回到刚才的解析结果」），在首页解析新链接时才清掉；下载不受影响。"""
+        if self.rows and not self.fresh:
+            self.fresh = True
+            self._update_parse_mode()
+        self._go('parse')
+        self.composer.edit.setFocus()
 
-        # 下载任务 / 日志卡片
-        tcard = GlassCard()
-        bg.add_card(tcard)
-        tv = QVBoxLayout(tcard)
-        tv.setContentsMargins(12, 6, 12, 8)
-        self.tabs = QTabWidget()
-        corner = hbox_cell(button('全部暂停', self._pause_all), button('全部继续', self._resume_all),
-                           button('清除已结束', self._clear_finished), margins=(0, 0, 0, 4), stretch_end=False)
-        self.tabs.setCornerWidget(corner, Qt.TopRightCorner)
-        self.task_table = QTableWidget(0, 5)
-        self.task_table.setHorizontalHeaderLabels(['', '文件', '进度', '状态', '操作'])
-        self._setup_table(self.task_table, row_height=62, stretch=self.T_FILE,
-                          widths={self.T_COVER: 84, self.T_PROGRESS: 270, self.T_STATUS: 140, self.T_OPS: 180})
-        self.task_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.task_table.customContextMenuRequested.connect(self._task_menu)
-        self.task_table.cellDoubleClicked.connect(self._task_double_clicked)
-        self.tabs.addTab(self.task_table, '下载任务')
-        self.log_view = QPlainTextEdit()
-        self.log_view.setObjectName('log')
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(3000)
-        self.tabs.addTab(self.log_view, '日志')
-        self.tabs.addTab(self._build_history_tab(), '历史记录')
-        self.tabs.currentChanged.connect(self._on_tab_changed)
-        tv.addWidget(self.tabs)
-        splitter.addWidget(tcard)
-        splitter.setSizes([430, 300])
-        root.addWidget(splitter, 1)
+    def _back_to_results(self):
+        self.fresh = False
+        self._update_parse_mode()
+        self._go('parse')
 
-        # 底部：保存位置 + 状态
-        bcard = GlassCard()
-        bcard.radius = 12
-        bg.add_card(bcard)
-        bl = QHBoxLayout(bcard)
-        bl.setContentsMargins(14, 7, 14, 7)
-        bl.setSpacing(8)
-        lab = QLabel('保存到')
-        lab.setObjectName('meta')
-        bl.addWidget(lab)
-        self.dir_edit = QLineEdit(self.settings.download_dir)
-        self.dir_edit.editingFinished.connect(self._dir_edited)
-        bl.addWidget(self.dir_edit, 1)
-        bl.addWidget(button('更改…', self._choose_dir))
-        bl.addWidget(button('打开文件夹', self._open_dir))
-        bl.addSpacing(18)
-        self.status = QLabel()
-        self.status.setObjectName('statusText')
-        bl.addWidget(self.status)
-        root.addWidget(bcard)
+    def _refresh_recents(self):
+        while self.recent_box.count() > 1:
+            item = self.recent_box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        recs = self.history.recent('', limit=16) if self.history else []
+        for i, h in enumerate(recs):
+            n = NavItem(h['title'] or h['url'], height=32, font_px=13)
+            n.setCheckable(False)
+            n.setToolTip(f'{h["title"]}\n{(h["quality"] or "").replace("] [", " · ")} · {fmt_ago(h["ts"])}')
+            n.clicked.connect(lambda _=False, rec=h: self._open_recent(rec))
+            n.setContextMenuPolicy(Qt.CustomContextMenu)
+            n.customContextMenuRequested.connect(lambda pos, rec=h, w=n: self._recent_menu(rec, w.mapToGlobal(pos)))
+            self.recent_box.insertWidget(i, n)
+        if not recs:
+            empty = label('下载过的视频会出现在这里', 'meta')
+            empty.setContentsMargins(10, 4, 0, 0)
+            self.recent_box.insertWidget(0, empty)
 
-        self.setCentralWidget(bg)
-        self.toast = Toast(bg)
+    def _open_recent(self, h):
+        if h['filepath'] and os.path.exists(h['filepath']):
+            os.startfile(h['filepath'])
+        else:
+            self.notify('文件已被移动或删除，可以右键「重新解析」再下载一次', 'error')
 
-    def _build_history_tab(self):
-        page = QWidget()
+    def _recent_menu(self, h, pos):
+        m = ui.popup_menu(self)
+        exists = bool(h['filepath']) and os.path.exists(h['filepath'])
+        a = m.addAction(icons.icon('play_circle', c('text2')), '打开', lambda: os.startfile(h['filepath']))
+        a.setEnabled(exists)
+        a = m.addAction(icons.icon('folder', c('text2')), '打开所在文件夹', lambda: reveal_in_explorer(h['filepath']))
+        a.setEnabled(exists)
+        m.addAction(icons.icon('refresh', c('text2')), '重新解析', lambda: self._reparse_url(h['url']))
+        m.addAction(icons.icon('copy', c('text2')), '复制原链接', lambda: QGuiApplication.clipboard().setText(h['url']))
+        m.addSeparator()
+        m.addAction(icons.icon('trash', c('text2')), '从历史中删除', lambda: self._delete_history(h['id']))
+        m.exec(pos)
+
+    def _update_account(self):
+        info = self.bili_account
+        nick = (self.settings.nickname or '').strip()
+        if info and not info.get('expired') and info.get('name'):
+            vip = info.get('vip_label') or ('大会员' if info.get('vip') else '非大会员')
+            self.account.set_info(info['name'], f'B站 · {vip}', info['name'])
+        elif info and info.get('expired'):
+            self.account.set_info(nick or 'B站登录已失效', '点这里重新扫码登录', nick)
+        elif info and info.get('offline'):
+            self.account.set_info(nick or 'B站 · 已登录', '网络不通，稍后自动重试', nick)
+        else:
+            self.account.set_info(nick or '视频解析下载器', '未登录 B站 · 设置与更多', nick)
+        if hasattr(self, 'bili_chip'):
+            logged = info and not info.get('expired')
+            self.bili_chip.setText(f'B站 · {info.get("name") or "已登录"}' if logged else 'B站扫码登录')
+
+    def _account_menu(self):
+        m = ui.popup_menu(self)
+        info = self.bili_account
+        logged = info and not info.get('expired')
+        head = m.addAction(f'B站 · {info.get("name") or "已登录"}' if logged else '未登录 B站')
+        head.setEnabled(False)
+        m.addSeparator()
+        a = m.addAction(icons.icon('settings', c('text2')), '设置', self._open_settings)
+        a.setShortcut(QKeySequence('Ctrl+,'))
+        a.setShortcutVisibleInContextMenu(True)
+        if logged:
+            m.addAction(icons.icon('tv', c('text2')), '重新扫码登录 B站', lambda: self._bili_login(True))
+            m.addAction(icons.icon('log_out', c('text2')), '退出 B站登录', self._bili_logout)
+        else:
+            m.addAction(icons.icon('tv', c('text2')), 'B站长效登录（电视端扫码，约 180 天）', lambda: self._bili_login(True))
+            m.addAction(icons.icon('tv', c('text2')), 'B站网页扫码登录（约 7 天）', lambda: self._bili_login(False))
+        m.addAction(icons.icon('cube', c('text2')), '检查解析内核更新', lambda: self._open_settings('core'))
+        m.addAction(icons.icon('file_text', c('text2')), '查看日志', lambda: self._go('log'))
+        m.addAction(icons.icon('folder', c('text2')), '打开下载文件夹', self._open_dir)
+        m.addSeparator()
+        m.addAction(icons.icon('help', c('text2')), '获取帮助', lambda: QDesktopServices.openUrl(QUrl(GITHUB_URL)))
+        m.addAction(icons.icon('info', c('text2')), '关于', lambda: self._open_settings('about'))
+        m.addSeparator()
+        m.addAction(icons.icon('log_out', c('text2')), '退出程序', self._quit)
+        hint = m.sizeHint()
+        m.exec(self.account.mapToGlobal(QPoint(0, -hint.height() - 6)))
+
+    # 解析页 ----------------------------------------------------------
+    def _build_parse_page(self):
+        page = clear_widget('page')
         v = QVBoxLayout(page)
-        v.setContentsMargins(0, 6, 0, 0)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        # 顶栏（有结果时显示）
+        head = clear_widget()
+        hh = QHBoxLayout(head)
+        hh.setContentsMargins(24, 14, 20, 8)
+        hh.setSpacing(10)
+        hh.addWidget(label('解析结果', 'headTitle'))
+        self.res_label = label('', 'meta')
+        hh.addWidget(self.res_label)
+        hh.addStretch(1)
+        self.parse_status = label('', 'meta')
+        hh.addWidget(self.parse_status)
+        hh.addSpacing(6)
+        hh.addWidget(button('全部下载', self._download_all, 'primary', '按每张卡片选好的清晰度全部下载', 'download'))
+        clear_btn = IconButton('trash', '清空解析结果', size=34, icon_size=18)
+        clear_btn.clicked.connect(self._clear_results)
+        hh.addWidget(clear_btn)
+        self.parse_head = head
+        v.addWidget(head)
+
+        self.parse_stack = QStackedWidget()
+        v.addWidget(self.parse_stack, 1)
+
+        # 空状态：星芒 + 衬线问候语 + 居中的输入框
+        empty = clear_widget('page')
+        ev = QVBoxLayout(empty)
+        ev.setContentsMargins(24, 0, 24, 0)
+        ev.setSpacing(0)
+        ev.addStretch(10)
+        hero = clear_widget()
+        hv = QVBoxLayout(hero)
+        hv.setContentsMargins(0, 0, 0, 0)
+        hv.setSpacing(0)
+        greet = QHBoxLayout()
+        greet.setSpacing(16)
+        greet.addStretch(1)
+        self.hero_spark = Spark(42)
+        greet.addWidget(self.hero_spark)
+        self.greeting = label('', 'greeting')
+        self._new_greeting()
+        greet.addWidget(self.greeting)
+        greet.addStretch(1)
+        hv.addLayout(greet)
+        hv.addSpacing(24)
+        self.hero_slot = QVBoxLayout()
+        self.hero_slot.setSpacing(0)
+        hv.addLayout(self.hero_slot)
+        hv.addSpacing(10)
+        chips = QHBoxLayout()
+        chips.setSpacing(8)
+        chips.addStretch(1)
+        self.back_chip = Chip('回到刚才的解析结果', 'list', height=34,
+                              tip='点了「解析新链接」后，之前的解析结果还留着；在这里解析新链接时才会清掉')
+        self.back_chip.clicked.connect(self._back_to_results)
+        self.back_chip.hide()
+        chips.addWidget(self.back_chip)
+        for text, icon, slot, tip in (
+                ('粘贴并解析', 'clipboard', self._paste_and_parse, '解析剪贴板里的链接'),
+                ('打开下载文件夹', 'folder', self._open_dir, ''),
+                ('B站扫码登录', 'tv', self._bili_clicked, '登录后解锁 1080P 高码率 / 4K 等大会员画质'),
+                ('历史记录', 'clock', lambda: self._go('history'), '')):
+            chip = Chip(text, icon, tip=tip, height=34)
+            chip.clicked.connect(slot)
+            chips.addWidget(chip)
+            if icon == 'tv':
+                self.bili_chip = chip
+        chips.addStretch(1)
+        hv.addLayout(chips)
+        hv.addSpacing(18)
+        tip = label('支持 抖音 · 快手 · B站 · YouTube · X · TikTok 等上千个网站，可一次粘贴多条链接', 'hint')
+        tip.setAlignment(Qt.AlignCenter)
+        hv.addWidget(tip)
+        ev.addWidget(centered(hero, 720, (0, 0, 0, 0)))
+        ev.addStretch(13)
+        self.parse_stack.addWidget(empty)
+
+        # 有结果时：卡片列表（最新的在最上面）+ 底部输入框
+        res = clear_widget('page')
+        rv = QVBoxLayout(res)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(0)
+        col = clear_widget()
+        self.res_list = QVBoxLayout(col)
+        self.res_list.setContentsMargins(0, 6, 0, 18)
+        self.res_list.setSpacing(12)
+        self.res_list.addStretch(1)
+        self.res_scroll = scroll_area(centered(col, COLUMN, (24, 0, 24, 0)))
+        rv.addWidget(self.res_scroll, 1)
+        dock = clear_widget()
+        self.dock_slot = QVBoxLayout(dock)
+        self.dock_slot.setContentsMargins(0, 0, 0, 10)
+        rv.addWidget(centered(dock, COLUMN + 20, (14, 0, 14, 0)))
+        self.parse_stack.addWidget(res)
+
+        # 输入框（只有一个，在两种状态之间移动）
+        box = clear_widget()
+        bv = QVBoxLayout(box)
+        bv.setContentsMargins(0, 0, 0, 0)
+        bv.setSpacing(4)
+        self.clip_bar = self._build_clip_bar()
+        bv.addWidget(self.clip_bar)
+        self.composer = Composer('粘贴视频链接，或 App 里「复制链接」得到的整段文字…')
+        self.composer.submitted.connect(self._parse_input)
+        self.composer.plus.setToolTip('粘贴、从文件导入链接…')
+        self.composer.plus.clicked.connect(self._plus_menu)
+        self.chip_cover = Chip('封面', 'image', checkable=True, tip='下载视频时，把封面另存为与视频同名的 JPG')
+        self.chip_dm = Chip('弹幕', 'danmaku', checkable=True,
+                            tip='B站视频同时下载弹幕（.danmaku.ass；可在设置里生成「弹幕版」视频）')
+        self.chip_sub = Chip('字幕', 'subtitles', checkable=True,
+                             tip='同时下载字幕（B站 CC 字幕、YouTube 字幕等，SRT 格式；语言可在设置里选）')
+        for chip, key in ((self.chip_cover, 'save_cover'), (self.chip_dm, 'save_danmaku'), (self.chip_sub, 'save_subs')):
+            chip.setChecked(getattr(self.settings, key))
+            chip.toggled.connect(lambda on, k=key: self._toggle_setting(k, on))
+            self.composer.left.addWidget(chip)
+        bv.addWidget(self.composer)
+        under = QHBoxLayout()
+        under.setContentsMargins(Composer.SHADOW + 2, 0, Composer.SHADOW + 2, 0)
+        self.folder_btn = SelectButton('', 'folder')
+        self.folder_btn.clicked.connect(self._folder_menu)
+        self.preset_btn = SelectButton('')
+        self.preset_btn.clicked.connect(self._preset_menu)
+        under.addWidget(self.folder_btn)
+        under.addStretch(1)
+        self.enter_hint = label('Enter 解析 · Shift+Enter 换行', 'hint')
+        under.addWidget(self.enter_hint)
+        under.addSpacing(6)
+        under.addWidget(self.preset_btn)
+        bv.addLayout(under)
+        self.composer_box = box
+        self.hero_slot.addWidget(box)
+        self._update_folder_btn()
+        self._update_preset_btn()
+        return page
+
+    def _build_clip_bar(self):
+        bar = Card(radius=12)
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(12, 6, 6, 6)
+        h.setSpacing(8)
+        self.clip_icon = QLabel()
+        h.addWidget(self.clip_icon)
+        self.clip_label = ElidedLabel('', 'metaStrong')
+        h.addWidget(self.clip_label, 1)
+        h.addWidget(button('解析', self._parse_clip, 'primary'))
+        x = IconButton('x', '忽略', size=30, icon_size=16)
+        x.clicked.connect(self._hide_clip_bar)
+        h.addWidget(x)
+        bar.setContentsMargins(Composer.SHADOW, 0, Composer.SHADOW, 0)
+        wrap = clear_widget()
+        wl = QHBoxLayout(wrap)
+        wl.setContentsMargins(Composer.SHADOW, 0, Composer.SHADOW, 2)
+        wl.addWidget(bar)
+        wrap.hide()
+        return wrap
+
+    def _update_parse_mode(self):
+        if not self.rows:
+            self.fresh = False
+        has = bool(self.rows) and not self.fresh       # 有结果、且没点「解析新链接」时显示结果列表
+        if hasattr(self, 'back_chip'):
+            self.back_chip.setText(f'回到刚才的 {len(self.rows)} 个解析结果')
+            self.back_chip.setVisible(self.fresh)
+        want = 1 if has else 0
+        slot = self.dock_slot if has else self.hero_slot
+        if self.composer_box.parentWidget() is not None and slot.indexOf(self.composer_box) < 0:
+            other = self.hero_slot if has else self.dock_slot
+            other.removeWidget(self.composer_box)
+            slot.addWidget(self.composer_box)
+        self.composer.set_min_lines(1 if has else 2)
+        self.parse_head.setVisible(has)
+        self.enter_hint.setVisible(not has)
+        if self.parse_stack.currentIndex() != want:
+            self.parse_stack.setCurrentIndex(want)
+            if not has:
+                self._new_greeting()
+        self._place_toast()
+
+    def _new_greeting(self):
+        self._greet_slot = greetings.slot()
+        self.greeting.setText(greeting(self.settings.nickname))
+
+    def _refresh_greeting(self):
+        """软件一直开着时，时段变了（比如下午 → 晚上、过了零点）就换一句问候语。"""
+        if self.parse_stack.currentIndex() == 0 and getattr(self, '_greet_slot', None) != greetings.slot():
+            self._new_greeting()
+
+    def _place_toast(self):
+        if not hasattr(self, 'toast'):
+            return
+        if self.page == 'parse' and self.parse_stack.currentIndex() == 1:
+            self.toast.bottom = self.composer_box.height() + 24
+        else:
+            self.toast.bottom = 40
+        if self.toast.isVisible():
+            self.toast.place()
+
+    def _update_folder_btn(self):
+        d = self.settings.download_dir
+        self.folder_btn.setText(os.path.basename(d.rstrip('\\/')) or d)
+        self.folder_btn.setToolTip(f'保存到：{d}')
+
+    def _update_preset_btn(self):
+        name, _, tip = PRESET_BY_KEY.get(self.settings.preset, PRESET_BY_KEY['pick'])
+        self.preset_btn.setText(f'清晰度：{name}')
+        self.preset_btn.setToolTip('一键给所有解析结果选清晰度' + (f'\n{tip}' if tip else ''))
+
+    def _preset_value(self):
+        return PRESET_BY_KEY.get(self.settings.preset, PRESET_BY_KEY['pick'])[1]
+
+    def _preset_menu(self):
+        m = ui.popup_menu(self)
+        group = QActionGroup(m)
+        for key, name, _, tip in PRESETS:
+            a = m.addAction(name + (f'　{tip}' if tip else ''))
+            a.setCheckable(True)
+            a.setChecked(key == self.settings.preset)
+            a.triggered.connect(lambda _=False, k=key: self._set_preset(k))
+            group.addAction(a)
+        m.exec(self.preset_btn.mapToGlobal(QPoint(0, self.preset_btn.height() + 4)))
+
+    def _set_preset(self, key):
+        self.settings.preset = key
+        self._save_settings()
+        self._update_preset_btn()
+        self._apply_preset_all()
+
+    def _folder_menu(self):
+        m = ui.popup_menu(self)
+        head = m.addAction(self.settings.download_dir)
+        head.setEnabled(False)
+        m.addSeparator()
+        m.addAction(icons.icon('folder', c('text2')), '打开文件夹', self._open_dir)
+        m.addAction(icons.icon('settings', c('text2')), '更改保存位置…', self._choose_dir)
+        m.exec(self.folder_btn.mapToGlobal(QPoint(0, self.folder_btn.height() + 4)))
+
+    def _plus_menu(self):
+        m = ui.popup_menu(self)
+        m.addAction(icons.icon('clipboard', c('text2')), '粘贴剪贴板里的链接并解析', self._paste_and_parse)
+        m.addAction(icons.icon('file_text', c('text2')), '从文本文件导入链接…', self._import_links)
+        m.addSeparator()
+        m.addAction(icons.icon('settings', c('text2')), '下载选项…', lambda: self._open_settings('download'))
+        m.exec(self.composer.plus.mapToGlobal(QPoint(0, self.composer.plus.height() + 4)))
+
+    # 下载页 ----------------------------------------------------------
+    def _page_header(self, title, right_widgets=(), sub=None):
+        w = clear_widget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 26, 0, 12)
         v.setSpacing(6)
-        bar = QHBoxLayout()
+        h = QHBoxLayout()
+        h.setSpacing(8)
+        h.addWidget(label(title, 'pageTitle'))
+        h.addStretch(1)
+        for x in right_widgets:
+            h.addWidget(x)
+        v.addLayout(h)
+        if sub is not None:
+            v.addWidget(sub)
+        return w
+
+    def _build_tasks_page(self):
+        page = clear_widget('page')
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self.tasks_status = ElidedLabel('', 'meta')
+        head = self._page_header('下载', [
+            button('全部暂停', self._pause_all, icon='pause'), button('全部继续', self._resume_all, icon='play'),
+            button('清除已结束', self._clear_finished, icon='trash')], self.tasks_status)
+        v.addWidget(centered(head, COLUMN, (32, 0, 32, 0)))
+        col = clear_widget()
+        self.task_list = QVBoxLayout(col)
+        self.task_list.setContentsMargins(0, 4, 0, 24)
+        self.task_list.setSpacing(10)
+        self.tasks_empty = self._empty_state('还没有下载任务', '在「解析新链接」里粘贴链接，选好清晰度点「下载」')
+        self.task_list.addWidget(self.tasks_empty)
+        self.task_list.addStretch(1)
+        v.addWidget(scroll_area(centered(col, COLUMN, (32, 0, 32, 0))), 1)
+        return page
+
+    def _empty_state(self, title, sub):
+        w = clear_widget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 70, 0, 0)
+        lay.setSpacing(10)
+        sp = Spark(34, color_role='text4')
+        lay.addWidget(sp, 0, Qt.AlignHCenter)
+        t = label(title, 'serifSmall')
+        t.setAlignment(Qt.AlignCenter)
+        lay.addWidget(t)
+        s = label(sub, 'hint')
+        s.setAlignment(Qt.AlignCenter)
+        lay.addWidget(s)
+        return w
+
+    # 历史页 ----------------------------------------------------------
+    def _build_history_page(self):
+        page = clear_widget('page')
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self.hist_count = label('', 'meta')
+        head = self._page_header('历史记录', [button('清空历史', self._clear_history, 'danger', icon='trash',
+                                                     icon_role='err')], self.hist_count)
+        hv = head.layout()
         self.hist_search = QLineEdit()
-        self.hist_search.setPlaceholderText('搜索标题 / 作者 / 平台')
+        self.hist_search.setObjectName('search')
+        self.hist_search.setPlaceholderText('搜索标题、作者或平台')
         self.hist_search.setClearButtonEnabled(True)
+        self._search_action = self.hist_search.addAction(icons.icon('search', c('text3'), 18),
+                                                         QLineEdit.LeadingPosition)
         self.hist_search.textChanged.connect(lambda _: self._hist_timer.start())
         self._hist_timer = QTimer(self)
         self._hist_timer.setSingleShot(True)
         self._hist_timer.setInterval(200)
-        self._hist_timer.timeout.connect(self._refresh_history)
-        self.hist_count = QLabel('')
-        self.hist_count.setObjectName('meta')
-        bar.addWidget(self.hist_search, 1)
-        bar.addWidget(self.hist_count)
-        bar.addWidget(button('清空历史', self._clear_history))
-        v.addLayout(bar)
-        self.hist_table = QTableWidget(0, 5)
-        self.hist_table.setHorizontalHeaderLabels(['时间', '视频', '清晰度', '大小', '操作'])
-        self._setup_table(self.hist_table, row_height=44, stretch=1, widths={0: 120, 2: 130, 3: 90, 4: 260})
-        self.hist_table.cellDoubleClicked.connect(self._hist_double_clicked)
-        v.addWidget(self.hist_table)
+        self._hist_timer.timeout.connect(lambda: self._refresh_history(reset=True))
+        hv.addSpacing(8)
+        hv.addWidget(self.hist_search)
+        v.addWidget(centered(head, COLUMN, (32, 0, 32, 0)))
+        col = clear_widget()
+        self.hist_list = QVBoxLayout(col)
+        self.hist_list.setContentsMargins(0, 0, 0, 24)
+        self.hist_list.setSpacing(0)
+        self.hist_list.addStretch(1)
+        self.hist_scroll = scroll_area(centered(col, COLUMN, (32, 0, 32, 0)))
+        v.addWidget(self.hist_scroll, 1)
         return page
 
-    @staticmethod
-    def _setup_table(table, row_height, stretch, widths):
-        table.verticalHeader().setVisible(False)
-        table.verticalHeader().setDefaultSectionSize(row_height)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setFocusPolicy(Qt.NoFocus)
-        table.setShowGrid(False)
-        table.setWordWrap(False)
-        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
-        table.verticalScrollBar().setSingleStep(24)
-        table.viewport().setAutoFillBackground(False)
-        hh = table.horizontalHeader()
-        hh.setHighlightSections(False)
-        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        for col in range(table.columnCount()):
-            if col == stretch:
-                hh.setSectionResizeMode(col, QHeaderView.Stretch)
-            else:
-                hh.setSectionResizeMode(col, QHeaderView.Fixed)
-                table.setColumnWidth(col, widths.get(col, 80))
+    # 日志页 ----------------------------------------------------------
+    def _build_log_page(self):
+        page = clear_widget('page')
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName('log')
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(3000)
+        head = self._page_header('日志', [
+            button('复制全部', lambda: (QGuiApplication.clipboard().setText(self.log_view.toPlainText()),
+                                        self.notify('日志已复制', 'ok')), icon='copy'),
+            button('清空', self.log_view.clear, icon='trash')],
+            label('解析、下载的详细过程和报错。反馈问题时可以把这里的内容发过去。', 'meta'))
+        v.addWidget(centered(head, COLUMN, (32, 0, 32, 0)))
+        card = Card(radius=14)
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(10, 8, 6, 8)
+        cl.addWidget(self.log_view)
+        holder = clear_widget()
+        hl = QVBoxLayout(holder)
+        hl.setContentsMargins(0, 0, 0, 24)
+        hl.addWidget(card)
+        v.addWidget(centered(holder, COLUMN, (32, 0, 32, 0)), 1)
+        return page
 
+    # ------------------------------------------------------------ 外观
     def notify(self, text, kind='info'):
+        self._place_toast()
         self.toast.show_message(text, kind)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        if self.toast.isVisible():
-            self.toast.place()
+        self._place_toast()
 
     def showEvent(self, e):
         super().showEvent(e)
         if not getattr(self, '_shown_once', False):
             self._shown_once = True
-            self._style_titlebar()
-            # 窗口出来后再在后台加载解析内核，第一次点「解析」时就已经准备好了
+            ui.style_window(self, 'bg')
+            self.composer.edit.setFocus()
+            # 窗口出来后再在后台加载解析内核，第一次解析时就已经准备好了
             QTimer.singleShot(30, lambda: threading.Thread(target=core.preload, daemon=True).start())
 
-    def _style_titlebar(self):
-        """Win11：让系统标题栏颜色和窗口渐变融为一体。"""
-        if sys.platform != 'win32':
-            return
-        try:
-            import ctypes
-            hwnd = int(self.winId())
+    def apply_theme(self, mode):
+        self.settings.theme = mode
+        self._save_settings()
+        theme.apply(QApplication.instance(), mode)
 
-            def dwm(attr, rgb):
-                r, g, b = int(rgb[1:3], 16), int(rgb[3:5], 16), int(rgb[5:7], 16)
-                value = ctypes.c_int(r | (g << 8) | (b << 16))
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
-            dwm(35, '#dfe3ff')    # 标题栏背景
-            dwm(36, '#312e81')    # 标题文字
-            dwm(34, '#c7d2fe')    # 窗口边框
-        except Exception:  # noqa: BLE001 - 旧系统不支持时保持默认
-            pass
+    def _on_theme_changed(self):
+        ui.style_window(self, 'bg')
+        _refresh_btn_icons()
+        self._search_action.setIcon(icons.icon('search', c('text3'), 18))
+        self.clip_icon.setPixmap(icons.pixmap('clipboard', c('text3'), 16))
+        for tv in list(self.task_views.values()) + list(self.task_lines.values()):
+            if shiboken6.isValid(tv):
+                tv.refresh()
+        if self.page == 'history':
+            self._refresh_history()
+        for w in QApplication.allWidgets():
+            w.update()
 
     # ------------------------------------------------------------ 解析
     def _paste_and_parse(self):
         text = QGuiApplication.clipboard().text()
         if text.strip():
-            self.input.setPlainText(text)
+            self._go('parse')
+            self.composer.edit.setPlainText(text)
             self._parse_input()
         else:
             self.notify('剪贴板里没有文字', 'error')
 
+    def _import_links(self):
+        path, _ = QFileDialog.getOpenFileName(self, '从文本文件导入链接', '', '文本文件 (*.txt *.csv *.md);;所有文件 (*)')
+        if not path:
+            return
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                urls = core.extract_urls(f.read())
+        except OSError as e:
+            self.notify(f'读取失败：{e}', 'error')
+            return
+        if not urls:
+            self.notify('文件里没有找到链接', 'error')
+            return
+        n = self._submit_urls(urls)
+        self.notify(f'开始解析 {n} 个链接' + (f'（{len(urls) - n} 个已在列表中）' if len(urls) > n else ''))
+
     def _parse_input(self):
-        urls = core.extract_urls(self.input.toPlainText())
+        urls = core.extract_urls(self.composer.text())
         if not urls:
             self.notify('没有识别到链接', 'error')
             return
         added = self._submit_urls(urls)
-        self.input.clear()
+        self.composer.clear()
         skipped = len(urls) - added
         self.notify(f'开始解析 {added} 个链接' + (f'（{skipped} 个已在列表中）' if skipped else ''))
 
     def _submit_urls(self, urls, force=False, auto_download=False, from_collection=False):
+        if self.fresh and urls:
+            # 点过「解析新链接」：这是新的一批，清掉之前的解析结果（正在进行的下载不受影响）
+            self._clear_results()
+            self.fresh = False
         existing = {r.url for r in self.rows.values() if r.state != 'error'}
         added = 0
         for url in urls:
@@ -526,21 +1218,27 @@ class MainWindow(QMainWindow):
             self._start_parse(token)
             added += 1
         if added:
-            self.res_table.scrollToTop()
+            self._go('parse')
+            QTimer.singleShot(0, lambda: self.res_scroll.verticalScrollBar().setValue(0))
         return added
 
     def _new_row(self, url, after_token=None, at=None):
         token = self._next_token
         self._next_token += 1
         row = ResultRow(token, url)
+        row.card = ResultCard()
+        row.card.setContextMenuPolicy(Qt.CustomContextMenu)
+        row.card.customContextMenuRequested.connect(
+            lambda pos, t=token: self._result_menu(t, self.rows[t].card.mapToGlobal(pos)) if t in self.rows else None)
         self.rows[token] = row
-        r = self.res_table.rowCount() if at is None else min(at, self.res_table.rowCount())
-        if after_token is not None:
-            idx = self._result_index(after_token)
-            if idx is not None:
-                r = idx + 1
-        self.res_table.insertRow(r)
-        self._render_result(row, r)
+        n = self.res_list.count() - 1          # 最后一项是弹簧
+        idx = n if at is None else min(at, n)
+        if after_token is not None and after_token in self.rows:
+            i = self.res_list.indexOf(self.rows[after_token].card)
+            if i >= 0:
+                idx = i + 1
+        self.res_list.insertWidget(idx, row.card)
+        self._render_result(row)
         self._update_res_label()
         return token
 
@@ -549,8 +1247,6 @@ class MainWindow(QMainWindow):
         row.state, row.error = 'parsing', ''
         self._render_result(row)
         self._update_res_label()
-        if not self.spin_timer.isActive():
-            self.spin_timer.start()
         self.parser.submit(
             row.url,
             lambda url, video, t=token: self.bridge.parsed.emit(t, video),
@@ -574,8 +1270,7 @@ class MainWindow(QMainWindow):
             self.thumbs.request(row.cover_url, video.info.get('webpage_url') or row.url)
         if row.auto_download:
             row.auto_download = False
-            if self._download_row(token, quiet=True):
-                self.tabs.setCurrentIndex(0)
+            self._download_row(token, quiet=True)
 
     def _on_parse_failed(self, token, msg, raw):
         row = self.rows.get(token)
@@ -635,30 +1330,19 @@ class MainWindow(QMainWindow):
             self._render_result(row)
         self._choose_episodes(col)
 
-    def _result_index(self, token):
-        for r in range(self.res_table.rowCount()):
-            item = self.res_table.item(r, self.R_COVER)
-            if item and item.data(Qt.UserRole) == token:
-                return r
-        return None
-
-    def _render_result(self, row, r=None):
-        if r is None:
-            r = self._result_index(row.token)
-            if r is None:
-                return
-        t = self.res_table
+    def _render_result(self, row):
         token = row.token
-        for col in range(t.columnCount()):
-            t.setItem(r, col, QTableWidgetItem())
-        t.item(r, self.R_COVER).setData(Qt.UserRole, token)
-
-        cover = CoverView(128, 72)
+        body = clear_widget()
+        h = QHBoxLayout(body)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(16)
+        cover = CoverView(176, 99, radius=10)
         cover.clicked.connect(lambda: self._preview_cover(token))
-        row.cover = cover
-        row.busy_label = None
-        row.combo = None
-        t.setCellWidget(r, self.R_COVER, hbox_cell(cover, margins=(8, 0, 4, 0), stretch_end=False))
+        row.cover, row.combo, row.badge, row.dl_btn, row.spark = cover, None, None, None, None
+        h.addWidget(cover, 0, Qt.AlignTop)
+        col = QVBoxLayout()
+        col.setSpacing(7)
+        h.addLayout(col, 1)
 
         if row.state == 'ok':
             v = row.video
@@ -666,111 +1350,154 @@ class MainWindow(QMainWindow):
             pm = self.thumbs.get(row.cover_url)
             if pm:
                 cover.set_pixmap(pm)
-            title = ElidedLabel(v.title, 'videoTitle')
+            title = ElidedLabel(v.title, 'cardTitle')
             title.set_full_text(v.title, f'{v.title}\n{row.url}')
-            best = next((o.tag for o in v.options if o.kind == 'video'), '')
-            meta_txt = ' · '.join(x for x in (v.uploader, fmt_duration(v.duration), f'最高 {best}' if best else '') if x)
-            meta = ElidedLabel(meta_txt, 'meta')
+            col.addWidget(title)
             line = QHBoxLayout()
-            line.setSpacing(8)
-            line.addWidget(platform_pill(v.platform))
-            badge = QLabel()
-            badge.setStyleSheet('background: #d1fae5; color: #047857; border-radius: 8px; padding: 1px 8px;'
-                                ' font-size: 11px; font-weight: 700;')
+            line.setSpacing(6)
+            line.addWidget(PlatformTag(v.platform))
+            badge = label('', 'tagOk')
+            badge.hide()           # 放进卡片后再由 _update_badge 决定是否显示
             row.badge = badge
-            self._update_badge(row)
             line.addWidget(badge)
             if core.has_danmaku(v.info):
-                line.addWidget(self._chip('弹幕', '#fce7f3', '#be185d', 'B站弹幕，可转成 ASS 字幕离线观看'))
+                t = label('弹幕', 'tagAccent')
+                t.setToolTip('B站弹幕，可转成 ASS 字幕或生成「弹幕版」视频')
+                line.addWidget(t)
             human, autos = core.pick_subtitles(v.info, self.settings.sub_langs)
             if human or autos:
                 names = [core.sub_name(x) for x in human] + [core.sub_name(x, True) for x in autos]
                 all_langs = [x for x in (v.info.get('subtitles') or {}) if x not in ('danmaku', 'live_chat')]
-                line.addWidget(self._chip('字幕 ' + '/'.join(names), '#dbeafe', '#1d4ed8',
-                                          f'将下载：{"、".join(names)}\n该视频共有 {len(all_langs)} 种人工字幕'))
-            col = v.collection
-            if col and col.get('entries') is None:
-                cbtn = button('频道视频 · 选集…', lambda: self._open_collection(token), 'chip',
-                              f'列出频道「{col.get("title") or ""}」的全部视频（最多 1000 个），勾选要下载的\n'
+                t = label('字幕 ' + '/'.join(names), 'tagInfo')
+                t.setToolTip(f'将下载：{"、".join(names)}\n该视频共有 {len(all_langs)} 种人工字幕')
+                line.addWidget(t)
+            colinfo = v.collection
+            if colinfo and colinfo.get('entries') is None:
+                cb = Chip('频道视频 · 选集', 'list', height=24, font_px=12,
+                          tip=f'列出频道「{colinfo.get("title") or ""}」的全部视频（最多 1000 个），勾选要下载的\n'
                               '（YouTube 的分享按钮会去掉列表信息；想下载某个播放列表，请复制浏览器地址栏里带 list= 的链接）')
-                line.addWidget(cbtn)
-            elif col:
-                pos = f'{col["current"] + 1}/{len(col["entries"])}' if col.get('current', -1) >= 0 \
-                    else f'{len(col["entries"])} 个'
-                cbtn = button(f'{col["kind"]} {pos} · 选集…', lambda: self._open_collection(token), 'chip',
-                              f'{col["kind"]}「{col.get("title") or ""}」共 {len(col["entries"])} 个视频，点击选择要下载哪几个')
-                line.addWidget(cbtn)
-            line.addWidget(meta, 1)
-            t.setCellWidget(r, self.R_VIDEO, vbox_cell(title, line))
+                cb.clicked.connect(lambda: self._open_collection(token))
+                line.addWidget(cb)
+            elif colinfo:
+                pos = f'{colinfo["current"] + 1}/{len(colinfo["entries"])}' if colinfo.get('current', -1) >= 0 \
+                    else f'{len(colinfo["entries"])} 个'
+                cb = Chip(f'{colinfo["kind"]} {pos} · 选集', 'list', height=24, font_px=12,
+                          tip=f'{colinfo["kind"]}「{colinfo.get("title") or ""}」共 {len(colinfo["entries"])} 个视频，'
+                              '点击选择要下载哪几个')
+                cb.clicked.connect(lambda: self._open_collection(token))
+                line.addWidget(cb)
+            best = next((o.tag for o in v.options if o.kind == 'video'), '')
+            meta_txt = ' · '.join(x for x in (v.uploader, fmt_duration(v.duration), f'最高 {best}' if best else '') if x)
+            line.addWidget(ElidedLabel(meta_txt, 'meta'), 1)
+            col.addLayout(line)
+            col.addStretch(1)
 
-            combo = QComboBox()
+            act = QHBoxLayout()
+            act.setSpacing(4)
+            combo = Combo()
             for opt in v.options:
                 combo.addItem(opt.label, opt)
             if v.locked:
-                need = '需要大会员账号' if bilibili.is_logged_in() else '点右上角「B站登录」扫码解锁'
+                need = '需要大会员账号' if bilibili.is_logged_in() else '左下角头像菜单里扫码登录 B站'
                 combo.addItem(f'🔒 {v.locked}（{need}）')
                 combo.model().item(combo.count() - 1).setEnabled(False)
                 combo.setToolTip(f'未解锁的清晰度：{v.locked}')
+            combo.setMinimumWidth(200)
+            combo.setMaximumWidth(380)
+            combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             row.combo = combo
             self._apply_preset(row)
-            t.setCellWidget(r, self.R_QUALITY, vbox_cell(combo, margins=(4, 0, 10, 0)))
-
-            dl = button('下载', lambda: self._download_row(token), 'accent')
-            clip_btn = button('片段', lambda: self._download_section(token), tip='只下载其中一段（输入起止时间）')
-            cov_btn = button('封面', lambda: self._save_cover(token), tip='保存封面到下载目录')
-            cov_btn.setEnabled(bool(row.cover_url))
-            if not row.cover_url:
-                cov_btn.setToolTip('这个视频没有封面')
-            rm = button('移除', lambda: self._remove_result(token))
-            t.setCellWidget(r, self.R_OPS, hbox_cell(dl, clip_btn, cov_btn, rm, margins=(4, 0, 6, 0)))
+            act.addWidget(combo, 3)
+            act.addStretch(1)
+            for icon, tip, slot in (('scissors', '只下载其中一段（输入起止时间）', lambda: self._download_section(token)),
+                                    ('image', '保存封面到下载目录', lambda: self._save_cover(token)),
+                                    ('more', '更多', None)):
+                b = IconButton(icon, tip, size=34, icon_size=18)
+                if slot:
+                    b.clicked.connect(slot)
+                else:
+                    b.clicked.connect(lambda _=False, bb=b: self._result_menu(token, bb.mapToGlobal(
+                        QPoint(0, bb.height() + 4))))
+                if icon == 'image' and not row.cover_url:
+                    b.setEnabled(False)
+                    b.setToolTip('这个视频没有封面')
+                act.addWidget(b)
+            act.addSpacing(4)
+            dl = button('下载', lambda: self._download_row(token), 'primary', icon='download')
+            row.dl_btn = dl
+            act.addWidget(dl)
+            col.addLayout(act)
         else:
-            cover.set_placeholder('解析中' if row.state == 'parsing' else '失败')
-            title = ElidedLabel(row.url, 'videoTitleDim')
+            title = ElidedLabel(row.url, 'cardTitleDim')
+            title.set_full_text(row.url)
+            col.addWidget(title)
+            status = QHBoxLayout()
+            status.setSpacing(8)
             if row.state == 'parsing':
-                meta = QLabel(f'{SPINNER[self._spin_i % len(SPINNER)]}  正在解析…')
-                meta.setObjectName('metaBusy')
-                row.busy_label = meta
-                ops = hbox_cell(button('移除', lambda: self._remove_result(token)), margins=(4, 0, 6, 0))
+                cover.set_placeholder('')
+                spark = Spark(36, cover)
+                spark.move((cover.width() - 36) // 2, (cover.height() - 36) // 2)
+                spark.set_busy(True)
+                row.spark = spark
+                status.addWidget(label('正在解析…', 'meta'))
+                status.addStretch(1)
+                col.addLayout(status)
+                col.addStretch(1)
+                act = QHBoxLayout()
+                act.addStretch(1)
+                act.addWidget(button('移除', lambda: self._remove_result(token), 'ghost'))
             else:
-                meta = ElidedLabel(row.error, 'metaError')
-                meta.set_full_text(row.error, row.error_raw or row.error)
-                ops = hbox_cell(button('重试', lambda: self._start_parse(token), 'accent'),
-                                button('移除', lambda: self._remove_result(token)), margins=(4, 0, 6, 0))
-            t.setCellWidget(r, self.R_VIDEO, vbox_cell(title, meta))
-            t.setCellWidget(r, self.R_QUALITY, QWidget())
-            t.setCellWidget(r, self.R_OPS, ops)
-
-    def _spin(self):
-        self._spin_i += 1
-        frame = SPINNER[self._spin_i % len(SPINNER)]
-        busy = False
-        for row in self.rows.values():
-            if row.state == 'parsing' and row.busy_label is not None and shiboken6.isValid(row.busy_label):
-                row.busy_label.setText(f'{frame}  正在解析…')
-                busy = True
-        if not busy:
-            self.spin_timer.stop()
+                cover.set_placeholder('解析失败')
+                icon = QLabel()
+                icon.setPixmap(icons.pixmap('alert', c('err'), 15))
+                status.addWidget(icon)
+                err = ElidedLabel(row.error, 'metaError')
+                err.set_full_text(row.error, row.error_raw or row.error)
+                status.addWidget(err, 1)
+                col.addLayout(status)
+                col.addStretch(1)
+                act = QHBoxLayout()
+                act.setSpacing(6)
+                act.addStretch(1)
+                act.addWidget(button('移除', lambda: self._remove_result(token), 'ghost'))
+                act.addWidget(button('重试', lambda: self._start_parse(token), icon='refresh'))
+            col.addLayout(act)
+        row.card.set_body(body)
+        self._update_badge(row)
+        # 卡片里的下载进度
+        for tid, t in self.task_row.items():
+            if t == token and tid not in self.task_lines:
+                task = next((x for x in self.manager.tasks if x.id == tid), None)
+                if task:
+                    self._add_task_line(task, row)
 
     def _remove_result(self, token):
-        r = self._result_index(token)
-        if r is not None:
-            self.res_table.removeRow(r)
-        self.rows.pop(token, None)
+        row = self.rows.pop(token, None)
+        if row and row.card:
+            self.res_list.removeWidget(row.card)
+            for sp in row.card.findChildren(Spark):
+                sp.set_busy(False)
+            row.card.deleteLater()
+        for tid in [tid for tid, t in self.task_row.items() if t == token]:
+            self.task_lines.pop(tid, None)
+            self.task_row.pop(tid, None)
         self._update_res_label()
 
     def _clear_results(self):
-        self.res_table.setRowCount(0)
-        self.rows.clear()
+        for token in list(self.rows):
+            self._remove_result(token)
         self._update_res_label()
 
     def _update_res_label(self):
         total = len(self.rows)
         ok = sum(1 for r in self.rows.values() if r.state == 'ok')
         busy = sum(1 for r in self.rows.values() if r.state == 'parsing')
-        txt = f'{ok} / {total}' if total else ''
+        txt = f'{ok} / {total} 个视频' if total else ''
         if busy:
-            txt += f'　正在解析 {busy} 个'
+            txt += f' · 正在解析 {busy} 个'
         self.res_label.setText(txt)
+        self.side_spark.set_busy(busy > 0)
+        self._update_parse_mode()
 
     # ------------------------------------------------------------ 封面
     def _on_thumb_loaded(self, url):
@@ -781,9 +1508,9 @@ class MainWindow(QMainWindow):
                     row.cover.set_pixmap(pm)
                 else:
                     row.cover.set_placeholder(row.video.platform)
-        for tid, w in self.task_widgets.items():
-            if w['cover_url'] == url and pm and shiboken6.isValid(w['cover']):
-                w['cover'].set_pixmap(pm)
+        for tv in self.task_views.values():
+            if shiboken6.isValid(tv) and tv.cover is not None and tv.cover_url == url and pm:
+                tv.cover.set_pixmap(pm)
         for title, out_dir in self._pending_cover_saves.pop(url, []):
             self._write_cover(url, title, out_dir)
 
@@ -823,16 +1550,12 @@ class MainWindow(QMainWindow):
             self.notify(f'保存封面失败：{e}', 'error')
 
     def _cover_saved(self, path):
-        self.notify(f'✓ 封面已保存：{os.path.basename(path)}', 'ok')
+        self.notify(f'封面已保存：{os.path.basename(path)}', 'ok')
         self._append_log('info', f'封面已保存 {path}')
-
-    def _toggle_save_cover(self, checked):
-        self.settings.save_cover = checked
-        self._save_settings()
 
     # ------------------------------------------------------------ 清晰度预设
     def _apply_preset(self, row):
-        preset = self.preset.currentData()
+        preset = self._preset_value()
         combo = row.combo
         if combo is None or combo.count() == 0:
             return
@@ -883,6 +1606,7 @@ class MainWindow(QMainWindow):
             open_btn = box.addButton('打开已有文件', QMessageBox.AcceptRole)
             again_btn = box.addButton('重新下载', QMessageBox.DestructiveRole)
             box.addButton('取消', QMessageBox.RejectRole)
+            restyle(open_btn, 'primary')
             box.exec()
             if box.clickedButton() is open_btn:
                 os.startfile(done_before[0]['filepath'])
@@ -894,9 +1618,9 @@ class MainWindow(QMainWindow):
         task.overwrite = overwrite
         task.save_subs = self.settings.save_subs
         task.save_danmaku = self.settings.save_danmaku
+        self.task_row[task.id] = token
         self.manager.add(task)
         if not quiet:
-            self.tabs.setCurrentIndex(0)
             self._flash_download_button(token)
         return True
 
@@ -913,24 +1637,25 @@ class MainWindow(QMainWindow):
         task.section, task.precise = dlg.section, dlg.precise
         task.save_subs = False
         task.save_danmaku = self.settings.save_danmaku
+        self.task_row[task.id] = token
         self.manager.add(task)
-        self.tabs.setCurrentIndex(0)
-        self.notify('✓ 已加入片段下载', 'ok')
+        self.notify('已加入片段下载', 'ok')
 
     def _flash_download_button(self, token):
-        """点击「下载」后按钮立即变成绿色「✓ 已加入」，1.2 秒后恢复。"""
-        r = self._result_index(token)
-        cell = self.res_table.cellWidget(r, self.R_OPS) if r is not None else None
-        btn = cell.findChild(QPushButton) if cell else None
-        if btn is None:
+        """点击「下载」后按钮立即变成绿色「已加入」，1.2 秒后恢复。"""
+        row = self.rows.get(token)
+        btn = row.dl_btn if row else None
+        if btn is None or not shiboken6.isValid(btn):
             return
-        btn.setText('✓ 已加入')
+        btn.setText('已加入')
+        set_btn_icon(btn, 'check', 'on_primary')
         restyle(btn, 'done')
 
         def revert():
             if shiboken6.isValid(btn):
                 btn.setText('下载')
-                restyle(btn, 'accent')
+                set_btn_icon(btn, 'download', 'on_primary')
+                restyle(btn, 'primary')
         QTimer.singleShot(1200, revert)
 
     def _download_all(self):
@@ -941,125 +1666,42 @@ class MainWindow(QMainWindow):
             elif row.state == 'ok' and row.combo is not None and row.combo.currentData() is not None and any(
                     h['quality'] == row.combo.currentData().tag and h['exists'] for h in self._history_of(row.video)):
                 skipped += 1
-        self.tabs.setCurrentIndex(0)
         if n:
-            msg = f'✓ 已添加 {n} 个下载任务' + (f'，跳过 {skipped} 个已下载过的' if skipped else '')
+            msg = f'已添加 {n} 个下载任务' + (f'，跳过 {skipped} 个已下载过的' if skipped else '')
         else:
             msg = f'这 {skipped} 个视频都已经下载过了（单独点「下载」可以重新下载）' if skipped else '没有可下载的结果'
         self.notify(msg, 'ok' if n else 'info')
 
-    def _task_index(self, task_id):
-        for r in range(self.task_table.rowCount()):
-            item = self.task_table.item(r, self.T_COVER)
-            if item and item.data(Qt.UserRole) == task_id:
-                return r
-        return None
-
-    def _create_task_row(self, task):
-        t = self.task_table
-        r = t.rowCount()
-        t.insertRow(r)
-        for col in range(t.columnCount()):
-            t.setItem(r, col, QTableWidgetItem())
-        t.item(r, self.T_COVER).setData(Qt.UserRole, task.id)
-        url = cover_url(task.video.info)
-        cover = CoverView(64, 36, radius=6)
-        cover.set_placeholder(task.video.platform)
-        if self.thumbs.get(url):
-            cover.set_pixmap(self.thumbs.get(url))
-        elif url:
-            self.thumbs.request(url, task.video.info.get('webpage_url') or task.video.url)
-        t.setCellWidget(r, self.T_COVER, hbox_cell(cover, margins=(8, 0, 4, 0), stretch_end=False))
-
-        name = ElidedLabel(task.video.title, 'videoTitle')
-        extras = ['封面'] if task.save_cover else []
-        if task.save_danmaku and self.settings.save_danmaku and core.has_danmaku(task.video.info):
-            extras.append('弹幕')
-        if task.save_subs and self.settings.save_subs and any(core.pick_subtitles(task.video.info, self.settings.sub_langs)):
-            extras.append('字幕')
-        tag = QLabel(task.tag.replace('] [', ' · ') + ''.join(f'　+{x}' for x in extras))
-        tag.setObjectName('meta')
-        line = QHBoxLayout()
-        line.setSpacing(8)
-        line.addWidget(platform_pill(task.video.platform))
-        line.addWidget(tag, 1)
-        t.setCellWidget(r, self.T_FILE, vbox_cell(name, line, margins=(6, 6, 6, 6)))
-
-        bar = QProgressBar()
-        bar.setRange(0, 1000)
-        detail = ElidedLabel('', 'meta')
-        t.setCellWidget(r, self.T_PROGRESS, vbox_cell(bar, detail, margins=(6, 6, 12, 6)))
-
-        b1 = button('暂停', lambda: self._task_primary(task))
-        b2 = button('取消', lambda: self._task_secondary(task))
-        b3 = button('目录', lambda: reveal_in_explorer(task.filepath or task._expected_name or task.out_dir))
-        t.setCellWidget(r, self.T_OPS, hbox_cell(b1, b2, b3, margins=(4, 0, 6, 0)))
-        self.task_widgets[task.id] = {'bar': bar, 'detail': detail, 'name': name, 'b1': b1, 'b2': b2, 'b3': b3,
-                                      'cover': cover, 'cover_url': url, 'state': None}
-        t.scrollToBottom()
-        return r
+    def _add_task_line(self, task, row):
+        if row.card is None or not shiboken6.isValid(row.card):
+            return
+        line = TaskView(self, task, compact=True)
+        row.card.tasks.addWidget(line)
+        self.task_lines[task.id] = line
 
     def _on_task_updated(self, task):
-        r = self._task_index(task.id)
-        if r is None:
+        if task.id not in self.task_views:
             if task not in self.manager.tasks:
                 return
-            r = self._create_task_row(task)
-        w = self.task_widgets[task.id]
+            view = TaskView(self, task, compact=False)
+            self.task_list.insertWidget(0, view)          # 新任务放最上面
+            self.task_views[task.id] = view
+            self.tasks_empty.hide()
+            token = self.task_row.get(task.id)
+            if token in self.rows and task.id not in self.task_lines:
+                self._add_task_line(task, self.rows[token])
         s = task.status
         prev = self._prev_status.get(task.id)
         if prev != s:
             self._prev_status[task.id] = s
             self._on_status_changed(task, prev)
-        if task.filepath:
-            w['name'].set_full_text(os.path.basename(task.filepath), task.filepath)
-        w['bar'].setValue(int(task.progress * 1000))
-        w['bar'].setFormat(f'{task.progress * 100:.1f}%')
-        state = PROGRESS_STATE.get(s, 'running')
-        if w['state'] != state:
-            w['state'] = state
-            restyle(w['bar'], state=state)
-
-        parts = []
-        if task.total:
-            parts.append(f'{core.fmt_size(task.downloaded)} / {core.fmt_size(task.total)}'
-                         if s in (core.RUNNING, core.PAUSED) and task.downloaded < task.total
-                         else core.fmt_size(task.total))
-        elif task.downloaded:
-            parts.append(core.fmt_size(task.downloaded))
-        if s in (core.DONE, core.EXISTS) and task.extras:
-            subs = [core.sub_name(x) for x in task.extras if x not in ('danmaku', 'burned')]
-            bits = (['字幕 ' + '/'.join(subs)] if subs else []) + (['弹幕'] if 'danmaku' in task.extras else []) \
-                + (['弹幕版视频'] if 'burned' in task.extras else [])
-            parts.append('已存 ' + ' + '.join(bits))
-        if s == core.RUNNING:
-            if task.speed:
-                parts.append(fmt_speed(task.speed))
-            if task.eta:
-                parts.append(f'剩余 {fmt_duration(task.eta)}')
-        w['detail'].set_full_text('  ·  '.join(parts))
-
-        status = core.STATUS_TEXT.get(s, s)
-        if s == core.MERGING and task.stage:
-            status = f'{task.stage}…'
-        elif s == core.RUNNING and task.stage:
-            status += f' · {task.stage}'
-        if s == core.FAILED and task.error:
-            status = f'失败：{task.error}'
-        st = self.task_table.item(r, self.T_STATUS)
-        st.setText(status)
-        st.setForeground(QColor(theme.STATUS_COLORS.get(s, '#333')))
-        st.setToolTip(task.error_raw or task.error or status)
-
-        b1, b2 = w['b1'], w['b2']
-        b1.setText({core.QUEUED: '暂停', core.RUNNING: '暂停', core.PAUSED: '继续', core.FAILED: '重试',
-                    core.CANCELED: '重试', core.DONE: '打开', core.EXISTS: '打开'}.get(s, '暂停'))
-        want = 'accent' if s in (core.DONE, core.EXISTS, core.PAUSED, core.FAILED, core.CANCELED) else 'small'
-        if b1.objectName() != want:
-            restyle(b1, want)
-        b1.setEnabled(s != core.MERGING)
-        b2.setText('移除' if s in (core.DONE, core.EXISTS, core.CANCELED, core.FAILED) else '取消')
-        b2.setEnabled(s != core.MERGING or task.stage.startswith('弹幕版'))   # 生成弹幕版时可以取消
+        for views in (self.task_views, self.task_lines):
+            v = views.get(task.id)
+            if v is not None:
+                if shiboken6.isValid(v):
+                    v.refresh()
+                else:
+                    views.pop(task.id, None)
 
     def _task_primary(self, task):
         s = task.status
@@ -1087,28 +1729,22 @@ class MainWindow(QMainWindow):
         for t in tasks:
             self.manager.restore(t)
         if tasks:
-            self.notify(f'已恢复上次未完成的 {len(tasks)} 个任务（已暂停），点「全部继续」开始下载')
+            self.notify(f'已恢复上次未完成的 {len(tasks)} 个任务（已暂停），在「下载」页点「全部继续」')
 
     def _toggle_setting(self, name, value):
         setattr(self.settings, name, value)
         self._save_settings()
 
-    @staticmethod
-    def _chip(text, bg, fg, tip=''):
-        lab = QLabel(text)
-        lab.setStyleSheet(f'background: {bg}; color: {fg}; border-radius: 8px; padding: 1px 8px;'
-                          ' font-size: 11px; font-weight: 700;')
-        if tip:
-            lab.setToolTip(tip)
-        return lab
-
     def _remove_task(self, task):
         if self.manager.remove(task):
             self._tasks_save_timer.start()
-            r = self._task_index(task.id)
-            if r is not None:
-                self.task_table.removeRow(r)
-            self.task_widgets.pop(task.id, None)
+            for views in (self.task_views, self.task_lines):
+                v = views.pop(task.id, None)
+                if v is not None and shiboken6.isValid(v):
+                    v.setParent(None)
+                    v.deleteLater()
+            self.task_row.pop(task.id, None)
+            self.tasks_empty.setVisible(not self.task_views)
 
     def _open_file(self, task):
         # 有弹幕版时优先打开弹幕版（弹幕流畅，任何播放器都能看）
@@ -1117,18 +1753,6 @@ class MainWindow(QMainWindow):
             os.startfile(path)
         else:
             self.notify('文件不存在（可能已被移动或删除）', 'error')
-
-    def _task_double_clicked(self, r, _c):
-        task = self._task_at(r)
-        if task and task.status in (core.DONE, core.EXISTS):
-            self._open_file(task)
-
-    def _task_at(self, r):
-        item = self.task_table.item(r, self.T_COVER)
-        if not item:
-            return None
-        tid = item.data(Qt.UserRole)
-        return next((t for t in self.manager.tasks if t.id == tid), None)
 
     def _pause_all(self):
         n = 0
@@ -1186,7 +1810,8 @@ class MainWindow(QMainWindow):
                 key_rows = [r for r in self.rows.values() if r.video and r.video.info.get('id') == task.video.info.get('id')]
                 for r in key_rows:
                     self._update_badge(r)
-                if self.tabs.currentIndex() == 2:
+                self._refresh_recents()
+                if self.page == 'history':
                     self._refresh_history()
             if s == core.DONE:
                 self._batch_done += 1
@@ -1206,7 +1831,7 @@ class MainWindow(QMainWindow):
         n, self._batch_done = self._batch_done, 0
         failed = sum(1 for t in self.manager.tasks if t.status == core.FAILED)
         msg = f'全部下载完成，共 {n} 个' + (f'，{failed} 个失败' if failed else '')
-        self.notify('✓ ' + msg, 'ok')
+        self.notify(msg, 'ok')
         if self.settings.notify_done and not self.isActiveWindow() and n > 1:
             self._tray_message('全部下载完成', msg)
         if self.settings.notify_sound:
@@ -1218,46 +1843,41 @@ class MainWindow(QMainWindow):
         if self.settings.open_dir_when_done:
             self._open_dir()
 
-    def _on_tab_changed(self, idx):
-        if idx == 2:
-            self._refresh_history()
-
-    def _refresh_history(self):
-        t = self.hist_table
-        t.setRowCount(0)
+    def _refresh_history(self, reset=False):
+        if reset:
+            self._hist_limit = 150
+        lay = self.hist_list
+        while lay.count() > 1:
+            item = lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
         if not self.history:
             self.hist_count.setText('历史记录不可用')
             return
-        recs = self.history.recent(self.hist_search.text().strip())
+        search = self.hist_search.text().strip()
+        recs = self.history.recent(search, limit=self._hist_limit + 1)
+        more = len(recs) > self._hist_limit
+        recs = recs[:self._hist_limit]
         total = self.history.count()
-        self.hist_count.setText(f'{len(recs)} / {total} 条')
-        t.setRowCount(len(recs))
-        for r, h in enumerate(recs):
-            exists = bool(h['filepath']) and os.path.exists(h['filepath'])
-            when = QTableWidgetItem(datetime.datetime.fromtimestamp(h['ts']).strftime('%Y-%m-%d %H:%M'))
-            when.setData(Qt.UserRole, h)
-            t.setItem(r, 0, when)
-            for col in range(1, 5):
-                t.setItem(r, col, QTableWidgetItem())
-            title = ElidedLabel(h['title'] or h['url'], 'videoTitle' if exists else 'videoTitleDim')
-            title.set_full_text(h['title'] or h['url'], f'{h["title"]}\n{h["filepath"]}' +
-                                ('' if exists else '\n（文件已被移动或删除）'))
-            t.setCellWidget(r, 1, hbox_cell(platform_pill(h['platform']), title, margins=(6, 0, 6, 0),
-                                            stretch_end=False))
-            t.item(r, 2).setText((h['quality'] or '').replace('] [', ' · '))
-            t.item(r, 3).setText(core.fmt_size(h['size']) if h['size'] else '')
-            ops = [button('打开', lambda _=False, p=h['filepath']: os.startfile(p), 'accent'),
-                   button('目录', lambda _=False, p=h['filepath']: reveal_in_explorer(p)),
-                   button('重新解析', lambda _=False, u=h['url']: self._reparse_url(u)),
-                   button('删除', lambda _=False, i=h['id']: self._delete_history(i))]
-            ops[0].setEnabled(exists)
-            ops[1].setEnabled(exists)
-            t.setCellWidget(r, 4, hbox_cell(*ops, margins=(4, 0, 6, 0)))
+        self.hist_count.setText(f'共 {total} 条下载记录' + (f'，找到 {len(recs)}{"+" if more else ""} 条' if search else ''))
+        i = 0
+        for h in recs:
+            if i:
+                lay.insertWidget(i, HLine(margin=12))
+                i += 1
+            lay.insertWidget(i, HistoryRow(self, h))
+            i += 1
+        if more:
+            b = button('显示更多', self._more_history, 'ghost')
+            lay.insertWidget(i, b, 0, Qt.AlignHCenter)
+            i += 1
+        if not recs:
+            lay.insertWidget(0, self._empty_state('没有找到记录' if search else '还没有下载记录',
+                                                  '换个关键词试试' if search else '下载完成的视频会记录在这里，方便再次打开或重新下载'))
 
-    def _hist_double_clicked(self, r, _c):
-        h = self.hist_table.item(r, 0).data(Qt.UserRole) if self.hist_table.item(r, 0) else None
-        if h and h['filepath'] and os.path.exists(h['filepath']):
-            os.startfile(h['filepath'])
+    def _more_history(self):
+        self._hist_limit += 300
+        self._refresh_history()
 
     def _reparse_url(self, url):
         if url and self._submit_urls([url]):
@@ -1265,16 +1885,19 @@ class MainWindow(QMainWindow):
 
     def _delete_history(self, row_id):
         self.history.delete(row_id)
-        self._refresh_history()
-        for r in self.rows.values():
-            self._update_badge(r)
+        self._after_history_change()
 
     def _clear_history(self):
         if not self.history or QMessageBox.question(
                 self, APP_NAME, '确定清空全部下载历史吗？（只删除记录，不会删除已下载的文件）') != QMessageBox.Yes:
             return
         self.history.clear()
-        self._refresh_history()
+        self._after_history_change()
+
+    def _after_history_change(self):
+        if self.page == 'history':
+            self._refresh_history()
+        self._refresh_recents()
         for r in self.rows.values():
             self._update_badge(r)
 
@@ -1352,58 +1975,54 @@ class MainWindow(QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def _on_core_update(self, new, cur):
-        self.notify(f'解析内核有新版本 {new}（当前 {cur}），可在 设置 → 内核 里一键更新')
+        self.notify(f'解析内核有新版本 {new}（当前 {cur}），可在 设置 → 解析内核 里一键更新')
 
     def _tray_message(self, title, text, icon=QSystemTrayIcon.Information):
         if self.tray:
             self.tray.showMessage(title, text, icon, 5000)
 
     # ------------------------------------------------------------ 右键菜单
-    def _result_menu(self, pos):
-        r = self.res_table.rowAt(pos.y())
-        if r < 0:
-            return
-        token = self.res_table.item(r, self.R_COVER).data(Qt.UserRole)
+    def _result_menu(self, token, pos):
         row = self.rows.get(token)
         if not row:
             return
-        menu = QMenu(self)
+        m = ui.popup_menu(self)
+        ic = lambda name: icons.icon(name, c('text2'))   # noqa: E731
         if row.state == 'ok':
-            menu.addAction('下载', lambda: self._download_row(token))
-            menu.addAction('下载片段…', lambda: self._download_section(token))
+            m.addAction(ic('download'), '下载', lambda: self._download_row(token))
+            m.addAction(ic('scissors'), '下载片段…', lambda: self._download_section(token))
             if row.cover_url:
-                menu.addAction('保存封面', lambda: self._save_cover(token))
+                m.addAction(ic('image'), '保存封面', lambda: self._save_cover(token))
                 if row.cover_url in self.thumbs.raw:
-                    menu.addAction('预览封面', lambda: self._preview_cover(token))
-        menu.addAction('重新解析', lambda: self._start_parse(token))
-        menu.addAction('复制链接', lambda: QGuiApplication.clipboard().setText(row.url))
-        menu.addAction('在浏览器中打开', lambda: QDesktopServices.openUrl(QUrl(row.url)))
+                    m.addAction(ic('search'), '预览封面', lambda: self._preview_cover(token))
+            m.addSeparator()
+        m.addAction(ic('refresh'), '重新解析', lambda: self._start_parse(token))
+        m.addAction(ic('copy'), '复制链接', lambda: QGuiApplication.clipboard().setText(row.url))
+        m.addAction(ic('external'), '在浏览器中打开', lambda: QDesktopServices.openUrl(QUrl(row.url)))
         if row.state == 'error':
-            menu.addAction('复制错误信息', lambda: QGuiApplication.clipboard().setText(row.error_raw or row.error))
-        menu.addSeparator()
-        menu.addAction('移除', lambda: self._remove_result(token))
-        menu.exec(self.res_table.viewport().mapToGlobal(pos))
+            m.addAction(ic('copy'), '复制错误信息', lambda: QGuiApplication.clipboard().setText(row.error_raw or row.error))
+        m.addSeparator()
+        m.addAction(ic('x'), '移除', lambda: self._remove_result(token))
+        m.exec(pos)
 
-    def _task_menu(self, pos):
-        r = self.task_table.rowAt(pos.y())
-        task = self._task_at(r) if r >= 0 else None
-        if not task:
-            return
-        menu = QMenu(self)
+    def _task_menu(self, task, pos):
+        m = ui.popup_menu(self)
+        ic = lambda name: icons.icon(name, c('text2'))   # noqa: E731
         if task.status in (core.DONE, core.EXISTS):
-            menu.addAction('打开文件', lambda: self._open_file(task))
+            m.addAction(ic('play_circle'), '打开文件', lambda: self._open_file(task))
             if task.burned_path and os.path.exists(task.burned_path) and task.filepath and task.filepath != task.burned_path:
-                menu.addAction('打开原视频（不带弹幕）', lambda: os.startfile(task.filepath))
-        menu.addAction('打开所在文件夹', lambda: reveal_in_explorer(task.filepath or task._expected_name or task.out_dir))
+                m.addAction(ic('film'), '打开原视频（不带弹幕）', lambda: os.startfile(task.filepath))
+        m.addAction(ic('folder'), '打开所在文件夹',
+                    lambda: reveal_in_explorer(task.filepath or task._expected_name or task.out_dir))
         if task.status in (core.FAILED, core.CANCELED, core.PAUSED):
-            menu.addAction('重试 / 继续', lambda: self.manager.resume(task))
-        menu.addAction('复制原链接', lambda: QGuiApplication.clipboard().setText(task.video.url))
+            m.addAction(ic('refresh'), '重试 / 继续', lambda: self.manager.resume(task))
+        m.addAction(ic('copy'), '复制原链接', lambda: QGuiApplication.clipboard().setText(task.video.url))
         if task.error_raw:
-            menu.addAction('复制错误信息', lambda: QGuiApplication.clipboard().setText(task.error_raw))
+            m.addAction(ic('copy'), '复制错误信息', lambda: QGuiApplication.clipboard().setText(task.error_raw))
         if task.status not in (core.RUNNING, core.MERGING, core.QUEUED, core.PAUSED):
-            menu.addSeparator()
-            menu.addAction('从列表移除', lambda: self._remove_task(task))
-        menu.exec(self.task_table.viewport().mapToGlobal(pos))
+            m.addSeparator()
+            m.addAction(ic('trash'), '从列表移除', lambda: self._remove_task(task))
+        m.exec(pos)
 
     # ------------------------------------------------------------ 目录 / 设置
     def _choose_dir(self):
@@ -1411,52 +2030,58 @@ class MainWindow(QMainWindow):
         if d:
             self._set_dir(os.path.normpath(d))
 
-    def _dir_edited(self):
-        d = self.dir_edit.text().strip()
-        if d and d != self.settings.download_dir:
-            self._set_dir(os.path.normpath(d))
-
     def _set_dir(self, d):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError as e:
             QMessageBox.warning(self, APP_NAME, f'无法使用该目录：{e}')
-            self.dir_edit.setText(self.settings.download_dir)
-            return
+            return False
         self.settings.download_dir = d
-        self.dir_edit.setText(d)
         self._save_settings()
+        self._update_folder_btn()
         self.notify('新任务将保存到这个目录')
+        return True
 
     def _open_dir(self):
         d = self.settings.download_dir
         os.makedirs(d, exist_ok=True)
         os.startfile(d)
 
-    def _open_settings(self):
-        old_codec = self.settings.codec_preference
-        old_langs = self.settings.sub_langs
-        dlg = SettingsDialog(self.settings, self)
-        if dlg.exec():
-            self._save_settings()
-            if self.settings.codec_preference != old_codec:
-                for row in self.rows.values():
-                    if row.state == 'ok':
-                        row.video.options = core.build_options(row.video.info, self.settings.codec_preference)
-                        self._render_result(row)
-            for box, val in ((self.cover_check, self.settings.save_cover), (self.dm_check, self.settings.save_danmaku),
-                             (self.sub_check, self.settings.save_subs)):
-                box.blockSignals(True)
-                box.setChecked(val)
-                box.blockSignals(False)
-            if self.settings.sub_langs != old_langs:
-                for row in self.rows.values():
-                    if row.state == 'ok':
-                        self._render_result(row)
+    def _open_settings(self, page=None):
+        if self.settings_panel is None:
+            self.settings_panel = SettingsPanel(self.central, self)
+        self.settings_panel.open_at(page)
+
+    def setting_changed(self, key, old=None):
+        """设置面板里改了某一项（立即生效）。"""
+        s = self.settings
+        if key == 'codec_preference':
+            for row in self.rows.values():
+                if row.state == 'ok':
+                    row.video.options = core.build_options(row.video.info, s.codec_preference)
+                    self._render_result(row)
+        elif key == 'sub_langs':
+            for row in self.rows.values():
+                if row.state == 'ok':
+                    self._render_result(row)
+        elif key in ('save_cover', 'save_danmaku', 'save_subs'):
+            chip = {'save_cover': self.chip_cover, 'save_danmaku': self.chip_dm, 'save_subs': self.chip_sub}[key]
+            chip.blockSignals(True)
+            chip.setChecked(getattr(s, key))
+            chip.blockSignals(False)
+            chip.update()
+        elif key == 'max_concurrent':
             self.manager._schedule()
-            if (self.settings.hotkey or '') != self.hotkey.current:
+        elif key == 'hotkey':
+            if (s.hotkey or '') != self.hotkey.current:
                 self._apply_hotkey()
-            self.notify('✓ 设置已保存', 'ok')
+        elif key == 'nickname':
+            if self.parse_stack.currentIndex() == 0:
+                self._new_greeting()
+            self._update_account()
+        elif key == 'download_dir':
+            self._update_folder_btn()
+        self._save_settings()
 
     def _save_settings(self):
         try:
@@ -1469,7 +2094,6 @@ class MainWindow(QMainWindow):
         if not bilibili.is_logged_in():
             self._on_bili_status(None)
             return
-        self.bili_btn.setText('B站：检查登录…')
 
         def work():
             try:
@@ -1483,35 +2107,26 @@ class MainWindow(QMainWindow):
 
     def _on_bili_status(self, info):
         self.bili_account = info
-        if not info:
-            self.bili_btn.setText('B站登录')
-        elif info.get('expired'):
-            self.bili_btn.setText('B站：登录已失效，点此重新扫码')
-        elif info.get('offline'):
-            self.bili_btn.setText('B站：已登录')
-        else:
-            vip = info.get('vip_label') or ('大会员' if info.get('vip') else '非大会员')
+        self._update_account()
+        if info and not info.get('expired') and not info.get('offline'):
             exp = bilibili.sessdata_expires()
             left = (exp - time.time()) / 86400 if exp else None
             if left is not None and left < 1.5:
-                self.bili_btn.setText(f'B站 · {info.get("name")}（登录将在 {max(1, int(left * 24))} 小时后过期）')
-                self.notify('B站登录快过期了，点右上角重新扫码即可续上', 'error')
-            else:
-                self.bili_btn.setText(f'B站 · {info.get("name")}（{vip}）')
-            if exp:
-                self.bili_btn.setToolTip(f'登录有效期至 {datetime.datetime.fromtimestamp(exp):%Y-%m-%d %H:%M}'
-                                         '\n过期前会自动尝试续期；续不上时重新扫码即可')
+                self.notify('B站登录快过期了，点左下角头像重新扫码即可续上', 'error')
+        if self.settings_panel is not None:
+            self.settings_panel.refresh_account()
 
     def _bili_clicked(self):
         info = self.bili_account
         logged = info and not info.get('expired')
-        menu = QMenu(self)
-        menu.addAction('长效登录（电视端扫码，约 180 天，推荐）', lambda: self._bili_login(True))
-        menu.addAction('网页扫码登录（约 7 天）', lambda: self._bili_login(False))
+        m = ui.popup_menu(self)
+        m.addAction(icons.icon('tv', c('text2')), '长效登录（电视端扫码，约 180 天，推荐）', lambda: self._bili_login(True))
+        m.addAction(icons.icon('tv', c('text2')), '网页扫码登录（约 7 天）', lambda: self._bili_login(False))
         if logged:
-            menu.addSeparator()
-            menu.addAction('退出登录', self._bili_logout)
-        menu.exec(self.bili_btn.mapToGlobal(self.bili_btn.rect().bottomLeft()))
+            m.addSeparator()
+            m.addAction(icons.icon('log_out', c('text2')), '退出登录', self._bili_logout)
+        src = self.bili_chip
+        m.exec(src.mapToGlobal(QPoint(0, src.height() + 4)))
 
     def _bili_login(self, long_term=True):
         dlg = BiliLoginDialog(self, long_term=long_term)
@@ -1519,7 +2134,7 @@ class MainWindow(QMainWindow):
             self._on_bili_status(dlg.account)
             vip = dlg.account.get('vip')
             n = self._reparse_bilibili()
-            msg = '✓ B站登录成功' + ('（大会员）' if vip else '（非大会员，1080P+ / 4K 仍需开通大会员）')
+            msg = 'B站登录成功' + ('（大会员）' if vip else '（非大会员，1080P+ / 4K 仍需开通大会员）')
             if n:
                 msg += f'，已重新解析 {n} 个 B站视频'
             self.notify(msg, 'ok')
@@ -1542,6 +2157,8 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 剪贴板
     def _on_app_state(self, state):
+        if state == Qt.ApplicationActive:
+            self._refresh_greeting()
         if state != Qt.ApplicationActive or not self.settings.auto_parse_clipboard:
             return
         text = QGuiApplication.clipboard().text()
@@ -1553,12 +2170,11 @@ class MainWindow(QMainWindow):
         if not urls:
             return
         self._clip_urls = urls
-        first = urls[0] if len(urls[0]) <= 60 else urls[0][:57] + '…'
-        self.clip_label.setText(f'📋 剪贴板里有新链接：{first}' if len(urls) == 1
-                                else f'📋 剪贴板里有 {len(urls)} 个新链接')
-        self.clip_label.setToolTip('\n'.join(urls))
-        self._hint.hide()
+        self.clip_label.set_full_text(f'剪贴板里有新链接：{urls[0]}' if len(urls) == 1
+                                      else f'剪贴板里有 {len(urls)} 个新链接：{urls[0]} …', '\n'.join(urls))
+        self.clip_icon.setPixmap(icons.pixmap('clipboard', c('text3'), 16))
         self.clip_bar.show()
+        QTimer.singleShot(0, self._place_toast)
 
     def _parse_clip(self):
         urls, self._clip_urls = self._clip_urls, []
@@ -1568,7 +2184,7 @@ class MainWindow(QMainWindow):
 
     def _hide_clip_bar(self):
         self.clip_bar.hide()
-        self._hint.show()
+        QTimer.singleShot(0, self._place_toast)
 
     # ------------------------------------------------------------ 日志 / 状态
     def _append_log(self, level, msg):
@@ -1584,13 +2200,21 @@ class MainWindow(QMainWindow):
         queued = sum(1 for t in tasks if t.status == core.QUEUED)
         done = sum(1 for t in tasks if t.status in (core.DONE, core.EXISTS))
         failed = sum(1 for t in tasks if t.status == core.FAILED)
+        paused = sum(1 for t in tasks if t.status == core.PAUSED)
         speed = sum(t.speed or 0 for t in running if t.status == core.RUNNING)
         parts = [f'下载中 {len(running)}', f'等待 {queued}', f'完成 {done}']
+        if paused:
+            parts.append(f'暂停 {paused}')
         if failed:
             parts.append(f'失败 {failed}')
         if speed:
-            parts.append(f'⚡ {fmt_speed(speed)}')
-        self.status.setText('　·　'.join(parts))
+            parts.append(fmt_speed(speed))
+        self.tasks_status.set_full_text('  ·  '.join(parts) + f'　　保存到 {self.settings.download_dir}')
+        active = len(running) + queued
+        self.nav_tasks.set_badge(str(active) if active else '')
+        self._refresh_greeting()
+        self.parse_status.setText(f'下载中 {len(running)} 个 · {fmt_speed(speed)}' if speed else
+                                  (f'下载中 {len(running)} 个' if running else ''))
 
     def closeEvent(self, event):
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
@@ -1645,8 +2269,18 @@ def setup_app(argv):
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setStyle('Fusion')
-    app.setFont(QFont('Microsoft YaHei UI', 9))
-    app.setStyleSheet(theme.stylesheet())
+    f = QFont(theme.SANS)
+    f.setPixelSize(13)
+    f.setHintingPreference(QFont.PreferNoHinting)
+    app.setFont(f)
+    theme.apply(app, Settings.load().theme)
+    app._chrome = ui.ChromeFilter(app)
+    app.installEventFilter(app._chrome)
+    try:     # 跟随系统深浅色
+        QGuiApplication.styleHints().colorSchemeChanged.connect(
+            lambda _: theme.mode() == 'system' and theme.apply(app))
+    except Exception:  # noqa: BLE001
+        pass
     if app_icon_path():
         app.setWindowIcon(QIcon(app_icon_path()))
     return app

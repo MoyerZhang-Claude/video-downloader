@@ -76,7 +76,7 @@ _ERROR_HINTS = [
     (r'Requested format is not available', '所选清晰度已不可用，请重新解析'),
     (r"not a bot|confirm you.re not a bot",
      'YouTube 暂时拦截了当前网络（多半是代理 / VPN 节点被风控）：换一个节点后重试；'
-     '经常出现的话，把 YouTube 的 cookies 放进 cookies 文件夹（设置 → Cookies 有说明）'),
+     '经常出现的话，把 YouTube 的 cookies 放进 cookies 文件夹（设置 → 网络与登录 有说明）'),
     (r'Log ?in|login|logged|sign in|cookies|authentication|premium member|会员',
      '该内容需要登录：把该网站导出的 cookies.txt 放进程序目录的 cookies 文件夹（或已过期，请重新导出）'),
     (r'Private video', '视频为私密内容，需要有权限的账号 cookies'),

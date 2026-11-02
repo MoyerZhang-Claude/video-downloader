@@ -7,6 +7,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from . import bilibili
+from .theme import P
 
 
 def qr_pixmap(text, target=264, border=4):
@@ -48,23 +49,29 @@ class BiliLoginDialog(QDialog):
         self.sig.done.connect(self._finish)
 
         v = QVBoxLayout(self)
+        v.setContentsMargins(20, 18, 20, 16)
+        v.setSpacing(10)
+        title = QLabel('B站长效登录' if long_term else 'B站扫码登录')
+        title.setObjectName('sectionTitle')
+        v.addWidget(title)
         tip = QLabel('打开 <b>哔哩哔哩</b> 手机 App，点右上角扫一扫，扫描下方二维码并在手机上确认。'
-                     + ('<br><span style="color:#6d28d9">长效登录：有效期约 180 天。手机上会显示「登录云视听小电视」，'
+                     + (f'<br><span style="color:{P["accent"]}">长效登录：有效期约 180 天。手机上会显示「登录云视听小电视」，'
                         '这是正常的；下载效果和网页登录完全一样。</span>' if long_term else
-                        '<br><span style="color:#888">网页扫码有效期约 7 天；想更久请用「长效登录」。</span>'))
+                        f'<br><span style="color:{P["text3"]}">网页扫码有效期约 7 天；想更久请用「长效登录」。</span>'))
         tip.setWordWrap(True)
         v.addWidget(tip)
         self.qr_label = QLabel('正在获取二维码…')
         self.qr_label.setAlignment(Qt.AlignCenter)
         self.qr_label.setFixedSize(276, 276)
-        self.qr_label.setStyleSheet('background: white; border: 1px solid #ddd;')
+        self.qr_label.setStyleSheet(f'background: white; color: #73726c; border: 1px solid {P["border_strong"]};'
+                                    ' border-radius: 12px;')
         v.addWidget(self.qr_label, alignment=Qt.AlignCenter)
         self.status_label = QLabel('')
         self.status_label.setAlignment(Qt.AlignCenter)
         v.addWidget(self.status_label)
         note = QLabel(r'登录信息只保存在本机（%APPDATA%\VideoDownloader），仅用于解析 B站 视频。')
         note.setWordWrap(True)
-        note.setStyleSheet('color: #888; font-size: 12px;')
+        note.setObjectName('hint')
         v.addWidget(note)
         h = QHBoxLayout()
         self.refresh_btn = QPushButton('刷新二维码')
@@ -126,15 +133,15 @@ class BiliLoginDialog(QDialog):
         self.qr_label.setPixmap(pm)
 
     def _show_status(self, status, msg):
-        text, color = {
-            bilibili.WAITING: ('等待扫码…', '#555'),
-            bilibili.SCANNED: ('已扫码，请在手机上点「确认登录」', '#1565c0'),
-            bilibili.EXPIRED: ('二维码已过期，请点「刷新二维码」', '#ef6c00'),
-            bilibili.SUCCESS: ('登录成功', '#2e7d32'),
-            bilibili.ERROR: (msg or '网络错误，正在重试…', '#c62828'),
-        }.get(status, ('', '#555'))
+        text, role = {
+            bilibili.WAITING: ('等待扫码…', 'text2'),
+            bilibili.SCANNED: ('已扫码，请在手机上点「确认登录」', 'info'),
+            bilibili.EXPIRED: ('二维码已过期，请点「刷新二维码」', 'warn'),
+            bilibili.SUCCESS: ('登录成功', 'ok'),
+            bilibili.ERROR: (msg or '网络错误，正在重试…', 'err'),
+        }.get(status, ('', 'text2'))
         self.status_label.setText(text)
-        self.status_label.setStyleSheet(f'color: {color}; font-weight: bold;')
+        self.status_label.setStyleSheet(f'color: {P[role]}; font-weight: 600;')
         if status == bilibili.EXPIRED or (status == bilibili.ERROR and '二维码' in (msg or '')):
             self.refresh_btn.setVisible(True)
 

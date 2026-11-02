@@ -76,6 +76,10 @@ class Settings:
     check_core_update: bool = True
     save_subs: bool = True        # 字幕（B站 CC / YouTube 等）
     sub_langs: str = 'zh_orig'
+    theme: str = 'system'         # 外观：system 跟随系统 / light / dark
+    nickname: str = ''            # 首页问候语里的称呼
+    sidebar_collapsed: bool = False
+    preset: str = 'pick'          # 输入框下方的清晰度预设
     window_geometry: str = ''
     extra: dict = field(default_factory=dict)
 
@@ -99,6 +103,8 @@ class Settings:
             s.subfolder = 'none'
         if s.cookie_mode not in COOKIE_MODES:
             s.cookie_mode = 'none'
+        if s.theme not in ('system', 'light', 'dark'):
+            s.theme = 'system'
         s.max_concurrent = min(max(int(s.max_concurrent or 3), 1), 10)
         s.fragment_threads = min(max(int(s.fragment_threads or 4), 1), 16)
         return s

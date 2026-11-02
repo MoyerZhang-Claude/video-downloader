@@ -11,19 +11,22 @@ import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -58,21 +61,28 @@ class BiliLoginActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         CookieManager.getInstance().setAcceptCookie(true)
+        val mode = getSharedPreferences("settings", MODE_PRIVATE).getString("theme", "system") ?: "system"
         setContent {
             var tab by remember { mutableStateOf(0) }
-            MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF6366F1))) {
-                Column(Modifier.fillMaxSize()
-                    .background(Brush.linearGradient(listOf(Color(0xFFE0E7FF), Color(0xFFF3E8FF), Color(0xFFFCE7F3))))
-                    .systemBarsPadding()) {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Text("登录 B站", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF312E81),
-                            modifier = Modifier.weight(1f))
-                        TextButton(onClick = { finish() }) { Text("关闭") }
-                    }
-                    TabRow(selectedTabIndex = tab, containerColor = Color.Transparent) {
-                        Tab(tab == 0, onClick = { tab = 0 }, text = { Text("扫码登录（推荐）") })
-                        Tab(tab == 1, onClick = { tab = 1 }, text = { Text("短信 / 密码登录") })
+            val dark = isDarkMode(mode)
+            LaunchedEffect(dark) {
+                val style = if (dark) SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                            else SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+                enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+            }
+            VdTheme(mode) {
+                Column(Modifier.fillMaxSize().background(P.bg).systemBarsPadding()) {
+                    TopBar("登录 B站", { finish() })
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp).clip(RoundedCornerShape(14.dp)).background(P.subtle)
+                        .padding(4.dp)) {
+                        listOf("扫码登录（推荐）", "短信 / 密码登录").forEachIndexed { i, name ->
+                            Text(name, fontSize = 14.sp, textAlign = TextAlign.Center,
+                                fontWeight = if (tab == i) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (tab == i) P.text else P.text3,
+                                modifier = Modifier.weight(1f).clip(RoundedCornerShape(10.dp))
+                                    .background(if (tab == i) P.surface else Color.Transparent)
+                                    .clickable { tab = i }.padding(vertical = 9.dp))
+                        }
                     }
                     if (tab == 0) QrLogin() else WebLogin()
                 }
@@ -119,31 +129,26 @@ class BiliLoginActivity : ComponentActivity() {
             }
         }
 
-        Column(Modifier.fillMaxSize().padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Surface(shape = RoundedCornerShape(18.dp), color = Color.White.copy(alpha = 0.85f),
-                border = BorderStroke(1.dp, Color.White)) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            Surface(shape = RoundedCornerShape(20.dp), color = Color.White, border = BorderStroke(1.dp, P.border)) {
                 Box(Modifier.size(260.dp).padding(14.dp), contentAlignment = Alignment.Center) {
-                    bitmap?.let { Image(it, "B站登录二维码", Modifier.fillMaxSize()) }
-                        ?: CircularProgressIndicator()
+                    bitmap?.let { Image(it, "B站登录二维码", Modifier.fillMaxSize()) } ?: Spark(44.dp, busy = true)
                 }
             }
-            Spacer(Modifier.height(12.dp))
-            Text(status, fontWeight = FontWeight.Bold, color = Color(0xFF4338CA))
+            Spacer(Modifier.height(14.dp))
+            Text(status, fontWeight = FontWeight.SemiBold, color = P.text, fontSize = 15.sp)
             Spacer(Modifier.height(16.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(onClick = { round++ }, shape = RoundedCornerShape(12.dp)) { Text("刷新二维码") }
-                Text("保存二维码到相册", color = Color.White, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.clip(RoundedCornerShape(12.dp))
-                        .background(Brush.linearGradient(listOf(Color(0xFF6366F1), Color(0xFFA855F7))))
-                        .clickable(enabled = bitmap != null) { saveQrToGallery(qrFile) }
-                        .padding(horizontal = 18.dp, vertical = 10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlineButton("刷新二维码", icon = LineIcons.Refresh) { round++ }
+                PrimaryButton("保存二维码到相册", icon = LineIcons.Image, enabled = bitmap != null) { saveQrToGallery(qrFile) }
             }
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(22.dp))
             Text("用法：点「保存二维码到相册」→ 打开 B站 App → 首页左上角「扫一扫」→ 右上角「相册」选这张图 → 确认登录。\n" +
                 "也可以直接截图，再用「扫一扫」识别截图。\n\n" +
                 "这是「长效登录」：有效期约 180 天，下载的清晰度和网页登录完全一样。B站 App 里可能显示「登录云视听小电视」，这是正常的。" +
                 "登录成功后，相册里的二维码会自动删除。",
-                fontSize = 13.sp, color = Color(0xFF6B6F99), textAlign = TextAlign.Start, lineHeight = 20.sp)
+                fontSize = 13.sp, color = P.text3, textAlign = TextAlign.Start, lineHeight = 20.sp)
         }
     }
 
@@ -180,7 +185,7 @@ class BiliLoginActivity : ComponentActivity() {
     private fun WebLogin() {
         var status by remember { mutableStateOf("用手机号验证码或密码登录 B站（网页登录）") }
         Column {
-            Text(status, fontSize = 12.sp, color = Color(0xFF6B6F99), modifier = Modifier.padding(12.dp, 6.dp))
+            Text(status, fontSize = 12.sp, color = P.text3, modifier = Modifier.padding(16.dp, 8.dp))
             AndroidView(modifier = Modifier.fillMaxSize(), factory = { ctx ->
                 WebView(ctx).apply {
                     settings.javaScriptEnabled = true

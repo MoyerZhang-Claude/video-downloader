@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- 启动瞬间的窗口底色和界面一致（象牙白），避免闪一下别的颜色 -->
     <style name="AppTheme" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:statusBarColor">#E0E7FF</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowBackground">@color/bg</item>
     </style>
-    <color name="bg">#EEF0FF</color>
+    <color name="bg">#FAF9F5</color>
 </resources>

@@ -3,8 +3,10 @@ import re
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
+    QCheckBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
 )
+
+from .ui import Combo
 
 
 def parse_time(text):
@@ -48,7 +50,7 @@ class SectionDialog(QDialog):
         v = QVBoxLayout(self)
         v.setContentsMargins(18, 16, 18, 14)
         title = QLabel(video.title)
-        title.setObjectName('section')
+        title.setObjectName('sectionTitle')
         title.setWordWrap(True)
         v.addWidget(title)
         tip = QLabel(f'视频总长 {fmt_time(self.duration)}。时间可以写成 1:23、83（秒）、1:02:03 或 1分23秒。'
@@ -66,7 +68,7 @@ class SectionDialog(QDialog):
             e.textChanged.connect(self._validate)
         form.addRow('开始时间', self.start)
         form.addRow('结束时间', self.end)
-        self.quality = QComboBox()
+        self.quality = Combo()
         for opt in video.options:
             self.quality.addItem(opt.label, opt)
         form.addRow('清晰度', self.quality)
@@ -82,7 +84,7 @@ class SectionDialog(QDialog):
         cancel = QPushButton('取消')
         cancel.clicked.connect(self.reject)
         self.ok = QPushButton('下载这一段')
-        self.ok.setObjectName('accent')
+        self.ok.setObjectName('primary')
         self.ok.clicked.connect(self._accept)
         for b in (cancel, self.ok):
             b.setCursor(Qt.PointingHandCursor)

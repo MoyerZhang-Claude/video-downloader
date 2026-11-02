@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.PowerManager
 import android.webkit.CookieManager
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -83,6 +84,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var showCookieManager by mutableStateOf(false)
     var showCookieHelp by mutableStateOf(false)
+    /** 每次提示 +1（同一句话连着出现也能再弹一次） */
+    var toastSeq by mutableIntStateOf(0)
+        private set
+    /** 外观：system 跟随系统 / light / dark */
+    var themeMode by mutableStateOf("system")
+        private set
+    /** 首页问候语里的称呼 */
+    var nickname by mutableStateOf("")
+        private set
+    var greeting by mutableStateOf("")
+        private set
+    private var greetSlot = ""
 
     private val prefs = app.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private val ids = AtomicLong(1)
@@ -92,12 +105,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         wantSubs = prefs.getBoolean("want_subs", true)
         wantCover = prefs.getBoolean("want_cover", false)
         wantDanmaku = prefs.getBoolean("want_danmaku", false)
+        themeMode = prefs.getString("theme", "system") ?: "system"
+        nickname = prefs.getString("nickname", "") ?: ""
+        newGreeting()
         DownloadRepo.attach(app)
         DownloadRepo.wantSubs = wantSubs
         DownloadRepo.wantCover = wantCover
         DownloadRepo.wantDanmaku = wantDanmaku
         refreshBattery()
-        DownloadRepo.onMessage = { message = it }
+        DownloadRepo.onMessage = { toast(it) }
         DownloadRepo.onDone = { task -> onDownloaded(task) }
         viewModelScope.launch(Dispatchers.IO) {
             PyBridge.init(getApplication())      // 第一次启动要解压 Python 运行环境，稍慢
@@ -114,7 +130,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         super.onCleared()
     }
 
-    fun toast(text: String) { message = text }
+    fun toast(text: String) { message = text; toastSeq++ }
+
+    // ------------------------------------------------------------ 外观 / 问候语
+
+    fun changeTheme(mode: String) {
+        themeMode = mode
+        prefs.edit().putString("theme", mode).apply()
+    }
+
+    fun changeNickname(name: String) {
+        nickname = name.trim().take(20)
+        prefs.edit().putString("nickname", nickname).apply()
+        newGreeting()
+    }
+
+    private fun newGreeting() {
+        greetSlot = Greetings.slot()
+        greeting = Greetings.pick(nickname)
+    }
+
+    /** 回到首页或切回本 App 时：时段变了（下午 → 晚上、过了零点）就换一句问候语 */
+    fun refreshGreeting(force: Boolean = false) {
+        if (force || greetSlot != Greetings.slot()) newGreeting()
+    }
+
+    val appVersion: String by lazy {
+        runCatching { getApplication<Application>().packageManager.getPackageInfo(getApplication<Application>().packageName, 0).versionName }
+            .getOrNull() ?: "?"
+    }
 
     fun toggleSubs(on: Boolean) {
         wantSubs = on
@@ -304,13 +348,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun submitUrls(urls: List<String>, fromCollection: Boolean = false, autoRes: Int? = null): Int {
+        if (fresh && urls.isNotEmpty()) {       // 新的一批：清掉之前的解析结果（下载不受影响）
+            items.clear()
+            fresh = false
+        }
         val known = items.map { it.url }.toSet()
         val fresh = urls.filter { it !in known }
-        fresh.forEach { url ->
+        // 新解析的放在最上面；一次加入多个时保持原来的先后顺序
+        fresh.forEachIndexed { i, url ->
             VideoItem(ids.getAndIncrement(), url).also {
                 it.fromCollection = fromCollection
                 it.autoRes = autoRes
-                items.add(0, it)
+                items.add(i, it)
                 parse(it)
             }
         }
@@ -384,7 +433,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return videos.firstOrNull { it.value.res in 1..res }?.index ?: videos.lastOrNull()?.index ?: 0
     }
 
-    fun remove(item: VideoItem) { items.remove(item) }
+    fun remove(item: VideoItem) {
+        items.remove(item)
+        if (items.isEmpty()) { fresh = false; refreshGreeting(force = true) }
+    }
+
+    fun clearItems() {
+        items.clear()
+        fresh = false
+        refreshGreeting(force = true)
+    }
+
+    /** 点了「解析新链接」：回到首页（问候语）。之前的结果先留着，首页上可以点回去；在首页解析新链接时才清掉。 */
+    var fresh by mutableStateOf(false)
+        private set
+
+    fun newSession() {
+        if (items.isNotEmpty()) fresh = true
+        refreshGreeting(force = true)
+    }
+
+    fun backToResults() { fresh = false }
 
     // ------------------------------------------------------------ 合集 / 选集
 
@@ -425,6 +494,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         toast(if (DownloadRepo.willBurn(item, item.selected)) "✓ 已加入下载，下载完会生成弹幕版，进度在通知栏"
               else "✓ 已加入下载，可以切到别的 App，进度在通知栏")
         maybeAskBattery()
+    }
+
+    /** 全部下载：按每张卡片选好的清晰度，跳过已经在下载或下载过的 */
+    fun downloadAll() {
+        var n = 0
+        var skipped = 0
+        items.filter { it.state == "ok" }.forEach { item ->
+            val busy = tasks.any { it.item === item && it.optIndex == item.selected && (it.active || it.status == "done") }
+            when {
+                busy -> {}
+                item.history.any { it.quality == effectiveTag(item) } -> skipped++
+                else -> { startDownload(item); n++ }
+            }
+        }
+        toast(when {
+            n > 0 -> "✓ 已加入 $n 个下载" + if (skipped > 0) "，跳过 $skipped 个下载过的" else ""
+            skipped > 0 -> "这 $skipped 个视频都下载过了（单独点「下载」可以重新下载）"
+            else -> "没有可下载的视频"
+        })
+        if (n > 0) maybeAskBattery()
     }
 
     /** 历史记录里的清晰度：弹幕版带后缀，和原视频分开判断「下载过没有」 */

@@ -3,6 +3,15 @@ chcp 65001 >nul
 cd /d "%~dp0"
 set "OUT=dist\视频解析下载器"
 set "KEEP=build_keep"
+rem 软件还开着时打包会删到一半失败（正在用的文件删不掉），先检查：日志文件改不了名就说明还在运行
+if exist "%OUT%\logs\app.log" (
+    ren "%OUT%\logs\app.log" app.log.chk 2>nul || (
+        echo 视频解析下载器还在运行：请先右键托盘图标选「退出」，再重新打包。
+        pause
+        exit /b 1
+    )
+    ren "%OUT%\logs\app.log.chk" app.log
+)
 echo 正在打包，约需 1-2 分钟 ...
 rem 打包会清空输出目录，先备份登录信息、设置、下载历史和日志
 if exist "%KEEP%" rmdir /s /q "%KEEP%"

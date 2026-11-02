@@ -42,7 +42,33 @@ def install_override():
     return False
 
 
-def current_version():
+def _version_from_file():
+    """不导入 yt_dlp，直接读 version.py（后台线程正在导入 yt_dlp 时，界面线程再导入会触发导入锁死锁）。"""
+    import importlib.util
+    import re
+    try:
+        spec = importlib.util.find_spec('yt_dlp')
+        for d in (spec.submodule_search_locations or []) if spec else []:
+            path = os.path.join(d, 'version.py')
+            if os.path.isfile(path):
+                with open(path, encoding='utf-8') as f:
+                    m = re.search(r"__version__\s*=\s*'([^']+)'", f.read())
+                if m:
+                    return m.group(1)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def current_version(block=True):
+    mod = sys.modules.get('yt_dlp.version')
+    if getattr(mod, '__version__', None):
+        return mod.__version__
+    v = _version_from_file()
+    if v:
+        return v
+    if not block and 'yt_dlp' in sys.modules:      # 别的线程正在导入，不要在这里等
+        return '（加载中）'
     try:
         from yt_dlp.version import __version__
         return __version__
