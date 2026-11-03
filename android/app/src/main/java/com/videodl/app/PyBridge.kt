@@ -43,9 +43,20 @@ object PyBridge {
         module.callAttr("history_add", key, index, uri, size, suffix)
     }
 
-    fun historyList(search: String = ""): JSONArray = JSONArray(module.callAttr("history_list", search).toString())
+    /** section：-1 = 全部，其它 = 某个分区 */
+    fun historyList(search: String = "", section: Long = -1): JSONArray =
+        JSONArray(module.callAttr("history_list", search, section).toString())
     fun historyDelete(id: Long) { module.callAttr("history_delete", id) }
     fun historyClear() { module.callAttr("history_clear") }
+
+    // ---------------------------------------------------------- 分区（和电脑版共用）
+    fun sections(): JSONArray = JSONArray(module.callAttr("history_sections").toString())
+    fun sectionCreate(name: String, icon: String): Long = module.callAttr("section_create", name, icon).toLong()
+    fun sectionUpdate(id: Long, name: String, icon: String) { module.callAttr("section_update", id, name, icon) }
+    fun sectionDelete(id: Long) { module.callAttr("section_delete", id) }
+    /** sectionId < 0 = 移出分区 */
+    fun historyMove(id: Long, sectionId: Long) { module.callAttr("history_move", id, sectionId) }
+    fun historyRename(id: Long, title: String) { module.callAttr("history_rename", id, title) }
 
     // ---------------------------------------------------------- 网站登录信息（导入的 cookies）
     fun cookiesImport(path: String): JSONObject = JSONObject(module.callAttr("cookies_import", path).toString())

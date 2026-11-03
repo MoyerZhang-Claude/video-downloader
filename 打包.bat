@@ -13,11 +13,12 @@ if exist "%OUT%\logs\app.log" (
     ren "%OUT%\logs\app.log.chk" app.log
 )
 echo 正在打包，约需 1-2 分钟 ...
-rem 打包会清空输出目录，先备份登录信息、设置、下载历史和日志
+rem 打包会清空输出目录，先备份登录信息、设置、头像、下载历史和日志
 if exist "%KEEP%" rmdir /s /q "%KEEP%"
 mkdir "%KEEP%"
 if exist "%OUT%\cookies" xcopy /e /i /y /q "%OUT%\cookies" "%KEEP%\cookies" >nul
 if exist "%OUT%\config.json" copy /y "%OUT%\config.json" "%KEEP%\config.json" >nul
+if exist "%OUT%\avatar" xcopy /e /i /y /q "%OUT%\avatar" "%KEEP%\avatar" >nul
 if exist "%OUT%\history.db" copy /y "%OUT%\history.db" "%KEEP%\history.db" >nul
 if exist "%OUT%\logs" xcopy /e /i /y /q "%OUT%\logs" "%KEEP%\logs" >nul
 ".venv\Scripts\pyinstaller.exe" build.spec --noconfirm --clean
@@ -29,6 +30,7 @@ if errorlevel 1 (
 xcopy /e /i /y /q "ffmpeg" "%OUT%\ffmpeg" >nul
 if exist "%KEEP%\cookies" xcopy /e /i /y /q "%KEEP%\cookies" "%OUT%\cookies" >nul
 if exist "%KEEP%\config.json" copy /y "%KEEP%\config.json" "%OUT%\config.json" >nul
+if exist "%KEEP%\avatar" xcopy /e /i /y /q "%KEEP%\avatar" "%OUT%\avatar" >nul
 if exist "%KEEP%\history.db" copy /y "%KEEP%\history.db" "%OUT%\history.db" >nul
 if exist "%KEEP%\logs" xcopy /e /i /y /q "%KEEP%\logs" "%OUT%\logs" >nul
 rmdir /s /q "%KEEP%"

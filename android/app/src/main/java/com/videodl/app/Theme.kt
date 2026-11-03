@@ -2,8 +2,11 @@ package com.videodl.app
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -55,8 +58,25 @@ val DarkPalette = Palette(
 
 val LocalPalette = staticCompositionLocalOf { LightPalette }
 
-/** 标题用的衬线字体（思源宋体子集，SIL OFL 1.1；授权见 assets/licenses/VDSerif-OFL.txt） */
-val Serif = FontFamily(Font(R.font.vdserif))
+/**
+ * 字体和 Claude 应用一样：中文用手机系统字体；英文正文 VDSans（Hanken Grotesk）、标题 VDSerif（Source Serif 4），
+ * 都是最接近 Claude 字体的开源字体（SIL OFL 1.1，见 assets/licenses/fonts-OFL.txt）。字体里没有中文，中文自动用系统字体。
+ */
+val Serif = FontFamily(Font(R.font.vdserif_regular, FontWeight.Normal), Font(R.font.vdserif_semibold, FontWeight.SemiBold))
+val Sans = FontFamily(Font(R.font.vdsans_regular, FontWeight.Normal), Font(R.font.vdsans_medium, FontWeight.Medium),
+    Font(R.font.vdsans_semibold, FontWeight.SemiBold), Font(R.font.vdsans_semibold, FontWeight.Bold))
+
+private fun typography(): Typography {
+    val t = Typography()
+    fun TextStyle.sans() = copy(fontFamily = Sans)
+    return Typography(
+        displayLarge = t.displayLarge.sans(), displayMedium = t.displayMedium.sans(), displaySmall = t.displaySmall.sans(),
+        headlineLarge = t.headlineLarge.sans(), headlineMedium = t.headlineMedium.sans(), headlineSmall = t.headlineSmall.sans(),
+        titleLarge = t.titleLarge.sans(), titleMedium = t.titleMedium.sans(), titleSmall = t.titleSmall.sans(),
+        bodyLarge = t.bodyLarge.sans(), bodyMedium = t.bodyMedium.sans(), bodySmall = t.bodySmall.sans(),
+        labelLarge = t.labelLarge.sans(), labelMedium = t.labelMedium.sans(), labelSmall = t.labelSmall.sans(),
+    )
+}
 
 val PlatformColors = mapOf(
     "B站" to Color(0xFFFB7299), "B站番剧" to Color(0xFFFB7299), "抖音" to Color(0xFF4B4B52), "快手" to Color(0xFFFF5000),
@@ -85,7 +105,7 @@ fun VdTheme(mode: String, content: @Composable () -> Unit) {
         surfaceContainerHigh = p.surface, surfaceContainerHighest = p.selected,
         outline = p.borderStrong, outlineVariant = p.border, error = p.err, scrim = p.scrim,
     )
-    MaterialTheme(colorScheme = scheme) {
+    MaterialTheme(colorScheme = scheme, typography = typography()) {
         CompositionLocalProvider(LocalPalette provides p, content = content)
     }
 }

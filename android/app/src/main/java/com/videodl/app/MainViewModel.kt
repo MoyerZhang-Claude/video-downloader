@@ -10,6 +10,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -26,7 +27,14 @@ data class HistoryHit(val quality: String, val uri: String, val ts: Double)
 data class CollectionInfo(val kind: String, val title: String, val current: Int, val count: Int)
 data class Episode(val index: Int, val url: String, val title: String, val duration: Double)
 data class HistoryRecord(val id: Long, val title: String, val platform: String, val quality: String, val uri: String,
-                         val size: Long, val ts: Double, val url: String, val exists: Boolean)
+                         val size: Long, val ts: Double, val url: String, val exists: Boolean,
+                         val sectionId: Long = -1, val origTitle: String = "")
+
+/** 分区（和电脑版共用 app/history.py）：icon 是图标名，如 "star"、"brand_bilibili" */
+data class Section(val id: Long, val name: String, val icon: String, val builtin: Boolean, val count: Int)
+
+/** 正在新建（section = null）或编辑的分区；moveIn：新建后把这个视频移进去 */
+data class SectionEdit(val section: Section?, val moveIn: HistoryRecord?)
 
 class VideoItem(val id: Long, val url: String) {
     var state by mutableStateOf("parsing")        // parsing / ok / error
@@ -96,6 +104,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var greeting by mutableStateOf("")
         private set
     private var greetSlot = ""
+    /** 用户头像（圆形，圆外透明）；没设置就是 null */
+    var avatar by mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+        private set
+    /** 正在编辑的头像（不为 null 时显示编辑页） */
+    var avatarEdit by mutableStateOf<AvatarEdit?>(null)
 
     private val prefs = app.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private val ids = AtomicLong(1)
@@ -115,6 +128,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         refreshBattery()
         DownloadRepo.onMessage = { toast(it) }
         DownloadRepo.onDone = { task -> onDownloaded(task) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val a = runCatching { AvatarStore.load(app) }.getOrNull()
+            withContext(Dispatchers.Main) { avatar = a }
+        }
         viewModelScope.launch(Dispatchers.IO) {
             PyBridge.init(getApplication())      // 第一次启动要解压 Python 运行环境，稍慢
             withContext(Dispatchers.Main) { ready = true }
@@ -143,6 +160,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         nickname = name.trim().take(20)
         prefs.edit().putString("nickname", nickname).apply()
         newGreeting()
+    }
+
+    // ------------------------------------------------------------ 头像
+
+    /** 从相册选好的图片 → 打开编辑页框选 */
+    fun openAvatarImage(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val bmp = AvatarStore.decode(getApplication(), uri)
+            withContext(Dispatchers.Main) {
+                if (bmp == null) toast("打不开这张图片") else avatarEdit = AvatarEdit(bmp, null, true)
+            }
+        }
+    }
+
+    /** 用上次的原图重新调整位置 */
+    fun adjustAvatar() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val e = AvatarStore.loadSaved(getApplication())
+            withContext(Dispatchers.Main) { if (e == null) toast("找不到原图，请重新选择图片") else avatarEdit = e }
+        }
+    }
+
+    fun saveAvatar(result: android.graphics.Bitmap, state: CropState, source: android.graphics.Bitmap?) {
+        avatarEdit = null
+        avatar = result.asImageBitmap()
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = runCatching { AvatarStore.save(getApplication(), result, state, source) }
+                .onFailure { android.util.Log.w("videodl", "保存头像失败", it) }.isSuccess
+            withContext(Dispatchers.Main) { toast(if (ok) "头像已更新" else "保存头像失败") }
+        }
+    }
+
+    fun removeAvatar() {
+        avatar = null
+        viewModelScope.launch(Dispatchers.IO) { AvatarStore.remove(getApplication()) }
+        toast("已移除头像")
     }
 
     private fun newGreeting() {
@@ -537,26 +590,116 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------ 历史
 
     var historySearch by mutableStateOf("")
+    /** 历史记录页只看某个分区（-1 = 全部） */
+    var historySection by mutableStateOf(-1L)
+    var sections by mutableStateOf(listOf<Section>())
+        private set
+    /** 侧边栏「最近下载」（不受历史页搜索 / 筛选影响） */
+    val recent = mutableStateListOf<HistoryRecord>()
+    /** 搜索页的结果 */
+    val searchResults = mutableStateListOf<HistoryRecord>()
+    var searchQuery by mutableStateOf("")
+    /** 正在重命名 / 移至分区的记录、正在编辑的分区（界面据此弹窗） */
+    var renaming by mutableStateOf<HistoryRecord?>(null)
+    var moving by mutableStateOf<HistoryRecord?>(null)
+    var sectionEditor by mutableStateOf<SectionEdit?>(null)
+
+    private fun parseRecords(arr: org.json.JSONArray) = List(arr.length()) { i -> arr.getJSONObject(i).let {
+        val uri = it.optString("filepath")
+        HistoryRecord(it.getLong("id"), it.optString("title"), it.optString("platform"), it.optString("quality"),
+            uri, it.optLong("size"), it.optDouble("ts"), it.optString("url"), uriExists(uri),
+            if (it.isNull("section_id")) -1 else it.optLong("section_id", -1), it.optString("orig_title"))
+    } }
 
     fun loadHistory(search: String = historySearch) {
         viewModelScope.launch(Dispatchers.IO) {
             awaitReady()
-            val arr = runCatching { PyBridge.historyList(search) }.getOrNull() ?: return@launch
-            val list = List(arr.length()) { i -> arr.getJSONObject(i).let {
-                val uri = it.optString("filepath")
-                HistoryRecord(it.getLong("id"), it.optString("title"), it.optString("platform"), it.optString("quality"),
-                    uri, it.optLong("size"), it.optDouble("ts"), it.optString("url"), uriExists(uri))
-            } }
-            withContext(Dispatchers.Main) { history.clear(); history.addAll(list) }
+            val arr = runCatching { PyBridge.historyList(search, historySection) }.getOrNull() ?: return@launch
+            val list = parseRecords(arr)
+            val recentList = runCatching { parseRecords(PyBridge.historyList("", -1)).take(40) }.getOrNull()
+            val secs = runCatching { PyBridge.sections() }.getOrNull()?.let { a ->
+                List(a.length()) { i -> a.getJSONObject(i).let {
+                    Section(it.getLong("id"), it.optString("name"), it.optString("icon"), it.optInt("builtin") == 1, it.optInt("count"))
+                } }
+            }
+            withContext(Dispatchers.Main) {
+                history.clear(); history.addAll(list)
+                recentList?.let { recent.clear(); recent.addAll(it) }
+                secs?.let { sections = it }
+                if (historySection >= 0 && sections.none { it.id == historySection }) historySection = -1
+            }
         }
     }
 
+    fun search(q: String) {
+        searchQuery = q
+        viewModelScope.launch(Dispatchers.IO) {
+            awaitReady()
+            val list = runCatching { parseRecords(PyBridge.historyList(q.trim(), -1)).take(80) }.getOrNull() ?: return@launch
+            withContext(Dispatchers.Main) {
+                if (searchQuery == q) { searchResults.clear(); searchResults.addAll(list) }
+            }
+        }
+    }
+
+    /** 历史记录、分区改动后：刷新历史页、侧边栏和搜索结果 */
+    private fun afterChange() {
+        loadHistory()
+        search(searchQuery)
+    }
+
+    fun showSection(id: Long) {
+        historySection = id
+        historySearch = ""
+        loadHistory("")
+    }
+
     fun deleteHistory(rec: HistoryRecord) {
-        viewModelScope.launch(Dispatchers.IO) { PyBridge.historyDelete(rec.id); loadHistory() }
+        viewModelScope.launch(Dispatchers.IO) { PyBridge.historyDelete(rec.id); afterChange() }
     }
 
     fun clearHistory() {
-        viewModelScope.launch(Dispatchers.IO) { PyBridge.historyClear(); loadHistory() }
+        viewModelScope.launch(Dispatchers.IO) { PyBridge.historyClear(); afterChange() }
+    }
+
+    /** 重命名：只改 App 里显示的名字，不动文件；留空 = 恢复原标题 */
+    fun renameRecord(rec: HistoryRecord, title: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            PyBridge.historyRename(rec.id, title.trim())
+            afterChange()
+            withContext(Dispatchers.Main) { toast(if (title.isBlank()) "已恢复原标题" else "✓ 已重命名") }
+        }
+    }
+
+    /** sectionId < 0 = 移出分区 */
+    fun moveRecord(rec: HistoryRecord, sectionId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            PyBridge.historyMove(rec.id, sectionId)
+            afterChange()
+            val name = sections.firstOrNull { it.id == sectionId }?.name
+            withContext(Dispatchers.Main) { toast(if (name != null) "✓ 已移至「$name」" else "已移出分区") }
+        }
+    }
+
+    fun createSection(name: String, icon: String, moveIn: HistoryRecord? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val id = PyBridge.sectionCreate(name.trim(), icon)
+            moveIn?.let { PyBridge.historyMove(it.id, id) }
+            afterChange()
+            withContext(Dispatchers.Main) { toast("✓ 已新建分区「${name.trim()}」" + if (moveIn != null) "，视频已移进去" else "") }
+        }
+    }
+
+    fun updateSection(s: Section, name: String, icon: String) {
+        viewModelScope.launch(Dispatchers.IO) { PyBridge.sectionUpdate(s.id, name.trim(), if (s.builtin) "" else icon); afterChange() }
+    }
+
+    fun deleteSection(s: Section) {
+        viewModelScope.launch(Dispatchers.IO) {
+            PyBridge.sectionDelete(s.id)
+            afterChange()
+            withContext(Dispatchers.Main) { toast("已删除分区「${s.name}」，里面的视频回到所属平台的分区") }
+        }
     }
 
     /** 下载的文件还在不在（用户可能在相册/文件管理里删了） */

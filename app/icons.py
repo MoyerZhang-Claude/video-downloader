@@ -8,6 +8,8 @@ from PySide6.QtCore import QByteArray, QRectF, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
+from .brand_logos import LOGOS
+
 
 def _gear():
     """齿轮：8 个圆润的齿 + 中心圆。"""
@@ -40,6 +42,10 @@ BODIES = {
     'download': '<path d="M12 4.5v10.5M7.2 10.5 12 15.3l4.8-4.8M5 19.5h14"/>',
     'settings': _gear(),
     'search': '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>',
+    'zoom_in': '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4M8.4 11h5.2M11 8.4v5.2"/>',
+    'zoom_out': '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4M8.4 11h5.2"/>',
+    'rotate': '<rect x="3.5" y="10" width="10.5" height="10.5" rx="2"/>'
+              '<path d="M10 4.5h4a5.5 5.5 0 0 1 5.5 5.5v3.5M16.8 11.3l2.7 2.7 2.7-2.7"/>',
     'chevron_down': '<path d="m6.5 9.5 5.5 5.5 5.5-5.5"/>',
     'chevron_up': '<path d="m6.5 14.5 5.5-5.5 5.5 5.5"/>',
     'chevron_right': '<path d="m9.5 6.5 5.5 5.5-5.5 5.5"/>',
@@ -96,19 +102,86 @@ BODIES = {
     'github': '<path d="M9 19.5c-4 1.2-4-2-5.5-2.5M14.5 21v-3.4a3 3 0 0 0-.8-2.3c2.7-.3 5.5-1.3 5.5-6a4.7 4.7 0 0 0-1.3-3.2'
               ' 4.4 4.4 0 0 0-.1-3.2s-1-.3-3.4 1.3a11.6 11.6 0 0 0-6 0C6 2.6 5 2.9 5 2.9a4.4 4.4 0 0 0-.1 3.2'
               'A4.7 4.7 0 0 0 3.6 9.3c0 4.7 2.8 5.7 5.5 6a3 3 0 0 0-.8 2.3V21"/>',
+    'edit': '<path d="M14.5 5.5l4 4M4 20l1-4.5L15.8 4.7a2 2 0 0 1 2.9 0l.6.6a2 2 0 0 1 0 2.9L8.5 19z"/>',
+    'folder_move': '<path d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4l2 2.2h8A1.5 1.5 0 0 1 20.5 9.2v8.8a1.5 1.5 0 0 1-1.5 1.5H5'
+                   'A1.5 1.5 0 0 1 3.5 18z"/><path d="M9 13.5h6.5M13 11l2.5 2.5L13 16"/>',
+    'folder_plus': '<path d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4l2 2.2h8A1.5 1.5 0 0 1 20.5 9.2v8.8a1.5 1.5 0 0 1-1.5 1.5H5'
+                   'A1.5 1.5 0 0 1 3.5 18z"/><path d="M12 10.5v6M9 13.5h6"/>',
+    # ---- 自建分区可选的图标库 ----
+    'star': '<path d="M12 3.6l2.5 5.2 5.7.8-4.1 4 1 5.7L12 16.6l-5.1 2.7 1-5.7-4.1-4 5.7-.8z"/>',
+    'music': '<path d="M9 17.5V6.2l10-2.2v11.5"/><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="16.5" cy="15.5" r="2.5"/>',
+    'game': '<path d="M7.2 8h9.6a4.5 4.5 0 0 1 4.4 5.4l-.7 3.5a2.3 2.3 0 0 1-4.1 1l-1.9-2.4H9.5l-1.9 2.4a2.3 2.3 0 0 1-4.1-1'
+            'l-.7-3.5A4.5 4.5 0 0 1 7.2 8z"/><path d="M7.5 10.5v3.5M5.75 12.25h3.5"/>' + _dots((15.5, 11), (17.5, 13.2), r=1.05),
+    'book': '<path d="M4.5 5.5A1.5 1.5 0 0 1 6 4h12.5v14H6a1.5 1.5 0 0 0-1.5 1.5z"/><path d="M4.5 19.5A1.5 1.5 0 0 0 6 21h12.5'
+            'M8.5 8h6"/>',
+    'camera': '<path d="M4.5 8.5A1.5 1.5 0 0 1 6 7h2l1.5-2.2h5L16 7h2a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 18 19H6'
+              'a1.5 1.5 0 0 1-1.5-1.5z"/><circle cx="12" cy="12.8" r="3.3"/>',
+    'cap': '<path d="M2.5 9.5 12 5l9.5 4.5L12 14z"/><path d="M6.5 11.6V16c1.5 1.4 3.4 2 5.5 2s4-.6 5.5-2v-4.4M21.5 9.5v5"/>',
+    'bookmark': '<path d="M6.5 4.5A1.5 1.5 0 0 1 8 3h8a1.5 1.5 0 0 1 1.5 1.5V21L12 17l-5.5 4z"/>',
+    'coffee': '<path d="M5 9h12v6a5 5 0 0 1-5 5h-2a5 5 0 0 1-5-5z"/><path d="M17 11h1.5a2.5 2.5 0 0 1 0 5H17'
+              'M8.5 3.5c-.6.8-.6 1.7 0 2.5M12 3.5c-.6.8-.6 1.7 0 2.5"/>',
+    'plane': '<path d="M21 3.5 10.5 14M21 3.5l-6.5 17-4-6.5-6.5-4z"/>',
+    'dumbbell': '<path d="M6.5 6.5v11M17.5 6.5v11M3.5 9v6M20.5 9v6M6.5 12h11"/>',
+    'food': '<path d="M7 3v8M4.5 3v5a2.5 2.5 0 0 0 5 0V3M7 11v10M17 3c-1.8 1-3 3.2-3 6v4h3v8"/>',
+    'paw': '<circle cx="8.3" cy="7.5" r="1.8"/><circle cx="15.7" cy="7.5" r="1.8"/><circle cx="4.9" cy="12" r="1.6"/>'
+           '<circle cx="19.1" cy="12" r="1.6"/><path d="M12 11.5c-2.5 0-5 3.6-5 6a2.5 2.5 0 0 0 3.2 2.4c1.2-.4 2.4-.4 3.6 0'
+           'A2.5 2.5 0 0 0 17 17.5c0-2.4-2.5-6-5-6z"/>',
+    'palette': '<path d="M12 3.5a8.5 8.5 0 1 0 0 17c1.3 0 2-.8 2-1.8 0-1.3-1.2-1.7-1.2-2.9 0-1 .8-1.8 1.8-1.8h2.1'
+               'a3.8 3.8 0 0 0 3.8-3.8c0-3.8-3.8-6.7-8.5-6.7z"/>' + _dots((7.6, 11.6), (9.4, 7.8), (14.2, 7.6), r=1.15),
+    'code': '<path d="m8 7-5 5 5 5M16 7l5 5-5 5M13.5 4.5l-3 15"/>',
+    'mic': '<rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"/>',
+    'leaf': '<path d="M6 18.5C5 11 9.5 5 19.5 4.5c.5 9.5-5 14.5-13.5 14z"/><path d="M4.5 20.5c3.5-4.5 7-7.5 10.5-9.5"/>',
+    'flame': '<path d="M12 21c-3.9 0-6.5-2.6-6.5-6.2 0-3.6 2.7-5.6 3.6-8.8 2.2 1.3 3.2 3.4 3.1 5.4 1-.6 1.8-1.7 2-3'
+             ' 1.9 1.6 3.3 4 3.3 6.4 0 3.6-2.6 6.2-5.5 6.2z"/>',
+    'gift': '<rect x="3.5" y="8" width="17" height="4" rx="1"/><path d="M5 12v7.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V12'
+            'M12 8v12.5M12 8C10.5 4.5 6.5 4 6.5 6.5S10 8 12 8zm0 0c1.5-3.5 5.5-4 5.5-1.5S14 8 12 8z"/>',
+    'home': '<path d="M4 10.5 12 4l8 6.5V19a1.5 1.5 0 0 1-1.5 1.5H15V15H9v5.5H5.5A1.5 1.5 0 0 1 4 19z"/>',
+    'car': '<path d="M4.8 13.5 6.4 8.4A2 2 0 0 1 8.3 7h7.4a2 2 0 0 1 1.9 1.4l1.6 5.1"/><rect x="3.5" y="13.5" width="17"'
+           ' height="4.5" rx="1.5"/><path d="M6 18v2M18 18v2"/>' + _dots((7.5, 15.75), (16.5, 15.75), r=1),
+    'smile': '<circle cx="12" cy="12" r="8.5"/><path d="M8.5 14.2a4.2 4.2 0 0 0 7 0"/>' + _dots((9, 10), (15, 10), r=1),
+    'sparkle': '<path d="M11 3.5c.6 4.4 2.1 5.9 6.5 6.5-4.4.6-5.9 2.1-6.5 6.5-.6-4.4-2.1-5.9-6.5-6.5 4.4-.6 5.9-2.1 6.5-6.5z"/>'
+               '<path d="M18.5 15.5c.3 1.8.9 2.4 2.7 2.7-1.8.3-2.4.9-2.7 2.7-.3-1.8-.9-2.4-2.7-2.7 1.8-.3 2.4-.9 2.7-2.7z"/>',
+    'trophy': '<path d="M8 4h8v5.5a4 4 0 0 1-8 0z"/><path d="M8 6H5.5a2.5 2.5 0 0 0 2.6 3.5M16 6h2.5a2.5 2.5 0 0 1-2.6 3.5'
+              'M12 13.5V17M8.5 20.5h7M9.5 20.5c0-2 1-3.5 2.5-3.5s2.5 1.5 2.5 3.5"/>',
+    'news': '<path d="M5 5.5h11.5V19a1.5 1.5 0 0 0 1.5 1.5H6.5A1.5 1.5 0 0 1 5 19z"/><path d="M16.5 9h2.5V19a1.5 1.5 0 0 1-1.5 1.5'
+            'M8 9h5.5M8 12.5h5.5M8 16h3.5"/>',
+    'moon_star': '<path d="M19.5 14.6A7.8 7.8 0 1 1 9.4 4.5a6.2 6.2 0 0 0 10.1 10.1z"/><path d="M17 3.5v3M15.5 5h3"/>',
 }
+
+# 新建分区时可以选的图标（顺序就是图标库里的排列）
+SECTION_ICONS = ['folder', 'star', 'heart', 'bookmark', 'music', 'film', 'tv', 'game', 'camera', 'mic', 'book', 'cap',
+                 'news', 'code', 'palette', 'sparkle', 'trophy', 'gift', 'smile', 'paw', 'leaf', 'flame', 'coffee', 'food',
+                 'dumbbell', 'plane', 'car', 'home', 'globe', 'moon_star']
 
 _SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{c}" '
         'stroke-width="{w}" stroke-linecap="round" stroke-linejoin="round">{body}</svg>')
 _cache = {}
 
 
+def _brand_svg(info, color):
+    """平台 logo：单色实心轮廓，居中放进正方形（颜色由主题决定）。"""
+    x, y, w, h = info['box']
+    side = max(w, h) * 1.06
+    vx, vy = x + w / 2 - side / 2, y + h / 2 - side / 2
+    rule = ' fill-rule="evenodd"' if info['evenodd'] else ''
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{vx:.3f} {vy:.3f} {side:.3f} {side:.3f}">'
+            f'<path d="{" ".join(info["paths"])}" fill="{color}"{rule}/></svg>')
+
+
+def is_known(name):
+    return name in BODIES or name in LOGOS
+
+
 def _renderer(name, color, width):
     key = (name, color, width)
     r = _cache.get(key)
     if r is None:
-        body = BODIES.get(name, BODIES['x']).replace('{c}', color)
-        r = QSvgRenderer(QByteArray(_SVG.format(c=color, w=width, body=body).encode()))
+        if name in LOGOS:
+            svg = _brand_svg(LOGOS[name], color)
+        else:
+            body = BODIES.get(name, BODIES['folder']).replace('{c}', color)
+            svg = _SVG.format(c=color, w=width, body=body)
+        r = QSvgRenderer(QByteArray(svg.encode()))
         _cache[key] = r
     return r
 

@@ -48,12 +48,12 @@ def _use_android_error_hints():
         if re.search(r"not a bot|confirm you.re not a bot", raw, re.I):
             if _yt_cookie_count():
                 msg = ('YouTube 仍要求人机验证：导入的登录信息可能已失效，请重新导出后再导入'
-                       '（「下载选项 → 网站登录信息」），或换一个 VPN 节点')
+                       '（「设置 → 网站登录信息」），或换一个 VPN 节点')
             else:
                 msg = ('YouTube 暂时拦截了当前网络（多半是 VPN 节点被风控）：换一个节点后重试，'
-                       '或在「下载选项 → 网站登录信息」里导入 YouTube 的 cookies')
+                       '或在「设置 → 网站登录信息」里导入 YouTube 的 cookies')
         elif msg.startswith('该内容需要登录'):
-            msg = '该内容需要登录：在「下载选项 → 网站登录信息」导入这个网站的 cookies（B站 点右上角「B站登录」）'
+            msg = '该内容需要登录：在「设置 → 网站登录信息」导入这个网站的 cookies（B站 在设置页顶部扫码登录）'
         return msg, raw
 
     friendly._android = True
@@ -469,8 +469,38 @@ def history_add(key, index, uri, size, suffix=''):
                         info.get('webpage_url') or '', options[index].tag + suffix, uri, int(size or 0))
 
 
-def history_list(search=''):
-    return json.dumps(_history.recent(search), ensure_ascii=False)
+def history_list(search='', section=-1):
+    """section：-1 = 全部，其它 = 某个分区的 id"""
+    sec = None if int(section) < 0 else int(section)
+    return json.dumps(_history.recent(search, section=sec), ensure_ascii=False)
+
+
+# ---------------------------------------------------------------- 分区（和电脑版共用 app/history.py）
+
+def history_sections():
+    return json.dumps(_history.sections(), ensure_ascii=False)
+
+
+def section_create(name, icon):
+    return int(_history.create_section(name, icon))
+
+
+def section_update(section_id, name, icon):
+    _history.update_section(int(section_id), name or None, icon or None)
+
+
+def section_delete(section_id):
+    return bool(_history.delete_section(int(section_id)))
+
+
+def history_move(row_id, section_id):
+    """section_id < 0 = 移出分区"""
+    sid = int(section_id)
+    _history.move([int(row_id)], None if sid < 0 else sid)
+
+
+def history_rename(row_id, title):
+    _history.rename(int(row_id), title)
 
 
 def history_delete(row_id):

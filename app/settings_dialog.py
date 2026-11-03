@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import APP_NAME, APP_VERSION, bilibili, core_update, hotkey, ui
+from . import APP_NAME, APP_VERSION, avatar, bilibili, core_update, hotkey, ui
 from .config import (
     BROWSERS, CODEC_PREFERENCES, COOKIE_MODES, FILENAME_TEMPLATES, ROOT, SUB_LANG_MODES, SUBFOLDER_MODES,
 )
@@ -101,6 +101,7 @@ class SettingsPanel(ui.Overlay):
     # ------------------------------------------------------------ 框架
     def open_at(self, page=None):
         self.refresh_account()
+        self.refresh_avatar()
         self._refresh_cookie_hint()
         self._refresh_core_version()
         if page:
@@ -190,6 +191,17 @@ class SettingsPanel(ui.Overlay):
         seg.changed.connect(self.win.apply_theme)
         self._row(lay, '主题', '跟随 Windows 的浅色 / 深色设置，或固定一种', seg)
         self._section(lay, '个人')
+        box = QHBoxLayout()
+        box.setSpacing(6)
+        self.avatar_view = ui.Avatar(40)
+        box.addWidget(self.avatar_view)
+        box.addSpacing(8)
+        self.avatar_btns = [_btn('选择图片…', self._avatar_change), _btn('调整…', self._avatar_adjust),
+                            _btn('移除', self._avatar_remove, 'danger')]
+        for b in self.avatar_btns:
+            box.addWidget(b)
+        self._row(lay, '头像', '选一张图片，拖动、缩放框出圆形区域；显示在侧边栏左下角', box)
+        self.refresh_avatar()
         nick = QLineEdit(self.s.nickname)
         nick.setPlaceholderText('例如：Moyer')
         nick.setFixedWidth(220)
@@ -211,6 +223,27 @@ class SettingsPanel(ui.Overlay):
                                      self.hotkey_edit)
         self._row(lay, '剪贴板提示', '复制了新链接、切回本窗口时，在输入框上方提示是否解析',
                   self._toggle('auto_parse_clipboard'))
+
+    def refresh_avatar(self):
+        img = avatar.image()
+        self.avatar_view.set_image(img)
+        self.avatar_view.set_text(self.s.nickname)
+        self.avatar_btns[0].setText('更换…' if img is not None else '选择图片…')
+        for b in self.avatar_btns[1:]:
+            b.setVisible(img is not None)    # 这些按钮已经在面板里，可以安全地 show
+
+    def _avatar_change(self):
+        if avatar.change(self.win):
+            self.win.setting_changed('avatar')
+
+    def _avatar_adjust(self):
+        if avatar.adjust(self.win):
+            self.win.setting_changed('avatar')
+
+    def _avatar_remove(self):
+        if QMessageBox.question(self.win, '移除头像', '移除后左下角恢复显示名字首字母。') == QMessageBox.Yes:
+            avatar.remove()
+            self.win.setting_changed('avatar')
 
     def _set_hotkey(self):
         text = self.hotkey_edit.text().strip()
@@ -474,7 +507,9 @@ class SettingsPanel(ui.Overlay):
         self._section(lay, '致谢')
         for name, desc in (('yt-dlp', '视频解析核心（Unlicense）'), ('FFmpeg', '音视频合并与转换（GPL）'),
                            ('Qt / PySide6', '界面框架（LGPL）'),
-                           ('思源宋体（Noto Serif SC）', '标题字体，截取常用字后改名 VDSerif（SIL Open Font License 1.1）')):
+                           ('Hanken Grotesk、Source Serif 4', '界面英文字体，截取拉丁字母后改名 VDSans / VDSerif'
+                                                              '（SIL Open Font License 1.1）'),
+                           ('各平台 logo', 'B站、X、YouTube、抖音、快手的 logo 是各自的商标，只用来标识对应的分区')):
             self._row(lay, name, desc)
         lay.addSpacing(18)
         h = QHBoxLayout()

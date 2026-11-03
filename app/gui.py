@@ -20,10 +20,12 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
-from . import APP_NAME, APP_VERSION, bilibili, core, greetings, icons, task_store, theme, ui
+from . import APP_NAME, APP_VERSION, avatar, bilibili, core, greetings, icons, task_store, theme, ui
 from .bili_dialog import BiliLoginDialog
 from .config import ROOT, Settings, ffmpeg_dir
 from .episode_dialog import EpisodeDialog
+from .folder_dialog import FolderDialog, TextDialog
+from .search_panel import SearchPanel
 from .history import History
 from .hotkey import GlobalHotkey
 from .section_dialog import SectionDialog
@@ -414,11 +416,17 @@ class HistoryRow(QWidget):
                 ('play_circle', '打开', lambda: os.startfile(h['filepath']), exists),
                 ('folder', '打开所在文件夹', lambda: reveal_in_explorer(h['filepath']), exists),
                 ('refresh', '重新解析', lambda: win._reparse_url(h['url']), True),
-                ('trash', '删除这条记录（不删文件）', lambda: win._delete_history(h['id']), True)):
+                ('trash', '删除这条记录（不删文件）', lambda: win._delete_history(h['id']), True),
+                ('more', '重命名、移至分区…', None, True)):
             b = IconButton(icon, tip, size=30, icon_size=17)
-            b.clicked.connect(slot)
+            if slot:
+                b.clicked.connect(slot)
+            else:
+                b.clicked.connect(lambda _=False, bb=b: win._item_menu(h, bb.mapToGlobal(QPoint(0, bb.height() + 4))))
             b.setEnabled(ok)
             oh.addWidget(b)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(lambda pos: win._item_menu(h, self.mapToGlobal(pos)))
         self.ops.setVisible(False)
         lay.addWidget(self.ops)
         self.exists = exists
@@ -520,6 +528,9 @@ class MainWindow(QMainWindow):
         self.page = 'parse'
         self.fresh = False               # 点了「解析新链接」：显示首页，之前的结果暂时收起
         self.settings_panel = None
+        self.search_panel = None
+        self.hist_section = None         # 历史记录页只看某个分区（None = 全部）
+        self.sections = {}
         try:
             self.history = History()
         except Exception as e:  # noqa: BLE001 - 历史库打不开时不影响下载
@@ -589,9 +600,10 @@ class MainWindow(QMainWindow):
         self.toast = ui.Toast(central)
         QShortcut(QKeySequence('Ctrl+,'), self, activated=self._open_settings)
         QShortcut(QKeySequence('Ctrl+L'), self, activated=self._new_parse)
+        QShortcut(QKeySequence('Ctrl+K'), self, activated=self._open_search)
         self._set_collapsed(self.settings.sidebar_collapsed)
         self._update_parse_mode()
-        self._refresh_recents()
+        self._refresh_sidebar()
         self._go('parse')
 
     # 侧边栏 ----------------------------------------------------------
@@ -619,23 +631,45 @@ class MainWindow(QMainWindow):
         self.nav_new = NavItem('解析新链接', special=True)
         self.nav_new.setCheckable(True)
         self.nav_new.clicked.connect(self._new_parse)
+        self.nav_search = NavItem('搜索', 'search')       # 和 Claude 一样放在「新建」下面
+        self.nav_search.setCheckable(False)
+        self.nav_search.setToolTip('搜索下载过的视频和分区（Ctrl+K）')
+        self.nav_search.clicked.connect(self._open_search)
         self.nav_tasks = NavItem('下载', 'download')
         self.nav_tasks.clicked.connect(lambda: self._go('tasks'))
         self.nav_hist = NavItem('历史记录', 'clock')
-        self.nav_hist.clicked.connect(lambda: self._go('history'))
+        self.nav_hist.clicked.connect(lambda: self._show_section(None))
         self.navs = {'parse': self.nav_new, 'tasks': self.nav_tasks, 'history': self.nav_hist}
-        for n in self.navs.values():
+        for n in (self.nav_new, self.nav_search, self.nav_tasks, self.nav_hist):
             v.addWidget(n)
-        v.addSpacing(18)
-        self.recent_label = label('最近下载', 'sideSection')
-        v.addWidget(self.recent_label)
-        v.addSpacing(4)
+        v.addSpacing(14)
+        # 分区 + 最近下载（一起滚动）
+        side = clear_widget()
+        sl = QVBoxLayout(side)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(1)
+        extra = self.settings.extra
+        self.sec_header = ui.SideHeader('分区', extra.get('sections_open', True), '新建分区')
+        self.sec_header.toggled_open.connect(lambda on: self._toggle_side('sections_open', on))
+        self.sec_header.plus.clicked.connect(lambda: self._new_section())
+        sl.addWidget(self.sec_header)
+        sec = clear_widget()
+        self.sec_box = QVBoxLayout(sec)
+        self.sec_box.setContentsMargins(0, 0, 0, 0)
+        self.sec_box.setSpacing(1)
+        sl.addWidget(sec)
+        sl.addSpacing(10)
+        self.recent_header = ui.SideHeader('最近下载', extra.get('recents_open', True))
+        self.recent_header.toggled_open.connect(lambda on: self._toggle_side('recents_open', on))
+        sl.addWidget(self.recent_header)
         rc = clear_widget()
         self.recent_box = QVBoxLayout(rc)
         self.recent_box.setContentsMargins(0, 0, 0, 0)
         self.recent_box.setSpacing(1)
-        self.recent_box.addStretch(1)
-        self.recent_scroll = scroll_area(rc)
+        sl.addWidget(rc)
+        sl.addStretch(1)
+        self.expanded_sections = set()
+        self.recent_scroll = scroll_area(side)
         v.addWidget(self.recent_scroll, 1)
         self.side_fill = QWidget()        # 收起时代替最近列表占位
         self.side_fill.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
@@ -650,11 +684,11 @@ class MainWindow(QMainWindow):
     def _set_collapsed(self, on, save=False):
         self.settings.sidebar_collapsed = on
         self.sidebar.setFixedWidth(60 if on else 260)
-        for w in (self.brand, self.side_spark, self.recent_label, self.recent_scroll):
+        for w in (self.brand, self.side_spark, self.recent_scroll):
             w.setVisible(not on)
         self.side_fill.setVisible(on)
         self.side_top.setContentsMargins(0 if on else 6, 0, 0, 0)
-        for n in self.navs.values():
+        for n in (*self.navs.values(), self.nav_search):
             n.set_collapsed(on)
         self.account.set_collapsed(on)
         self.collapse_btn.setToolTip('展开侧边栏' if on else '收起侧边栏')
@@ -686,24 +720,77 @@ class MainWindow(QMainWindow):
         self._update_parse_mode()
         self._go('parse')
 
-    def _refresh_recents(self):
-        while self.recent_box.count() > 1:
-            item = self.recent_box.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        recs = self.history.recent('', limit=16) if self.history else []
-        for i, h in enumerate(recs):
-            n = NavItem(h['title'] or h['url'], height=32, font_px=13)
-            n.setCheckable(False)
-            n.setToolTip(f'{h["title"]}\n{(h["quality"] or "").replace("] [", " · ")} · {fmt_ago(h["ts"])}')
-            n.clicked.connect(lambda _=False, rec=h: self._open_recent(rec))
-            n.setContextMenuPolicy(Qt.CustomContextMenu)
-            n.customContextMenuRequested.connect(lambda pos, rec=h, w=n: self._recent_menu(rec, w.mapToGlobal(pos)))
-            self.recent_box.insertWidget(i, n)
-        if not recs:
-            empty = label('下载过的视频会出现在这里', 'meta')
-            empty.setContentsMargins(10, 4, 0, 0)
-            self.recent_box.insertWidget(0, empty)
+    ago = staticmethod(fmt_ago)
+
+    @staticmethod
+    def _clear_layout(lay):
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w:
+                w.hide()           # 立刻从界面上拿掉（deleteLater 要等事件循环，期间会和新内容叠在一起）
+                w.setParent(None)
+                w.deleteLater()
+
+    def _toggle_side(self, key, on):
+        self.settings.extra[key] = on
+        self._save_settings()
+        self._refresh_sidebar()
+
+    def _record_row(self, h, height=32):
+        n = NavItem(h['title'] or h['url'], height=height, font_px=13)
+        n.setCheckable(False)
+        n.setToolTip(f'{h["title"]}\n{(h["quality"] or "").replace("] [", " · ")} · {fmt_ago(h["ts"])}')
+        n.clicked.connect(lambda _=False, rec=h: self._open_recent(rec))
+        n.setContextMenuPolicy(Qt.CustomContextMenu)
+        n.customContextMenuRequested.connect(lambda pos, rec=h, w=n: self._item_menu(rec, w.mapToGlobal(pos)))
+        return n
+
+    def _refresh_sidebar(self):
+        """侧边栏的「分区」和「最近下载」（像 Claude 侧边栏的项目和最近对话）。"""
+        self._clear_layout(self.sec_box)
+        self._clear_layout(self.recent_box)
+        if not self.history:
+            return
+        secs = self.history.sections()
+        self.sections = {s['id']: s for s in secs}
+        if self.sec_header.open:
+            for s in secs:
+                n = NavItem(s['name'], s['icon'], height=34, font_px=14)
+                n.setCheckable(False)
+                n.set_trailing(str(s['count']) if s['count'] else '')
+                n.setToolTip(f'{s["name"]}：{s["count"]} 个视频\n点击展开 / 收起，右键可以' +
+                             ('改名' if s['builtin'] else '编辑或删除'))
+                n.clicked.connect(lambda _=False, sid=s['id']: self._toggle_section(sid))
+                n.setContextMenuPolicy(Qt.CustomContextMenu)
+                n.customContextMenuRequested.connect(lambda pos, sec=s, w=n: self._section_menu(sec, w.mapToGlobal(pos)))
+                self.sec_box.addWidget(n)
+                if s['id'] in self.expanded_sections:
+                    tree = ui.TreeBox()
+                    tv = QVBoxLayout(tree)
+                    tv.setContentsMargins(30, 0, 0, 4)
+                    tv.setSpacing(0)
+                    for h in self.history.recent('', limit=5, section=s['id']):
+                        tv.addWidget(self._record_row(h, 30))
+                    more = NavItem(f'查看全部（{s["count"]}）' if s['count'] else '还没有视频，右键视频可以移进来',
+                                   height=30, font_px=13)
+                    more.setCheckable(False)
+                    more.muted = True
+                    more.clicked.connect(lambda _=False, sid=s['id']: self._show_section(sid))
+                    tv.addWidget(more)
+                    self.sec_box.addWidget(tree)
+        if self.recent_header.open:
+            recs = self.history.recent('', limit=16)
+            for h in recs:
+                self.recent_box.addWidget(self._record_row(h))
+            if not recs:
+                empty = label('下载过的视频会出现在这里', 'meta')
+                empty.setContentsMargins(10, 4, 0, 0)
+                self.recent_box.addWidget(empty)
+
+    def _toggle_section(self, sid):
+        self.expanded_sections ^= {sid}
+        self._refresh_sidebar()
 
     def _open_recent(self, h):
         if h['filepath'] and os.path.exists(h['filepath']):
@@ -711,22 +798,108 @@ class MainWindow(QMainWindow):
         else:
             self.notify('文件已被移动或删除，可以右键「重新解析」再下载一次', 'error')
 
-    def _recent_menu(self, h, pos):
+    def _item_menu(self, h, pos, after=None):
+        """一条下载记录的菜单（侧边栏、历史记录、搜索里通用）：打开、重命名、移至分区……"""
         m = ui.popup_menu(self)
+        ic = lambda name: icons.icon(name, c('text2'))   # noqa: E731
         exists = bool(h['filepath']) and os.path.exists(h['filepath'])
-        a = m.addAction(icons.icon('play_circle', c('text2')), '打开', lambda: os.startfile(h['filepath']))
+        a = m.addAction(ic('play_circle'), '打开', lambda: os.startfile(h['filepath']))
         a.setEnabled(exists)
-        a = m.addAction(icons.icon('folder', c('text2')), '打开所在文件夹', lambda: reveal_in_explorer(h['filepath']))
+        a = m.addAction(ic('folder'), '打开所在文件夹', lambda: reveal_in_explorer(h['filepath']))
         a.setEnabled(exists)
-        m.addAction(icons.icon('refresh', c('text2')), '重新解析', lambda: self._reparse_url(h['url']))
-        m.addAction(icons.icon('copy', c('text2')), '复制原链接', lambda: QGuiApplication.clipboard().setText(h['url']))
         m.addSeparator()
-        m.addAction(icons.icon('trash', c('text2')), '从历史中删除', lambda: self._delete_history(h['id']))
+        m.addAction(ic('edit'), '重命名…', lambda: self._rename_record(h))
+        sub = m.addMenu(ic('folder_move'), '移至分区')
+        for s in (self.history.sections() if self.history else []):
+            here = h.get('section_id') == s['id']
+            a = sub.addAction(ic(s['icon']), s['name'] + ('（当前）' if here else ''),
+                              lambda sid=s['id']: self._move_record(h, sid))
+            a.setEnabled(not here)
+        sub.addSeparator()
+        sub.addAction(ic('folder_plus'), '新建分区…', lambda: self._new_section(move=h))
+        if h.get('section_id'):
+            sub.addAction(ic('x'), '移出分区', lambda: self._move_record(h, None))
+        m.addSeparator()
+        m.addAction(ic('refresh'), '重新解析', lambda: self._reparse_url(h['url']))
+        m.addAction(ic('copy'), '复制原链接', lambda: QGuiApplication.clipboard().setText(h['url']))
+        m.addSeparator()
+        m.addAction(ic('trash'), '从历史中删除', lambda: self._delete_history(h['id']))
         m.exec(pos)
+        if after:
+            after()
+
+    def _rename_record(self, h):
+        dlg = TextDialog(self, '重命名', h['title'] or '', placeholder=h.get('orig_title') or '',
+                         hint='只改软件里显示的名字，不会改动电脑上的视频文件。留空 = 恢复成视频原标题。')
+        if dlg.exec():
+            self.history.rename(h['id'], dlg.value)
+            self._after_history_change()
+            self.notify('已重命名' if dlg.value else '已恢复原标题', 'ok')
+
+    def _move_record(self, h, sid):
+        self.history.move([h['id']], sid)
+        self._after_history_change()
+        name = self.sections.get(sid, {}).get('name') if sid else None
+        self.notify(f'已移至「{name}」' if name else '已移出分区', 'ok')
+
+    def _new_section(self, move=None):
+        dlg = FolderDialog(self, '新建分区')
+        if not dlg.exec():
+            return
+        sid = self.history.create_section(dlg.name, dlg.icon)
+        if move:
+            self.history.move([move['id']], sid)
+        self.expanded_sections.add(sid)
+        if not self.sec_header.open:
+            self.sec_header.open = True
+            self.settings.extra['sections_open'] = True
+        self._after_history_change()
+        self.notify(f'已新建分区「{dlg.name}」' + ('，视频已移进去' if move else '，右键视频可以「移至分区」'), 'ok')
+
+    def _section_menu(self, s, pos):
+        m = ui.popup_menu(self)
+        ic = lambda name: icons.icon(name, c('text2'))   # noqa: E731
+        m.addAction(ic('list'), f'查看全部（{s["count"]}）', lambda: self._show_section(s['id']))
+        m.addSeparator()
+        if s['builtin']:
+            m.addAction(ic('edit'), '重命名分区…', lambda: self._edit_section(s))
+            hint = m.addAction(f'{s["name"]} 的视频下载后会自动放进来')
+            hint.setEnabled(False)
+        else:
+            m.addAction(ic('edit'), '编辑分区…', lambda: self._edit_section(s))
+            m.addAction(ic('trash'), '删除分区', lambda: self._delete_section(s))
+        m.exec(pos)
+
+    def _edit_section(self, s):
+        dlg = FolderDialog(self, '编辑分区', s['name'], s['icon'], icon_editable=not s['builtin'])
+        if dlg.exec():
+            self.history.update_section(s['id'], dlg.name, None if s['builtin'] else dlg.icon)
+            self._after_history_change()
+
+    def _delete_section(self, s):
+        if QMessageBox.question(self, APP_NAME, f'删除分区「{s["name"]}」？\n里面的视频不会被删除，会回到所属平台的分区。'
+                                ) != QMessageBox.Yes:
+            return
+        self.history.delete_section(s['id'])
+        if self.hist_section == s['id']:
+            self.hist_section = None
+        self._after_history_change()
+        self.notify(f'已删除分区「{s["name"]}」')
+
+    def _show_section(self, sid):
+        """「查看全部」：打开历史记录页，只看这个分区。"""
+        self.hist_section = sid
+        self._go('history')
+
+    def _open_search(self):
+        if self.search_panel is None:
+            self.search_panel = SearchPanel(self.central, self)
+        self.search_panel.open_search()
 
     def _update_account(self):
         info = self.bili_account
         nick = (self.settings.nickname or '').strip()
+        self.account.avatar.set_image(avatar.image())
         if info and not info.get('expired') and info.get('name'):
             vip = info.get('vip_label') or ('大会员' if info.get('vip') else '非大会员')
             self.account.set_info(info['name'], f'B站 · {vip}', info['name'])
@@ -747,6 +920,8 @@ class MainWindow(QMainWindow):
         head = m.addAction(f'B站 · {info.get("name") or "已登录"}' if logged else '未登录 B站')
         head.setEnabled(False)
         m.addSeparator()
+        m.addAction(icons.icon('user', c('text2')), '更换头像…' if avatar.exists() else '设置头像…',
+                    self._change_avatar)
         a = m.addAction(icons.icon('settings', c('text2')), '设置', self._open_settings)
         a.setShortcut(QKeySequence('Ctrl+,'))
         a.setShortcutVisibleInContextMenu(True)
@@ -766,6 +941,10 @@ class MainWindow(QMainWindow):
         m.addAction(icons.icon('log_out', c('text2')), '退出程序', self._quit)
         hint = m.sizeHint()
         m.exec(self.account.mapToGlobal(QPoint(0, -hint.height() - 6)))
+
+    def _change_avatar(self):
+        if avatar.change(self):
+            self.setting_changed('avatar')
 
     # 解析页 ----------------------------------------------------------
     def _build_parse_page(self):
@@ -896,9 +1075,6 @@ class MainWindow(QMainWindow):
         self.preset_btn.clicked.connect(self._preset_menu)
         under.addWidget(self.folder_btn)
         under.addStretch(1)
-        self.enter_hint = label('Enter 解析 · Shift+Enter 换行', 'hint')
-        under.addWidget(self.enter_hint)
-        under.addSpacing(6)
         under.addWidget(self.preset_btn)
         bv.addLayout(under)
         self.composer_box = box
@@ -943,7 +1119,6 @@ class MainWindow(QMainWindow):
             slot.addWidget(self.composer_box)
         self.composer.set_min_lines(1 if has else 2)
         self.parse_head.setVisible(has)
-        self.enter_hint.setVisible(not has)
         if self.parse_stack.currentIndex() != want:
             self.parse_stack.setCurrentIndex(want)
             if not has:
@@ -1091,6 +1266,17 @@ class MainWindow(QMainWindow):
         self._hist_timer.timeout.connect(lambda: self._refresh_history(reset=True))
         hv.addSpacing(8)
         hv.addWidget(self.hist_search)
+        # 按分区筛选
+        chips = clear_widget()
+        self.hist_filters = QHBoxLayout(chips)
+        self.hist_filters.setContentsMargins(0, 4, 0, 4)
+        self.hist_filters.setSpacing(6)
+        fsa = scroll_area(chips)
+        fsa.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        fsa.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        fsa.setFixedHeight(48)
+        hv.addSpacing(4)
+        hv.addWidget(fsa)
         v.addWidget(centered(head, COLUMN, (32, 0, 32, 0)))
         col = clear_widget()
         self.hist_list = QVBoxLayout(col)
@@ -1810,7 +1996,7 @@ class MainWindow(QMainWindow):
                 key_rows = [r for r in self.rows.values() if r.video and r.video.info.get('id') == task.video.info.get('id')]
                 for r in key_rows:
                     self._update_badge(r)
-                self._refresh_recents()
+                self._refresh_sidebar()
                 if self.page == 'history':
                     self._refresh_history()
             if s == core.DONE:
@@ -1850,16 +2036,21 @@ class MainWindow(QMainWindow):
         while lay.count() > 1:
             item = lay.takeAt(0)
             if item.widget():
+                item.widget().hide()
+                item.widget().setParent(None)
                 item.widget().deleteLater()
         if not self.history:
             self.hist_count.setText('历史记录不可用')
             return
+        self._refresh_hist_filters()
         search = self.hist_search.text().strip()
-        recs = self.history.recent(search, limit=self._hist_limit + 1)
+        sec = self.sections.get(self.hist_section) if self.hist_section else None
+        recs = self.history.recent(search, limit=self._hist_limit + 1, section=self.hist_section)
         more = len(recs) > self._hist_limit
         recs = recs[:self._hist_limit]
-        total = self.history.count()
-        self.hist_count.setText(f'共 {total} 条下载记录' + (f'，找到 {len(recs)}{"+" if more else ""} 条' if search else ''))
+        total = self.history.count(self.hist_section)
+        self.hist_count.setText((f'「{sec["name"]}」分区 {total} 条' if sec else f'共 {total} 条下载记录') +
+                                (f'，找到 {len(recs)}{"+" if more else ""} 条' if search else ''))
         i = 0
         for h in recs:
             if i:
@@ -1874,6 +2065,26 @@ class MainWindow(QMainWindow):
         if not recs:
             lay.insertWidget(0, self._empty_state('没有找到记录' if search else '还没有下载记录',
                                                   '换个关键词试试' if search else '下载完成的视频会记录在这里，方便再次打开或重新下载'))
+
+    def _refresh_hist_filters(self):
+        """历史记录页顶部的分区筛选：全部 / B站 / X / … / 自建分区。"""
+        self._clear_layout(self.hist_filters)
+        if self.history:
+            self.sections = {s['id']: s for s in self.history.sections()}
+        if self.hist_section not in self.sections:
+            self.hist_section = None
+        items = [(None, '全部', 'list')] + [(s['id'], f'{s["name"]} {s["count"]}', s['icon'])
+                                           for s in self.sections.values()]
+        for sid, text, icon in items:
+            chip = Chip(text, icon, checkable=True, height=32)
+            chip.setChecked(sid == self.hist_section)
+            chip.clicked.connect(lambda _=False, s=sid: self._filter_history(s))
+            self.hist_filters.addWidget(chip)
+        self.hist_filters.addStretch(1)
+
+    def _filter_history(self, sid):
+        self.hist_section = sid
+        self._refresh_history(reset=True)
 
     def _more_history(self):
         self._hist_limit += 300
@@ -1897,7 +2108,7 @@ class MainWindow(QMainWindow):
     def _after_history_change(self):
         if self.page == 'history':
             self._refresh_history()
-        self._refresh_recents()
+        self._refresh_sidebar()
         for r in self.rows.values():
             self._update_badge(r)
 
@@ -2081,6 +2292,12 @@ class MainWindow(QMainWindow):
             self._update_account()
         elif key == 'download_dir':
             self._update_folder_btn()
+        elif key == 'avatar':
+            self._update_account()
+            if self.settings_panel is not None:
+                self.settings_panel.refresh_avatar()
+            self.notify('头像已更新' if avatar.exists() else '已移除头像')
+            return
         self._save_settings()
 
     def _save_settings(self):
@@ -2269,7 +2486,9 @@ def setup_app(argv):
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setStyle('Fusion')
-    f = QFont(theme.SANS)
+    theme.load_fonts()
+    f = QFont()
+    f.setFamilies(theme.ui_families())      # 英文 VDSans，中文微软雅黑（和 Claude 一样）
     f.setPixelSize(13)
     f.setHintingPreference(QFont.PreferNoHinting)
     app.setFont(f)

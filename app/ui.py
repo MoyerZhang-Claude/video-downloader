@@ -16,7 +16,7 @@ import shiboken6
 from PySide6.QtCore import (
     Property, QEasingCurve, QEvent, QObject, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal,
 )
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QTransform
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
     QMenu, QPlainTextEdit, QSizePolicy, QStyledItemDelegate, QVBoxLayout, QWidget,
@@ -336,6 +336,8 @@ class NavItem(_HoverButton):
         self.setText(text)
         self._icon, self.special = icon, special
         self.badge = ''
+        self.trailing = ''          # 右侧的灰色小字（如分区里的视频数）
+        self.muted = False          # 文字用浅灰色（如「查看全部」）
         self.collapsed = False
         self.setCheckable(not special)
         self.setFixedHeight(height)
@@ -345,6 +347,11 @@ class NavItem(_HoverButton):
     def set_badge(self, text):
         if text != self.badge:
             self.badge = text
+            self.update()
+
+    def set_trailing(self, text):
+        if text != self.trailing:
+            self.trailing = text
             self.update()
 
     def set_collapsed(self, on):
@@ -387,12 +394,66 @@ class NavItem(_HoverButton):
         if self.collapsed:
             return
         tx = x + (30 if (self._icon or self.special) else 1)
+        tail = 0
+        if self.trailing and not self.badge:
+            f2 = px_font(12)
+            tail = QFontMetrics(f2).horizontalAdvance(self.trailing) + 14
+            p.setFont(f2)
+            p.setPen(c('text4'))
+            p.drawText(QRectF(self.width() - tail, 0, tail - 8, self.height()), int(Qt.AlignVCenter | Qt.AlignRight),
+                       self.trailing)
         p.setFont(self.font())
-        p.setPen(c('text' if on or self.special else 'text2'))
+        p.setPen(c('text3' if self.muted and not hov else 'text' if on or self.special else 'text2'))
         fm = QFontMetrics(self.font())
-        avail = self.width() - tx - (40 if self.badge else 10)
+        avail = self.width() - tx - (40 if self.badge else max(10, tail))
         p.drawText(QRectF(tx, 0, avail, self.height()), int(Qt.AlignVCenter | Qt.AlignLeft),
                    fm.elidedText(self.text(), Qt.ElideRight, int(avail)))
+
+
+class SideHeader(_HoverButton):
+    """侧边栏的小标题（「分区 ▾」「最近下载 ▾」），点一下折叠 / 展开；可以带一个右侧的「+」按钮。"""
+    toggled_open = Signal(bool)
+
+    def __init__(self, text, open_=True, plus_tip='', parent=None):
+        super().__init__(parent)
+        self.setText(text)
+        self.open = open_
+        self.setFixedHeight(30)
+        self.setFont(px_font(12))
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.clicked.connect(self._flip)
+        self.plus = None
+        if plus_tip:
+            self.plus = IconButton('plus', plus_tip, size=26, icon_size=16, radius=7, parent=self)
+
+    def _flip(self):
+        self.open = not self.open
+        self.update()
+        self.toggled_open.emit(self.open)
+
+    def resizeEvent(self, e):
+        if self.plus:
+            self.plus.move(self.width() - self.plus.width() - 4, (self.height() - self.plus.height()) // 2)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setFont(self.font())
+        hov = self._hov()
+        p.setPen(c('text2' if hov else 'text3'))
+        fm = QFontMetrics(self.font())
+        w = fm.horizontalAdvance(self.text())
+        p.drawText(QRectF(10, 0, w + 4, self.height()), int(Qt.AlignVCenter | Qt.AlignLeft), self.text())
+        icons.paint(p, 'chevron_down' if self.open else 'chevron_right',
+                    QRectF(10 + w + 4, (self.height() - 12) / 2, 12, 12), c('text3'), 2.0)
+
+
+class TreeBox(QWidget):
+    """展开的分区：左边一条细竖线，里面是这个分区的视频（像 Claude 侧边栏里展开的项目）。"""
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.fillRect(QRectF(20, 2, 1, self.height() - 4), c('border_strong'))
 
 
 # ---------------------------------------------------------------- 容器与小部件
@@ -551,19 +612,52 @@ class Segmented(QWidget):
 
 
 class Avatar(QWidget):
+    """圆形头像：有用户头像图片就画图片，否则画首字母（或小人图标）。"""
+
     def __init__(self, size=30, parent=None):
         super().__init__(parent)
         self.setFixedSize(size, size)
         self.text = ''
         self.role = 'avatar'
+        self.image = None           # QImage / QPixmap（已经是圆形、圆外透明）
+        self._scaled = None
 
     def set_text(self, text, role='avatar'):
         self.text, self.role = (text or '')[:1].upper(), role
         self.update()
 
+    def set_image(self, image):
+        if image is not None and image.isNull():
+            image = None
+        if image is not self.image:
+            self.image, self._scaled = image, None
+            self.update()
+
+    def _image_pixmap(self):
+        """按屏幕缩放预先缩小好的头像（小尺寸直接缩放 512 的大图会有锯齿）。"""
+        dpr = self.devicePixelRatioF()
+        side = max(1, round(self.width() * dpr))
+        if self._scaled is None or self._scaled[0] != side:
+            img = self.image.toImage() if hasattr(self.image, 'toImage') else self.image
+            pix = QPixmap.fromImage(img.scaled(side, side, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+            pix.setDevicePixelRatio(dpr)
+            self._scaled = (side, pix)
+        return self._scaled[1]
+
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        if self.image is not None:
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            path = QPainterPath()
+            path.addEllipse(QRectF(self.rect()))
+            p.setClipPath(path)
+            p.drawPixmap(0, 0, self._image_pixmap())
+            p.setClipping(False)
+            p.setPen(QPen(c('border'), 1))      # 浅色图片贴着浅色背景时也看得出边界
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5))
+            return
         p.setPen(Qt.NoPen)
         p.setBrush(c(self.role))
         p.drawEllipse(QRectF(self.rect()))

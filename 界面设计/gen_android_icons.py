@@ -10,7 +10,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-from app.icons import BODIES  # noqa: E402
+from app.brand_logos import LOGOS  # noqa: E402
+from app.icons import BODIES, SECTION_ICONS  # noqa: E402
 
 OUT = os.path.join(ROOT, 'android', 'app', 'src', 'main', 'java', 'com', 'videodl', 'app', 'LineIcons.kt')
 
@@ -61,6 +62,7 @@ def main():
     lines = ['// 由 界面设计/gen_android_icons.py 根据电脑版 app/icons.py 生成，请不要手改',
              'package com.videodl.app', '',
              'import androidx.compose.ui.graphics.Color',
+             'import androidx.compose.ui.graphics.PathFillType',
              'import androidx.compose.ui.graphics.SolidColor',
              'import androidx.compose.ui.graphics.StrokeCap',
              'import androidx.compose.ui.graphics.StrokeJoin',
@@ -74,6 +76,37 @@ def main():
         s = ', '.join(f'"{d}"' for d in strokes)
         f = ', '.join(f'"{d}"' for d in fills)
         lines.append(f'    val {kname(name)} by lazy {{ build("{name}", listOf({s}), listOf({f})) }}')
+    lines.append('')
+    lines.append('    // 平台 logo（单色实心轮廓，颜色由主题决定；来源见 界面设计/make_logos.py）')
+    for key, info in LOGOS.items():
+        x, y, w, h = info['box']
+        side = max(w, h) * 1.06
+        vx, vy = x + w / 2 - side / 2, y + h / 2 - side / 2
+        d = ' '.join(info['paths'])
+        lines.append(f'    val {kname(key)} by lazy {{ brand("{key}", {side:.3f}f, {-vx:.3f}f, {-vy:.3f}f, '
+                     f'{"true" if info["evenodd"] else "false"}, "{d}") }}')
+    names = list(BODIES) + list(LOGOS)
+    lines.append('')
+    lines.append('    /** 新建分区时可以选的图标（和电脑版同一个图标库） */')
+    lines.append('    val sectionIcons = listOf(' + ', '.join(f'"{n}"' for n in SECTION_ICONS) + ')')
+    lines.append('')
+    lines.append('    private val byName: Map<String, () -> ImageVector> = mapOf(')
+    for n in names:
+        lines.append(f'        "{n}" to {{ {kname(n)} }},')
+    lines.append('    )')
+    lines.append('')
+    lines.append('    /** 按名字取图标（分区保存的是名字，如 "star"、"brand_bilibili"），不认识的用文件夹 */')
+    lines.append('    fun named(name: String?): ImageVector = byName[name]?.invoke() ?: Folder')
+    lines += ['',
+              '    private fun brand(name: String, side: Float, dx: Float, dy: Float, evenOdd: Boolean, d: String): ImageVector {',
+              '        val b = ImageVector.Builder(name, 24.dp, 24.dp, side, side)',
+              '        b.addGroup(translationX = dx, translationY = dy)',
+              '        b.addPath(addPathNodes(d), fill = SolidColor(Color.Black),',
+              '            pathFillType = if (evenOdd) PathFillType.EvenOdd else PathFillType.NonZero)',
+              '        b.clearGroup()',
+              '        return b.build()',
+              '    }',
+              '']
     lines += ['',
               '    private fun build(name: String, strokes: List<String>, fills: List<String>): ImageVector {',
               '        val b = ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)',

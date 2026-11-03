@@ -15,10 +15,14 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -95,6 +99,8 @@ class MainActivity : ComponentActivity() {
             val stream = androidx.core.content.IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
             val text = intent.getStringExtra(Intent.EXTRA_TEXT)
             when {
+                // 图片：打开头像编辑（清单里没有登记图片分享，不会出现在系统分享菜单里，只响应直接发给本应用的图片）
+                stream != null && intent.type?.startsWith("image/") == true -> vm.openAvatarImage(stream)
                 stream != null -> vm.handleSharedFile(stream)      // 分享的是文件：cookies 就导入，否则提取里面的链接
                 text != null -> vm.submit(text)
             }
@@ -157,27 +163,39 @@ fun App(vm: MainViewModel, activity: ComponentActivity) {
         val drawer = rememberDrawerState(DrawerValue.Closed)
         val scope = rememberCoroutineScope()
         val focus = remember { FocusRequester() }
-        fun go(p: String) { page = p; scope.launch { drawer.close() }; if (p == "history") vm.loadHistory() }
+        fun go(p: String) {
+            page = p
+            scope.launch { drawer.close() }
+            if (p == "history") vm.loadHistory()
+        }
+        val goHome = { go("home") }
+        val openSection = { id: Long -> vm.showSection(id); go("history") }
+        // 选头像图片：系统照片选择器，不需要存储权限
+        val pickAvatar = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) vm.openAvatarImage(uri)
+        }
+        val chooseAvatar = { pickAvatar.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
         BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }
         BackHandler(enabled = page != "home" && !drawer.isOpen) { page = "home" }
 
         ModalNavigationDrawer(
             drawerState = drawer,
             gesturesEnabled = page == "home" || drawer.isOpen,
-            scrimColor = P.scrim,
+            scrimColor = Color.Transparent,         // 侧边栏占满整个屏幕，不需要遮罩
             drawerContent = {
                 Drawer(vm, page, onNavigate = ::go, onNew = {
                     vm.newSession()          // 像 Claude 的「新建」：回到首页
                     go("home")
                     runCatching { focus.requestFocus() }
-                })
+                }, onSection = openSection, goHome = goHome)
             },
         ) {
             Box(Modifier.fillMaxSize().background(P.bg)) {
                 when (page) {
                     "tasks" -> TasksScreen(vm) { page = "home" }
-                    "history" -> HistoryScreen(vm) { page = "home" }
-                    "settings" -> SettingsScreen(vm) { page = "home" }
+                    "history" -> HistoryScreen(vm, { page = "home" }, goHome)
+                    "search" -> SearchScreen(vm, { page = "home" }, openSection, goHome)
+                    "settings" -> SettingsScreen(vm, chooseAvatar) { page = "home" }
                     else -> HomeScreen(vm, focus, openDrawer = { scope.launch { drawer.open() } }, goTasks = { go("tasks") })
                 }
                 Box(Modifier.navigationBarsPadding().imePadding()) {
@@ -185,54 +203,65 @@ fun App(vm: MainViewModel, activity: ComponentActivity) {
                 }
             }
         }
+        vm.avatarEdit?.let { AvatarEditorScreen(it, onCancel = { vm.avatarEdit = null }, onPickOther = chooseAvatar,
+            onSave = vm::saveAvatar) }
         vm.episodeSheet?.let { EpisodeDialog(it, vm) }
         vm.duplicate?.let { (item, hit) -> DuplicateDialog(item, hit, vm) }
         vm.coverItem?.let { CoverDialog(it, vm) }
         if (vm.askBattery) BatteryDialog(vm)
         if (vm.showCookieHelp) CookieHelpDialog(vm)
         if (vm.showCookieManager) CookieManagerDialog(vm)
+        vm.renaming?.let { RenameDialog(it, vm) }
+        vm.moving?.let { MoveDialog(it, vm) }
+        vm.sectionEditor?.let { SectionDialog(it, vm) }
     }
 }
 
-// ================================================================ 侧边栏（像 Claude 手机版的侧边栏）
+// ================================================================ 侧边栏（像 Claude 手机版：打开时占满整个屏幕）
 
 @Composable
-private fun Drawer(vm: MainViewModel, page: String, onNavigate: (String) -> Unit, onNew: () -> Unit) {
-    val ctx = LocalContext.current
-    ModalDrawerSheet(drawerContainerColor = P.bg, drawerShape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp),
-        modifier = Modifier.width(310.dp)) {
-        Column(Modifier.fillMaxHeight().statusBarsPadding().navigationBarsPadding().padding(horizontal = 14.dp)) {
-            Row(Modifier.height(72.dp).padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun Drawer(vm: MainViewModel, page: String, onNavigate: (String) -> Unit, onNew: () -> Unit,
+                   onSection: (Long) -> Unit, goHome: () -> Unit) {
+    Surface(color = P.bg, modifier = Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 14.dp)) {
+            Row(Modifier.fillMaxWidth().height(72.dp).padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Spark(26.dp)
                 Spacer(Modifier.width(10.dp))
-                Text("视频解析下载器", fontFamily = Serif, fontSize = 26.sp, color = P.text)
+                Text("视频解析下载器", fontFamily = Serif, fontSize = 26.sp, color = P.text, maxLines = 1, modifier = Modifier.weight(1f))
+                RoundIcon(LineIcons.Search, { onNavigate("search") }, size = 46.dp, iconSize = 24.dp, tint = P.text)
             }
-            val active = vm.tasks.count { it.active }
-            DrawerItem(LineIcons.Download, "下载", page == "tasks", if (active > 0) "$active" else "") { onNavigate("tasks") }
-            DrawerItem(LineIcons.Clock, "历史记录", page == "history") { onNavigate("history") }
-            DrawerItem(LineIcons.Settings, "设置", page == "settings") { onNavigate("settings") }
-            Box(Modifier.padding(vertical = 12.dp).fillMaxWidth().height(1.dp).background(P.border))
-            Text("最近下载", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = P.text3,
-                modifier = Modifier.padding(start = 10.dp, bottom = 6.dp))
             LazyColumn(Modifier.weight(1f)) {
-                if (vm.history.isEmpty()) item {
-                    Text("下载过的视频会出现在这里", fontSize = 14.sp, color = P.text4, modifier = Modifier.padding(10.dp))
+                item {
+                    val active = vm.tasks.count { it.active }
+                    DrawerItem(LineIcons.Download, "下载", page == "tasks", if (active > 0) "$active" else "") { onNavigate("tasks") }
+                    DrawerItem(LineIcons.Clock, "历史记录", page == "history" && vm.historySection < 0) {
+                        vm.showSection(-1); onNavigate("history")
+                    }
+                    DrawerItem(LineIcons.Settings, "设置", page == "settings") { onNavigate("settings") }
+                    Box(Modifier.padding(vertical = 12.dp).fillMaxWidth().height(1.dp).background(P.border))
+                    Row(Modifier.padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("分区", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = P.text3, modifier = Modifier.weight(1f))
+                        RoundIcon(LineIcons.Plus, { vm.sectionEditor = SectionEdit(null, null) }, size = 38.dp, iconSize = 19.dp)
+                    }
                 }
-                items(vm.history.take(40), key = { "r${it.id}" }) { h ->
-                    Text(h.title, fontSize = 15.sp, color = if (h.exists) P.text else P.text3, maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-                            .clickable {
-                                if (h.exists) openUri(ctx, Uri.parse(h.uri), "video/*", vm)
-                                else vm.toast("文件已被删除，可以在「历史记录」里重新解析")
-                            }
-                            .padding(horizontal = 10.dp, vertical = 11.dp))
+                items(vm.sections, key = { "s${it.id}" }) { s ->
+                    DrawerItem(LineIcons.named(s.icon), s.name, page == "history" && vm.historySection == s.id,
+                        trailing = if (s.count > 0) "${s.count}" else "", onLongClick = { vm.sectionEditor = SectionEdit(s, null) }) {
+                        onSection(s.id)
+                    }
                 }
+                item {
+                    Text("最近下载", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = P.text3,
+                        modifier = Modifier.padding(start = 10.dp, top = 18.dp, bottom = 6.dp))
+                    if (vm.recent.isEmpty()) Text("下载过的视频会出现在这里", fontSize = 14.sp, color = P.text4,
+                        modifier = Modifier.padding(10.dp))
+                }
+                items(vm.recent, key = { "r${it.id}" }) { h -> RecentRow(h, vm, goHome) }
             }
             Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 val b = vm.bili
                 Box(Modifier.clip(CircleShape).clickable { onNavigate("settings") }) {
-                    Avatar(if (b?.loggedIn == true) b.name else vm.nickname, 44.dp)
+                    Avatar(if (b?.loggedIn == true) b.name else vm.nickname, 44.dp, image = vm.avatar)
                 }
                 Spacer(Modifier.weight(1f))
                 PrimaryButton("解析新链接", icon = LineIcons.Plus, onClick = onNew)
@@ -241,16 +270,52 @@ private fun Drawer(vm: MainViewModel, page: String, onNavigate: (String) -> Unit
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DrawerItem(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, selected: Boolean,
-                       badge: String = "", onClick: () -> Unit) {
+                       badge: String = "", trailing: String = "", onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (selected) P.selected else Color.Transparent)
-        .clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+        .combinedClickable(onClick = onClick, onLongClick = onLongClick).padding(horizontal = 10.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically) {
         LIcon(icon, P.text, 22.dp)
         Spacer(Modifier.width(16.dp))
-        Text(text, fontSize = 17.sp, color = P.text, modifier = Modifier.weight(1f))
+        Text(text, fontSize = 17.sp, color = P.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         if (badge.isNotEmpty()) Text(badge, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
             modifier = Modifier.clip(CircleShape).background(P.brand).padding(horizontal = 8.dp, vertical = 1.dp))
+        else if (trailing.isNotEmpty()) Text(trailing, color = P.text4, fontSize = 14.sp)
+    }
+}
+
+/** 侧边栏「最近下载」的一行：点一下打开，长按出菜单（重命名、移至分区……） */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun RecentRow(h: HistoryRecord, vm: MainViewModel, goHome: () -> Unit) {
+    val ctx = LocalContext.current
+    var menu by remember { mutableStateOf(false) }
+    Box {
+        Text(h.title, fontSize = 15.sp, color = if (h.exists) P.text else P.text3, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                .combinedClickable(onClick = { openRecord(ctx, h, vm) }, onLongClick = { menu = true })
+                .padding(horizontal = 10.dp, vertical = 11.dp))
+        RecordMenu(h, vm, menu, { menu = false }, goHome)
+    }
+}
+
+private fun openRecord(ctx: Context, h: HistoryRecord, vm: MainViewModel) {
+    if (h.exists) openUri(ctx, Uri.parse(h.uri), "video/*", vm)
+    else vm.toast("文件已被删除，可以长按选「重新解析」再下载一次")
+}
+
+/** 一条下载记录的菜单（侧边栏、历史记录、搜索通用） */
+@Composable
+private fun RecordMenu(h: HistoryRecord, vm: MainViewModel, expanded: Boolean, onDismiss: () -> Unit, goHome: () -> Unit) {
+    val ctx = LocalContext.current
+    DropdownMenu(expanded, onDismiss, containerColor = P.surface, shape = RoundedCornerShape(14.dp)) {
+        if (h.exists) MenuItem(LineIcons.PlayCircle, "打开") { onDismiss(); openUri(ctx, Uri.parse(h.uri), "video/*", vm) }
+        MenuItem(LineIcons.Edit, "重命名") { onDismiss(); vm.renaming = h }
+        MenuItem(LineIcons.FolderMove, "移至分区") { onDismiss(); vm.moving = h }
+        if (h.url.isNotEmpty()) MenuItem(LineIcons.Refresh, "重新解析") { onDismiss(); vm.submitUrls(listOf(h.url)); goHome() }
+        MenuItem(LineIcons.Trash, "删除记录", P.err) { onDismiss(); vm.deleteHistory(h) }
     }
 }
 
@@ -331,7 +396,7 @@ private fun Composer(vm: MainViewModel, focus: FocusRequester) {
         modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 8.dp)) {
         Column(Modifier.padding(start = 16.dp, end = 10.dp, top = 14.dp, bottom = 10.dp)) {
             BasicTextField(value = text, onValueChange = { text = it }, maxLines = 5,
-                textStyle = TextStyle(fontSize = 16.sp, color = P.text, lineHeight = 22.sp), cursorBrush = SolidColor(P.accent),
+                textStyle = TextStyle(fontFamily = Sans, fontSize = 16.sp, color = P.text, lineHeight = 22.sp), cursorBrush = SolidColor(P.accent),
                 modifier = Modifier.fillMaxWidth().focusRequester(focus),
                 decorationBox = { inner ->
                     Box {
@@ -669,61 +734,60 @@ private fun TaskCard(task: DownloadTask, vm: MainViewModel) {
     }
 }
 
-// ================================================================ 历史页
+// ================================================================ 历史页（可按分区筛选）
 
 @Composable
-private fun HistoryScreen(vm: MainViewModel, back: () -> Unit) {
-    val ctx = LocalContext.current
+private fun SearchField(value: String, onChange: (String) -> Unit, hint: String, modifier: Modifier = Modifier,
+                        focus: FocusRequester? = null) {
+    Row(modifier.clip(RoundedCornerShape(14.dp)).background(P.surface).border(1.dp, P.border, RoundedCornerShape(14.dp))
+        .padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+        LIcon(LineIcons.Search, P.text3, 19.dp)
+        Spacer(Modifier.width(10.dp))
+        BasicTextField(value = value, onValueChange = onChange, singleLine = true,
+            textStyle = TextStyle(fontFamily = Sans, fontSize = 15.sp, color = P.text), cursorBrush = SolidColor(P.accent),
+            modifier = Modifier.weight(1f).then(if (focus != null) Modifier.focusRequester(focus) else Modifier),
+            decorationBox = { inner -> Box { if (value.isEmpty()) Text(hint, color = P.text4, fontSize = 15.sp, maxLines = 1); inner() } })
+        if (value.isNotEmpty()) RoundIcon(LineIcons.X, { onChange("") }, size = 24.dp, iconSize = 15.dp)
+    }
+}
+
+@Composable
+private fun HistoryScreen(vm: MainViewModel, back: () -> Unit, goHome: () -> Unit) {
     var confirmClear by remember { mutableStateOf(false) }
+    val section = vm.sections.firstOrNull { it.id == vm.historySection }
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
-        TopBar("历史记录", back) {
-            if (vm.history.isNotEmpty()) RoundIcon(LineIcons.Trash, { confirmClear = true }, size = 44.dp, iconSize = 21.dp)
+        TopBar(section?.name ?: "历史记录", back) {
+            if (section != null) RoundIcon(LineIcons.Edit, { vm.sectionEditor = SectionEdit(section, null) }, size = 44.dp, iconSize = 21.dp)
+            else if (vm.history.isNotEmpty()) RoundIcon(LineIcons.Trash, { confirmClear = true }, size = 44.dp, iconSize = 21.dp)
         }
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp).fillMaxWidth().clip(RoundedCornerShape(14.dp))
-            .background(P.surface).border(1.dp, P.border, RoundedCornerShape(14.dp)).padding(horizontal = 12.dp, vertical = 11.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            LIcon(LineIcons.Search, P.text3, 19.dp)
-            Spacer(Modifier.width(10.dp))
-            BasicTextField(value = vm.historySearch, onValueChange = { vm.historySearch = it; vm.loadHistory(it) }, singleLine = true,
-                textStyle = TextStyle(fontSize = 15.sp, color = P.text), cursorBrush = SolidColor(P.accent),
-                modifier = Modifier.weight(1f),
-                decorationBox = { inner -> Box { if (vm.historySearch.isEmpty()) Text("搜索标题、作者或平台", color = P.text4, fontSize = 15.sp); inner() } })
+        SearchField(vm.historySearch, { vm.historySearch = it; vm.loadHistory(it) }, "搜索标题、作者或平台",
+            Modifier.padding(horizontal = 16.dp, vertical = 6.dp).fillMaxWidth())
+        // 分区筛选
+        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            item { FilterChipRow(LineIcons.List, "全部", vm.historySection < 0) { vm.showSection(-1) } }
+            items(vm.sections, key = { "f${it.id}" }) { s ->
+                FilterChipRow(LineIcons.named(s.icon), "${s.name} ${s.count}", vm.historySection == s.id) { vm.showSection(s.id) }
+            }
+            item { FilterChipRow(LineIcons.FolderPlus, "新建分区", false) { vm.sectionEditor = SectionEdit(null, null) } }
         }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 20.dp)) {
             item {
-                Text("共 ${vm.history.size} 条下载记录", fontSize = 12.sp, color = P.text3, modifier = Modifier.padding(start = 22.dp, top = 6.dp, bottom = 4.dp))
+                Text((if (section != null) "这个分区有 ${section.count} 个视频" else "共 ${vm.history.size} 条下载记录") +
+                    if (section?.builtin == true) "（${section.name} 的视频下载后自动放进来）" else "",
+                    fontSize = 12.sp, color = P.text3, modifier = Modifier.padding(start = 22.dp, top = 4.dp, bottom = 4.dp))
             }
             if (vm.history.isEmpty()) item {
-                EmptyState(if (vm.historySearch.isEmpty()) "还没有下载记录" else "没有找到记录",
-                    if (vm.historySearch.isEmpty()) "下载完成的视频会记录在这里，方便再次打开或重新下载" else "换个关键词试试")
+                EmptyState(when {
+                    vm.historySearch.isNotEmpty() -> "没有找到记录"
+                    section != null -> "这个分区还没有视频"
+                    else -> "还没有下载记录"
+                }, when {
+                    vm.historySearch.isNotEmpty() -> "换个关键词试试"
+                    section != null -> "长按任意视频，选「移至分区」就能放进来"
+                    else -> "下载完成的视频会记录在这里，方便再次打开或重新下载"
+                })
             }
-            items(vm.history, key = { "h${it.id}" }) { h ->
-                var menu by remember { mutableStateOf(false) }
-                Row(Modifier.fillMaxWidth().clickable {
-                    if (h.exists) openUri(ctx, Uri.parse(h.uri), "video/*", vm) else menu = true
-                }.padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(h.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 15.sp, lineHeight = 20.sp,
-                            color = if (h.exists) P.text else P.text3)
-                        Spacer(Modifier.height(5.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            PlatformTag(h.platform)
-                            Text("  " + listOf(h.quality, fmtSize(h.size), fmtAgo(h.ts)).filter { it.isNotEmpty() }.joinToString(" · ") +
-                                if (!h.exists) " · 文件已删除" else "", fontSize = 12.sp, color = P.text3, maxLines = 1,
-                                overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                    Box {
-                        RoundIcon(LineIcons.More, { menu = true }, size = 40.dp, iconSize = 20.dp)
-                        DropdownMenu(menu, { menu = false }, containerColor = P.surface, shape = RoundedCornerShape(14.dp)) {
-                            if (h.exists) MenuItem(LineIcons.PlayCircle, "打开") { menu = false; openUri(ctx, Uri.parse(h.uri), "video/*", vm) }
-                            if (h.url.isNotEmpty()) MenuItem(LineIcons.Refresh, "重新解析") { menu = false; vm.submitUrls(listOf(h.url)); back() }
-                            MenuItem(LineIcons.Trash, "删除记录", P.err) { menu = false; vm.deleteHistory(h) }
-                        }
-                    }
-                }
-                Box(Modifier.padding(start = 20.dp, end = 20.dp).fillMaxWidth().height(1.dp).background(P.border))
-            }
+            items(vm.history, key = { "h${it.id}" }) { h -> HistoryRow(h, vm, goHome) }
         }
     }
     if (confirmClear) VdAlert(
@@ -731,16 +795,228 @@ private fun HistoryScreen(vm: MainViewModel, back: () -> Unit) {
         confirm = "清空", danger = true, onConfirm = { confirmClear = false; vm.clearHistory() }, onDismiss = { confirmClear = false })
 }
 
+@Composable
+private fun FilterChipRow(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, selected: Boolean, onClick: () -> Unit) {
+    Row(Modifier.clip(CircleShape).background(if (selected) P.tintAccent else Color.Transparent)
+        .border(1.dp, if (selected) P.accent.copy(alpha = 0.4f) else P.borderStrong, CircleShape)
+        .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+        LIcon(icon, if (selected) P.accent else P.text2, 16.dp)
+        Spacer(Modifier.width(6.dp))
+        Text(text, fontSize = 14.sp, color = if (selected) P.accent else P.text2, maxLines = 1)
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun HistoryRow(h: HistoryRecord, vm: MainViewModel, goHome: () -> Unit) {
+    val ctx = LocalContext.current
+    var menu by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().combinedClickable(onClick = { if (h.exists) openRecord(ctx, h, vm) else menu = true },
+        onLongClick = { menu = true }).padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(h.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 15.sp, lineHeight = 20.sp,
+                color = if (h.exists) P.text else P.text3)
+            Spacer(Modifier.height(5.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                PlatformTag(h.platform)
+                Text("  " + listOf(h.quality, fmtSize(h.size), fmtAgo(h.ts)).filter { it.isNotEmpty() }.joinToString(" · ") +
+                    if (!h.exists) " · 文件已删除" else "", fontSize = 12.sp, color = P.text3, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Box {
+            RoundIcon(LineIcons.More, { menu = true }, size = 40.dp, iconSize = 20.dp)
+            RecordMenu(h, vm, menu, { menu = false }, goHome)
+        }
+    }
+    Box(Modifier.padding(start = 20.dp, end = 20.dp).fillMaxWidth().height(1.dp).background(P.border))
+}
+
+// ================================================================ 搜索（侧边栏右上角的放大镜，像 Claude 手机版）
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SearchScreen(vm: MainViewModel, back: () -> Unit, onSection: (Long) -> Unit, goHome: () -> Unit) {
+    val ctx = LocalContext.current
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        vm.search("")
+        runCatching { focus.requestFocus() }
+    }
+    val q = vm.searchQuery.trim()
+    val secs = if (q.isEmpty()) emptyList() else vm.sections.filter { q.lowercase() in it.name.lowercase() }
+    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
+        Row(Modifier.fillMaxWidth().padding(start = 6.dp, end = 14.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            RoundIcon(LineIcons.ArrowLeft, back, size = 44.dp, iconSize = 22.dp, tint = P.text)
+            Spacer(Modifier.width(4.dp))
+            SearchField(vm.searchQuery, { vm.search(it) }, "搜索下载过的视频和分区", Modifier.weight(1f), focus)
+        }
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 20.dp)) {
+            if (secs.isNotEmpty()) {
+                item { SearchHeader("分区") }
+                items(secs, key = { "ss${it.id}" }) { s ->
+                    SearchItem(LineIcons.named(s.icon), s.name, "${s.count} 个视频", onClick = { onSection(s.id) })
+                }
+            }
+            item { SearchHeader(if (q.isEmpty()) "最近下载" else "下载记录") }
+            if (vm.searchResults.isEmpty()) item {
+                EmptyState(if (q.isEmpty()) "还没有下载记录" else "没有找到相关的视频", if (q.isEmpty()) "下载完成的视频会出现在这里" else "换个关键词试试")
+            }
+            items(vm.searchResults, key = { "sr${it.id}" }) { h ->
+                var menu by remember { mutableStateOf(false) }
+                val sec = vm.sections.firstOrNull { it.id == h.sectionId }
+                Box {
+                    SearchItem(if (sec != null) LineIcons.named(sec.icon) else LineIcons.Film, h.title,
+                        listOf(h.quality, sec?.name ?: h.platform, fmtAgo(h.ts), if (h.exists) "" else "文件已删除")
+                            .filter { it.isNotEmpty() }.joinToString(" · "),
+                        onClick = { openRecord(ctx, h, vm) }, onLongClick = { menu = true })
+                    RecordMenu(h, vm, menu, { menu = false }, goHome)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchHeader(text: String) {
+    Text(text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = P.text3,
+        modifier = Modifier.padding(start = 22.dp, top = 14.dp, bottom = 4.dp))
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SearchItem(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, meta: String,
+                       onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp).clip(RoundedCornerShape(12.dp))
+        .combinedClickable(onClick = onClick, onLongClick = onLongClick).padding(horizontal = 12.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        LIcon(icon, P.text2, 22.dp)
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 15.sp, color = P.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (meta.isNotEmpty()) Text(meta, fontSize = 12.sp, color = P.text3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+// ================================================================ 重命名 / 移至分区 / 编辑分区
+
+@Composable
+private fun RenameDialog(h: HistoryRecord, vm: MainViewModel) {
+    var name by remember(h.id) { mutableStateOf(h.title) }
+    AlertDialog(onDismissRequest = { vm.renaming = null }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
+        title = { Text("重命名", color = P.text, fontSize = 18.sp) },
+        text = {
+            Column {
+                Text("只改 App 里显示的名字，不会改动手机里的视频文件。留空 = 恢复成视频原标题。", fontSize = 13.sp, color = P.text3,
+                    lineHeight = 19.sp)
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(name, { name = it }, singleLine = true, shape = RoundedCornerShape(12.dp),
+                    placeholder = { Text(h.origTitle, maxLines = 1) })
+            }
+        },
+        confirmButton = { TextButton(onClick = { vm.renameRecord(h, name); vm.renaming = null }) { Text("保存", color = P.accent) } },
+        dismissButton = { TextButton(onClick = { vm.renaming = null }) { Text("取消", color = P.text2) } })
+}
+
+@Composable
+private fun MoveDialog(h: HistoryRecord, vm: MainViewModel) {
+    AlertDialog(onDismissRequest = { vm.moving = null }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
+        title = { Text("移至分区", color = P.text, fontSize = 18.sp) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(h.title, fontSize = 13.sp, color = P.text3, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(8.dp))
+                vm.sections.forEach { s ->
+                    val here = s.id == h.sectionId
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (here) P.selected else Color.Transparent)
+                        .clickable(enabled = !here) { vm.moveRecord(h, s.id); vm.moving = null }
+                        .padding(horizontal = 10.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                        LIcon(LineIcons.named(s.icon), P.text2, 21.dp)
+                        Spacer(Modifier.width(14.dp))
+                        Text(s.name, fontSize = 16.sp, color = P.text, modifier = Modifier.weight(1f))
+                        if (here) Text("当前", fontSize = 13.sp, color = P.text3)
+                    }
+                }
+                Box(Modifier.padding(vertical = 6.dp).fillMaxWidth().height(1.dp).background(P.border))
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .clickable { vm.moving = null; vm.sectionEditor = SectionEdit(null, h) }
+                    .padding(horizontal = 10.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                    LIcon(LineIcons.FolderPlus, P.text2, 21.dp)
+                    Spacer(Modifier.width(14.dp))
+                    Text("新建分区…", fontSize = 16.sp, color = P.text)
+                }
+                if (h.sectionId >= 0) Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .clickable { vm.moveRecord(h, -1); vm.moving = null }
+                    .padding(horizontal = 10.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                    LIcon(LineIcons.X, P.text2, 21.dp)
+                    Spacer(Modifier.width(14.dp))
+                    Text("移出分区", fontSize = 16.sp, color = P.text)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { vm.moving = null }) { Text("取消", color = P.text2) } })
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SectionDialog(edit: SectionEdit, vm: MainViewModel) {
+    val s = edit.section
+    var name by remember(edit) { mutableStateOf(s?.name ?: "") }
+    var icon by remember(edit) { mutableStateOf(s?.icon?.takeIf { it in LineIcons.sectionIcons } ?: "folder") }
+    var confirmDelete by remember { mutableStateOf(false) }
+    AlertDialog(onDismissRequest = { vm.sectionEditor = null }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
+        title = { Text(if (s == null) "新建分区" else if (s.builtin) "重命名分区" else "编辑分区", color = P.text, fontSize = 18.sp) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(name, { name = it.take(20) }, singleLine = true, shape = RoundedCornerShape(12.dp),
+                    placeholder = { Text("例如：收藏、学习、音乐、动漫") })
+                if (s?.builtin == true) {
+                    Spacer(Modifier.height(10.dp))
+                    Text("${s.name} 的视频下载后会自动放进这个分区。", fontSize = 13.sp, color = P.text3)
+                } else {
+                    Spacer(Modifier.height(14.dp))
+                    Text("图标", fontSize = 13.sp, color = P.text3)
+                    Spacer(Modifier.height(8.dp))
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        LineIcons.sectionIcons.forEach { k ->
+                            Box(Modifier.size(44.dp).clip(RoundedCornerShape(12.dp))
+                                .background(if (k == icon) P.selected else Color.Transparent)
+                                .clickable { icon = k }, contentAlignment = Alignment.Center) {
+                                LIcon(LineIcons.named(k), if (k == icon) P.text else P.text3, 22.dp)
+                            }
+                        }
+                    }
+                }
+                if (s != null && !s.builtin) TextButton(onClick = { confirmDelete = true }, modifier = Modifier.padding(top = 6.dp)) {
+                    Text("删除这个分区", color = P.err)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = name.isNotBlank(), onClick = {
+                if (s == null) vm.createSection(name, icon, edit.moveIn) else vm.updateSection(s, name, icon)
+                vm.sectionEditor = null
+            }) { Text(if (s == null) "创建" else "保存", color = if (name.isNotBlank()) P.accent else P.text4) }
+        },
+        dismissButton = { TextButton(onClick = { vm.sectionEditor = null }) { Text("取消", color = P.text2) } })
+    if (confirmDelete && s != null) VdAlert("删除分区「${s.name}」？", "里面的视频不会被删除，会回到所属平台的分区。", "删除", danger = true,
+        onConfirm = { confirmDelete = false; vm.deleteSection(s); vm.sectionEditor = null; vm.showSection(-1) },
+        onDismiss = { confirmDelete = false })
+}
+
 // ================================================================ 设置页（Claude 手机版设置的样子）
 
 @Composable
-private fun SettingsScreen(vm: MainViewModel, back: () -> Unit) {
+private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: () -> Unit) {
     val ctx = LocalContext.current
     val login = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         if (it.resultCode == android.app.Activity.RESULT_OK) vm.onBiliLoggedIn()
     }
     var accountMenu by remember { mutableStateOf(false) }
     var editName by remember { mutableStateOf(false) }
+    var avatarMenu by remember { mutableStateOf(false) }
     var credits by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
         TopBar("设置", back)
@@ -754,7 +1030,7 @@ private fun SettingsScreen(vm: MainViewModel, back: () -> Unit) {
                         if (b?.loggedIn == true) accountMenu = true else login.launch(Intent(ctx, BiliLoginActivity::class.java))
                     }) {
                     Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Avatar(if (b?.loggedIn == true) b.name else vm.nickname, 44.dp)
+                        Avatar(if (b?.loggedIn == true) b.name else vm.nickname, 44.dp, image = vm.avatar)
                         Spacer(Modifier.width(14.dp))
                         Column(Modifier.weight(1f)) {
                             Text(when {
@@ -777,12 +1053,28 @@ private fun SettingsScreen(vm: MainViewModel, back: () -> Unit) {
                     MenuItem(LineIcons.LogOut, "退出 B站登录", P.err) { accountMenu = false; vm.logoutBili() }
                 }
             }
+            SettingsGroup("个人") {
+                Box {
+                    SettingsRow(LineIcons.User, "头像", if (vm.avatar != null) "点击更换图片或调整位置" else "从相册选一张图片，框选圆形区域",
+                        onClick = { if (vm.avatar != null) avatarMenu = true else chooseAvatar() }) {
+                        Avatar(if (b?.loggedIn == true) b.name else vm.nickname, 36.dp, image = vm.avatar)
+                    }
+                    DropdownMenu(avatarMenu, { avatarMenu = false }, containerColor = P.surface, shape = RoundedCornerShape(14.dp)) {
+                        MenuItem(LineIcons.Image, "更换图片") { avatarMenu = false; chooseAvatar() }
+                        MenuItem(LineIcons.Edit, "调整位置") { avatarMenu = false; vm.adjustAvatar() }
+                        MenuItem(LineIcons.Trash, "移除头像", P.err) { avatarMenu = false; vm.removeAvatar() }
+                    }
+                }
+                SettingsRow(LineIcons.Type, "首页该怎么称呼你？", vm.nickname.ifEmpty { "未设置：首页只打招呼，不带名字" }, divider = false,
+                    onClick = { editName = true }) { LIcon(LineIcons.ChevronRight, P.text3, 18.dp) }
+            }
             SettingsGroup("下载") { DownloadOptionRows(vm) }
             SettingsGroup("后台与登录") {
                 BackgroundRows(vm)
             }
             SettingsGroup("外观") {
-                SettingsRow(LineIcons.Monitor, "主题", when (vm.themeMode) { "light" -> "浅色"; "dark" -> "深色"; else -> "跟随系统" }) {
+                SettingsRow(LineIcons.Monitor, "主题", when (vm.themeMode) { "light" -> "浅色"; "dark" -> "深色"; else -> "跟随系统" },
+                    divider = false) {
                     Row(Modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, P.borderStrong, RoundedCornerShape(12.dp)).padding(3.dp)) {
                         listOf("system" to LineIcons.Monitor, "light" to LineIcons.Sun, "dark" to LineIcons.Moon).forEach { (m, icon) ->
                             Box(Modifier.size(36.dp).clip(RoundedCornerShape(9.dp))
@@ -793,15 +1085,13 @@ private fun SettingsScreen(vm: MainViewModel, back: () -> Unit) {
                         }
                     }
                 }
-                SettingsRow(LineIcons.User, "首页该怎么称呼你？", vm.nickname.ifEmpty { "未设置：首页只打招呼，不带名字" }, divider = false,
-                    onClick = { editName = true }) { LIcon(LineIcons.ChevronRight, P.text3, 18.dp) }
             }
             SettingsGroup("关于") {
                 SettingsRow(LineIcons.Info, "版本", "视频解析下载器 ${vm.appVersion}")
                 SettingsRow(LineIcons.Github, "GitHub 项目主页", "源码、更新说明和电脑版下载", onClick = { openWeb(ctx, GITHUB_URL) }) {
                     LIcon(LineIcons.External, P.text3, 18.dp)
                 }
-                SettingsRow(LineIcons.Heart, "致谢与开源许可", "yt-dlp、FFmpeg、思源宋体等", divider = false, onClick = { credits = true }) {
+                SettingsRow(LineIcons.Heart, "致谢与开源许可", "yt-dlp、FFmpeg、界面字体等", divider = false, onClick = { credits = true }) {
                     LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
                 }
             }
@@ -829,7 +1119,8 @@ private fun SettingsScreen(vm: MainViewModel, back: () -> Unit) {
     if (credits) VdAlert(title = "致谢与开源许可",
         text = "· yt-dlp：视频解析核心（Unlicense）\n· FFmpeg：音视频处理（电脑版内置，GPL）\n" +
             "· Media3 / Compose / Coil：安卓界面与视频处理（Apache 2.0）\n" +
-            "· Chaquopy：在安卓上运行 Python\n· 思源宋体（Noto Serif SC）：标题字体，截取常用字后改名 VDSerif（SIL Open Font License 1.1）",
+            "· Chaquopy：在安卓上运行 Python\n· Hanken Grotesk、Source Serif 4：界面英文字体，截取拉丁字母后改名 VDSans / VDSerif（SIL Open Font License 1.1）\n" +
+            "· B站、X、YouTube、抖音、快手的 logo 是各自的商标，只用来标识对应的分区",
         confirm = "知道了", onConfirm = { credits = false }, onDismiss = { credits = false })
 }
 
@@ -998,7 +1289,7 @@ private fun EpisodeDialog(sheet: EpisodeSheet, vm: MainViewModel) {
                 verticalAlignment = Alignment.CenterVertically) {
                 LIcon(LineIcons.Search, P.text3, 19.dp)
                 Spacer(Modifier.width(10.dp))
-                BasicTextField(search, { search = it }, singleLine = true, textStyle = TextStyle(fontSize = 15.sp, color = P.text),
+                BasicTextField(search, { search = it }, singleLine = true, textStyle = TextStyle(fontFamily = Sans, fontSize = 15.sp, color = P.text),
                     cursorBrush = SolidColor(P.accent), modifier = Modifier.weight(1f),
                     decorationBox = { inner -> Box { if (search.isEmpty()) Text("搜索标题…", color = P.text4, fontSize = 15.sp); inner() } })
             }

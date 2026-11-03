@@ -1,12 +1,11 @@
-VDSerif-Regular.ttf / VDSerif-SemiBold.ttf 是思源宋体（Noto Serif SC）的子集，
-只保留了常用字，并按 SIL Open Font License 1.1 的要求改名。原字体版权与授权如下。
+界面里的英文字体（中文用系统字体，不在这里）：
 
-Copyright 2017-2023 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+- VDSans-*.ttf：Hanken Grotesk 的子集（只保留拉丁字母、数字和常用标点，生成固定字重），改名为 VDSans。
+  Copyright 2021 The Hanken Grotesk Project Authors (https://github.com/marcologous/hanken-grotesk)
+- VDSerif-*.ttf：Source Serif 4 的子集（同上），按 OFL 要求改名为 VDSerif（原字体保留了名称 'Source'）。
+  Copyright 2014 - 2021 Adobe Systems Incorporated (http://www.adobe.com/), with Reserved Font Name 'Source'.
 
-This Font Software is licensed under the SIL Open Font License, Version 1.1.
-This license is copied below, and is also available with a FAQ at:
-https://openfontlicense.org
-
+生成脚本：图标设计/字体/make_fonts.py。两款字体都按 SIL Open Font License 1.1 授权，全文如下。
 
 -----------------------------------------------------------
 SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007

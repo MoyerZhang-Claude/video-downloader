@@ -7,6 +7,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -25,11 +26,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -215,8 +219,14 @@ fun ProgressLine(progress: Float, color: Color, modifier: Modifier = Modifier, i
     }
 }
 
+/** 圆形头像：有用户头像图片就显示图片，否则显示首字母（或小人图标） */
 @Composable
-fun Avatar(text: String, size: Dp = 36.dp, color: Color = P.accent) {
+fun Avatar(text: String, size: Dp = 36.dp, color: Color = P.accent, image: ImageBitmap? = null) {
+    if (image != null) {
+        Image(image, null, Modifier.size(size).clip(CircleShape).border(1.dp, P.border, CircleShape),
+            contentScale = ContentScale.Crop, filterQuality = FilterQuality.High)
+        return
+    }
     Box(Modifier.size(size).clip(CircleShape).background(color), contentAlignment = Alignment.Center) {
         if (text.isNotEmpty()) Text(text.take(1).uppercase(), color = Color.White, fontWeight = FontWeight.SemiBold,
             fontSize = (size.value * 0.42f).sp)

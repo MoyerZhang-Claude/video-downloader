@@ -1,7 +1,7 @@
 """界面主题：向 Claude 应用看齐的暖色调浅色 / 深色主题。
 
 - 颜色全部是「令牌」（P['text']、P['surface'] …），样式表和自绘控件都从这里取色，切换深浅色只要重新 apply()。
-- 标题用程序自带的衬线字体 VDSerif（思源宋体子集），正文用微软雅黑。
+- 中文用微软雅黑；英文正文 VDSans、标题 VDSerif（程序自带的开源字体，最接近 Claude 的字体）。
 - 带透明度的颜色写成 Qt 的 #AARRGGBB，样式表和 QColor 都认。
 """
 import os
@@ -62,7 +62,10 @@ PLATFORM_COLORS = {
 STATUS_ROLE = {'running': 'brand', 'merging': 'info', 'done': 'ok', 'exists': 'ok', 'failed': 'err',
                'paused': 'text3', 'canceled': 'text4', 'queued': 'text3'}
 
+# 字体和 Claude 应用一样：中文一律用系统黑体（微软雅黑），英文正文用 VDSans、标题用 VDSerif（最接近 Claude 的开源字体）。
+# Claude 的「周一快乐，Moyer」就是中文黑体 + 英文衬线。
 SERIF = 'VDSerif'
+LATIN = 'VDSans'
 SANS = 'Microsoft YaHei UI'
 
 
@@ -107,26 +110,28 @@ def font_dirs():
 
 
 def load_fonts():
-    """注册自带的衬线字体；找不到时退回系统里的宋体类字体。"""
-    global SERIF
+    """注册自带的英文字体（VDSans / VDSerif）；万一没找到，英文退回 Segoe UI / Georgia。"""
+    global SERIF, LATIN
     if _state['fonts']:
         return
     _state['fonts'] = True
+    fams = set()
     for d in font_dirs():
-        if not os.path.isdir(d):
-            continue
-        fams = []
-        for name in sorted(os.listdir(d)):
-            if name.lower().endswith(('.ttf', '.otf')):
-                fid = QFontDatabase.addApplicationFont(os.path.join(d, name))
-                fams += QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
-        if fams:
-            SERIF = fams[0]
-            return
-    for fallback in ('Noto Serif SC', 'Source Han Serif SC', 'SimSun'):
-        if fallback in QFontDatabase.families():
-            SERIF = fallback
-            return
+        if os.path.isdir(d):
+            for name in sorted(os.listdir(d)):
+                if name.lower().endswith(('.ttf', '.otf')):
+                    fid = QFontDatabase.addApplicationFont(os.path.join(d, name))
+                    fams.update(QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else [])
+            if fams:
+                break
+    if 'VDSerif' not in fams:
+        SERIF = 'Georgia'
+    if 'VDSans' not in fams:
+        LATIN = 'Segoe UI'
+
+
+def ui_families():
+    return [LATIN, SANS]
 
 
 def apply(app, new_mode=None):
@@ -211,10 +216,10 @@ QWidget#clear {{ background: transparent; }}
 QFrame#sidebar {{ background: {p['sidebar']}; border: none; border-right: 1px solid {p['border']}; }}
 QLabel {{ background: transparent; }}
 
-QLabel#greeting {{ font-family: "{SERIF}"; font-size: 34px; color: {p['text']}; }}
-QLabel#pageTitle {{ font-family: "{SERIF}"; font-size: 26px; color: {p['text']}; }}
-QLabel#brandName {{ font-family: "{SERIF}"; font-size: 17px; color: {p['text']}; }}
-QLabel#serifSmall {{ font-family: "{SERIF}"; font-size: 15px; color: {p['text2']}; }}
+QLabel#greeting {{ font-family: "{SERIF}", "{SANS}"; font-size: 34px; color: {p['text']}; }}
+QLabel#pageTitle {{ font-family: "{SERIF}", "{SANS}"; font-size: 26px; color: {p['text']}; }}
+QLabel#brandName {{ font-family: "{SERIF}", "{SANS}"; font-size: 17px; color: {p['text']}; }}
+QLabel#serifSmall {{ font-family: "{SERIF}", "{SANS}"; font-size: 15px; color: {p['text2']}; }}
 QLabel#panelTitle {{ font-size: 18px; font-weight: 600; color: {p['text']}; }}
 QLabel#sectionTitle {{ font-size: 15px; font-weight: 600; color: {p['text']}; }}
 QLabel#headTitle {{ font-size: 14px; font-weight: 600; color: {p['text']}; }}
@@ -266,6 +271,7 @@ QLineEdit:hover, QSpinBox:hover {{ border-color: {p['border_focus']}; }}
 QLineEdit:focus, QSpinBox:focus, QPlainTextEdit#field:focus {{ border-color: {p['border_focus']}; }}
 QLineEdit:disabled, QSpinBox:disabled {{ color: {p['text4']}; border-color: {p['border']}; }}
 QLineEdit#search {{ background: {p['field']}; border-radius: 10px; padding: 7px 10px; font-size: 14px; }}
+QLineEdit#searchBig {{ background: transparent; border: none; padding: 8px 2px; font-size: 16px; }}
 QPlainTextEdit#composer {{
     background: transparent; border: none; padding: 0; font-size: 15px; color: {p['text']};
     selection-background-color: {p['selection']}; selection-color: {p['text']};

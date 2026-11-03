@@ -14,8 +14,8 @@ android {
         applicationId = "com.videodl.app"
         minSdk = 29                 // Android 10+：可以免权限写入「下载」文件夹
         targetSdk = 36
-        versionCode = 7
-        versionName = "1.3.0"
+        versionCode = 8
+        versionName = "1.4.0"
         ndk {
             abiFilters += listOf("arm64-v8a")     // 手机基本都是 arm64，只打这一种，安装包小一半
         }
