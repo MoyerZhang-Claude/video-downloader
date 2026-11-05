@@ -93,7 +93,7 @@ class MainActivity : ComponentActivity() {
         handleShare(intent)
     }
 
-    /** 在抖音 / B站等 App 里「分享 → 视频解析下载器」：直接开始解析。 */
+    /** 在抖音 / B站、网盘等 App 里「分享 → 链接解析下载器」：直接开始解析。 */
     private fun handleShare(intent: Intent?) {
         if (intent?.action == Intent.ACTION_SEND) {
             val stream = androidx.core.content.IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
@@ -213,7 +213,11 @@ fun App(vm: MainViewModel, activity: ComponentActivity) {
         if (vm.showCookieManager) CookieManagerDialog(vm)
         vm.renaming?.let { RenameDialog(it, vm) }
         vm.moving?.let { MoveDialog(it, vm) }
+        vm.renamingParse?.let { ParseRenameDialog(it, vm) }
+        vm.movingParse?.let { ParseMoveDialog(it, vm) }
         vm.sectionEditor?.let { SectionDialog(it, vm) }
+        vm.pan.login?.let { PanLoginDialog(it, vm) }
+        vm.pan.captcha?.let { PanCaptchaDialog(it, vm) }
     }
 }
 
@@ -227,33 +231,39 @@ private fun Drawer(vm: MainViewModel, page: String, onNavigate: (String) -> Unit
             Row(Modifier.fillMaxWidth().height(72.dp).padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Spark(26.dp)
                 Spacer(Modifier.width(10.dp))
-                Text("视频解析下载器", fontFamily = Serif, fontSize = 26.sp, color = P.text, maxLines = 1, modifier = Modifier.weight(1f))
+                Text("链接解析下载器", fontFamily = Serif, fontSize = 26.sp, color = P.text, maxLines = 1, modifier = Modifier.weight(1f))
                 RoundIcon(LineIcons.Search, { onNavigate("search") }, size = 46.dp, iconSize = 24.dp, tint = P.text)
             }
             LazyColumn(Modifier.weight(1f)) {
                 item {
-                    val active = vm.tasks.count { it.active }
+                    val active = vm.tasks.count { it.active } + PanEngine.activeCount
                     DrawerItem(LineIcons.Download, "下载", page == "tasks", if (active > 0) "$active" else "") { onNavigate("tasks") }
-                    DrawerItem(LineIcons.Clock, "历史记录", page == "history" && vm.historySection < 0) {
+                    DrawerItem(LineIcons.Clock, "历史记录", page == "history" && vm.historySection < 0 && vm.historyMode == "parses") {
                         vm.showSection(-1); onNavigate("history")
                     }
                     DrawerItem(LineIcons.Settings, "设置", page == "settings") { onNavigate("settings") }
                     Box(Modifier.padding(vertical = 12.dp).fillMaxWidth().height(1.dp).background(P.border))
-                    Row(Modifier.padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("分区", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = P.text3, modifier = Modifier.weight(1f))
-                        RoundIcon(LineIcons.Plus, { vm.sectionEditor = SectionEdit(null, null) }, size = 38.dp, iconSize = 19.dp)
-                    }
                 }
-                items(vm.sections, key = { "s${it.id}" }) { s ->
-                    DrawerItem(LineIcons.named(s.icon), s.name, page == "history" && vm.historySection == s.id,
-                        trailing = if (s.count > 0) "${s.count}" else "", onLongClick = { vm.sectionEditor = SectionEdit(s, null) }) {
-                        onSection(s.id)
+                // 视频分区：下载好的视频；网盘分区：网盘分享的解析记录（点开后点一下就重新解析）
+                for ((kind, title) in listOf("video" to "视频分区", "pan" to "网盘分区")) {
+                    item(key = "head-$kind") {
+                        Row(Modifier.padding(start = 10.dp, top = if (kind == "pan") 12.dp else 0.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = P.text3, modifier = Modifier.weight(1f))
+                            RoundIcon(LineIcons.Plus, { vm.sectionEditor = SectionEdit(null, null, kind) }, size = 38.dp, iconSize = 19.dp)
+                        }
+                    }
+                    items(vm.sections.filter { it.kind == kind }, key = { "s${it.id}" }) { s ->
+                        DrawerItem(LineIcons.named(s.icon), s.name, page == "history" && vm.historySection == s.id,
+                            trailing = if (s.count > 0) "${s.count}" else "",
+                            onLongClick = { vm.sectionEditor = SectionEdit(s, null, s.kind) }) {
+                            onSection(s.id)
+                        }
                     }
                 }
                 item {
                     Text("最近下载", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = P.text3,
                         modifier = Modifier.padding(start = 10.dp, top = 18.dp, bottom = 6.dp))
-                    if (vm.recent.isEmpty()) Text("下载过的视频会出现在这里", fontSize = 14.sp, color = P.text4,
+                    if (vm.recent.isEmpty()) Text("下载好的视频会出现在这里", fontSize = 14.sp, color = P.text4,
                         modifier = Modifier.padding(10.dp))
                 }
                 items(vm.recent, key = { "r${it.id}" }) { h -> RecentRow(h, vm, goHome) }
@@ -327,7 +337,7 @@ private fun HomeScreen(vm: MainViewModel, focus: FocusRequester, openDrawer: () 
         Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             RoundIcon(LineIcons.Menu, openDrawer, size = 46.dp, iconSize = 26.dp, tint = P.text)
             Spacer(Modifier.weight(1f))
-            val active = vm.tasks.count { it.active }
+            val active = vm.tasks.count { it.active } + PanEngine.activeCount
             Box {
                 RoundIcon(LineIcons.Download, goTasks, size = 46.dp, iconSize = 24.dp, tint = P.text)
                 if (active > 0) Text("$active", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
@@ -337,7 +347,7 @@ private fun HomeScreen(vm: MainViewModel, focus: FocusRequester, openDrawer: () 
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            if (vm.items.isEmpty() || vm.fresh) EmptyHome(vm) else ResultList(vm)
+            if ((vm.items.isEmpty() && vm.pan.shares.isEmpty()) || vm.fresh) EmptyHome(vm) else ResultList(vm)
         }
         Composer(vm, focus)
     }
@@ -350,9 +360,10 @@ private fun EmptyHome(vm: MainViewModel) {
         Spark(46.dp, busy = !vm.ready)       // 首次启动准备解析引擎时，星芒在「思考」
         Spacer(Modifier.height(18.dp))
         Text(vm.greeting, fontFamily = Serif, fontSize = 30.sp, lineHeight = 40.sp, color = P.text, textAlign = TextAlign.Center)
-        if (vm.fresh && vm.items.isNotEmpty()) {
+        val n = vm.items.size + vm.pan.shares.size
+        if (vm.fresh && n > 0) {
             Spacer(Modifier.height(22.dp))
-            OutlineButton("回到刚才的 ${vm.items.size} 个解析结果", icon = LineIcons.List) { vm.backToResults() }
+            OutlineButton("回到刚才的 $n 个解析结果", icon = LineIcons.List) { vm.backToResults() }
         }
         Spacer(Modifier.height(60.dp))
     }
@@ -365,16 +376,20 @@ private fun ResultList(vm: MainViewModel) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 4.dp)) {
                 val ok = vm.items.count { it.state == "ok" }
-                val busy = vm.items.count { it.state == "parsing" }
+                val shares = vm.pan.shares
+                val busy = vm.items.count { it.state == "parsing" } + shares.count { it.state == "opening" }
                 Column(Modifier.weight(1f)) {
                     Text("解析结果", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = P.text)
-                    Text("$ok / ${vm.items.size} 个视频" + if (busy > 0) " · 正在解析 $busy 个" else "", fontSize = 12.sp, color = P.text3)
+                    Text(listOfNotNull(if (vm.items.isNotEmpty()) "$ok / ${vm.items.size} 个视频" else null,
+                        if (shares.isNotEmpty()) "${shares.size} 个网盘分享" else null).joinToString(" · ") +
+                        if (busy > 0) " · 正在解析 $busy 个" else "", fontSize = 12.sp, color = P.text3)
                 }
                 RoundIcon(LineIcons.Trash, { vm.clearItems() }, size = 38.dp, iconSize = 19.dp)
                 Spacer(Modifier.width(4.dp))
-                PrimaryButton("全部下载", icon = LineIcons.Download, enabled = ok > 0) { vm.downloadAll() }
+                PrimaryButton("全部下载", icon = LineIcons.Download, enabled = ok > 0 || shares.any { it.state == "list" }) { vm.downloadAll() }
             }
         }
+        items(vm.pan.shares, key = { "p${it.seq}" }) { PanShareCard(it, vm) }
         items(vm.items, key = { "v${it.id}" }) { VideoCard(it, vm) }
     }
 }
@@ -400,7 +415,7 @@ private fun Composer(vm: MainViewModel, focus: FocusRequester) {
                 modifier = Modifier.fillMaxWidth().focusRequester(focus),
                 decorationBox = { inner ->
                     Box {
-                        if (text.isEmpty()) Text("粘贴视频链接或分享文字…", fontSize = 16.sp, color = P.text4, maxLines = 1,
+                        if (text.isEmpty()) Text("粘贴视频或网盘分享链接…", fontSize = 16.sp, color = P.text4, maxLines = 1,
                             overflow = TextOverflow.Ellipsis)
                         inner()
                     }
@@ -661,14 +676,18 @@ private fun TaskLine(task: DownloadTask, vm: MainViewModel) {
 private fun TasksScreen(vm: MainViewModel, back: () -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
         TopBar("下载", back) {
-            if (vm.tasks.any { !it.active }) TextButton(onClick = { vm.tasks.filter { !it.active }.forEach { vm.removeTask(it) } }) {
+            if (vm.tasks.any { !it.active } || vm.pan.batches.any { it.state == "done" }) TextButton(onClick = {
+                vm.tasks.filter { !it.active }.forEach { vm.removeTask(it) }
+                vm.pan.clearFinished()
+            }) {
                 Text("清除已结束", color = P.text2)
             }
         }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (vm.tasks.isEmpty()) item {
-                EmptyState("还没有下载任务", "在首页粘贴链接，选好清晰度点「下载」；下载在后台进行，通知栏显示进度")
+            if (vm.tasks.isEmpty() && vm.pan.batches.isEmpty()) item {
+                EmptyState("还没有下载任务", "在首页粘贴视频或网盘分享链接，点「下载」；下载在后台进行，通知栏显示进度")
             }
+            items(vm.pan.batches.reversed(), key = { "b${it.id}" }) { PanBatchCard(it, vm) }
             items(vm.tasks.reversed(), key = { "t${it.id}" }) { TaskCard(it, vm) }
         }
     }
@@ -755,44 +774,101 @@ private fun SearchField(value: String, onChange: (String) -> Unit, hint: String,
 private fun HistoryScreen(vm: MainViewModel, back: () -> Unit, goHome: () -> Unit) {
     var confirmClear by remember { mutableStateOf(false) }
     val section = vm.sections.firstOrNull { it.id == vm.historySection }
+    val downloads = vm.historyMode == "downloads"
+    val kind = if (downloads) "" else section?.kind ?: vm.historyKind
+    val c = vm.counts
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
-        TopBar(section?.name ?: "历史记录", back) {
-            if (section != null) RoundIcon(LineIcons.Edit, { vm.sectionEditor = SectionEdit(section, null) }, size = 44.dp, iconSize = 21.dp)
-            else if (vm.history.isNotEmpty()) RoundIcon(LineIcons.Trash, { confirmClear = true }, size = 44.dp, iconSize = 21.dp)
+        TopBar(section?.name ?: if (downloads) "已下载的视频" else "历史记录", back) {
+            if (section != null) RoundIcon(LineIcons.Edit, { vm.sectionEditor = SectionEdit(section, null, section.kind) }, size = 44.dp, iconSize = 21.dp)
+            else if (if (downloads) vm.history.isNotEmpty() else vm.parses.isNotEmpty())
+                RoundIcon(LineIcons.Trash, { confirmClear = true }, size = 44.dp, iconSize = 21.dp)
         }
         SearchField(vm.historySearch, { vm.historySearch = it; vm.loadHistory(it) }, "搜索标题、作者或平台",
             Modifier.padding(horizontal = 16.dp, vertical = 6.dp).fillMaxWidth())
-        // 分区筛选
+        // 筛选：全部 / 视频 / 网盘 是解析记录，「已下载的视频」是下载记录；选了网盘或已下载后再列出对应的分区
         LazyRow(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            item { FilterChipRow(LineIcons.List, "全部", vm.historySection < 0) { vm.showSection(-1) } }
-            items(vm.sections, key = { "f${it.id}" }) { s ->
-                FilterChipRow(LineIcons.named(s.icon), "${s.name} ${s.count}", vm.historySection == s.id) { vm.showSection(s.id) }
+            item { FilterChipRow(LineIcons.List, "全部 ${c.optInt("all")}", !downloads && kind.isEmpty() && section == null) { vm.filterKind("") } }
+            item { FilterChipRow(LineIcons.Film, "视频 ${c.optInt("video")}", !downloads && kind == "video") { vm.filterKind("video") } }
+            item { FilterChipRow(LineIcons.Folder, "网盘 ${c.optInt("pan")}", !downloads && kind == "pan" && section == null) { vm.filterKind("pan") } }
+            item { FilterChipRow(LineIcons.Download, "已下载的视频 ${c.optInt("downloads")}", downloads && section == null) { vm.showDownloads() } }
+            val group = if (downloads) "video" else if (kind == "pan") "pan" else ""
+            if (group.isNotEmpty()) {
+                items(vm.sections.filter { it.kind == group }, key = { "f${it.id}" }) { s ->
+                    FilterChipRow(LineIcons.named(s.icon), "${s.name} ${s.count}", vm.historySection == s.id) { vm.showSection(s.id) }
+                }
+                item { FilterChipRow(LineIcons.FolderPlus, "新建分区", false) { vm.sectionEditor = SectionEdit(null, null, group) } }
             }
-            item { FilterChipRow(LineIcons.FolderPlus, "新建分区", false) { vm.sectionEditor = SectionEdit(null, null) } }
         }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 20.dp)) {
             item {
-                Text((if (section != null) "这个分区有 ${section.count} 个视频" else "共 ${vm.history.size} 条下载记录") +
-                    if (section?.builtin == true) "（${section.name} 的视频下载后自动放进来）" else "",
-                    fontSize = 12.sp, color = P.text3, modifier = Modifier.padding(start = 22.dp, top = 4.dp, bottom = 4.dp))
+                Text(when {
+                    section?.kind == "video" -> "这个分区有 ${section.count} 个下载好的视频" + if (section.builtin) "（${section.name} 的视频下载后自动放进来）" else ""
+                    section != null -> "这个分区有 ${section.count} 个网盘分享，点一下重新解析" + if (section.builtin) "（解析过的${section.name}分享自动放进来）" else ""
+                    downloads -> "共 ${vm.history.size} 个下载好的视频"
+                    else -> "共 ${vm.parses.size} 条${mapOf("video" to "视频", "pan" to "网盘分享")[kind] ?: ""}解析记录，点一下重新解析"
+                }, fontSize = 12.sp, color = P.text3, modifier = Modifier.padding(start = 22.dp, top = 4.dp, bottom = 4.dp))
             }
-            if (vm.history.isEmpty()) item {
-                EmptyState(when {
-                    vm.historySearch.isNotEmpty() -> "没有找到记录"
-                    section != null -> "这个分区还没有视频"
-                    else -> "还没有下载记录"
-                }, when {
-                    vm.historySearch.isNotEmpty() -> "换个关键词试试"
-                    section != null -> "长按任意视频，选「移至分区」就能放进来"
-                    else -> "下载完成的视频会记录在这里，方便再次打开或重新下载"
-                })
+            if (downloads) {
+                if (vm.history.isEmpty()) item {
+                    EmptyState(if (vm.historySearch.isNotEmpty()) "没有找到记录" else if (section != null) "这个分区还没有视频" else "还没有下载好的视频",
+                        if (vm.historySearch.isNotEmpty()) "换个关键词试试" else if (section != null) "长按任意视频，选「移至分区」就能放进来"
+                        else "视频下载完成后会记录在这里，方便再次打开")
+                }
+                items(vm.history, key = { "h${it.id}" }) { h -> HistoryRow(h, vm, goHome) }
+            } else {
+                if (vm.parses.isEmpty()) item {
+                    EmptyState(if (vm.historySearch.isNotEmpty()) "没有找到记录" else "还没有解析记录",
+                        if (vm.historySearch.isNotEmpty()) "换个关键词试试" else "解析过的视频和网盘分享会记录在这里，点一下就能重新解析")
+                }
+                items(vm.parses, key = { "q${it.id}" }) { r -> ParseRow(r, vm, goHome) }
             }
-            items(vm.history, key = { "h${it.id}" }) { h -> HistoryRow(h, vm, goHome) }
         }
     }
     if (confirmClear) VdAlert(
-        title = "清空下载历史？", text = "只删除记录，不会删除已经下载的视频文件。",
+        title = if (downloads) "清空视频下载记录？" else "清空${mapOf("video" to "视频的", "pan" to "网盘分享的")[kind] ?: "全部"}解析记录？",
+        text = if (downloads) "只删除记录，不会删除已经下载的视频文件。" else "网盘分区里保存的分享链接也会一起清空。",
         confirm = "清空", danger = true, onConfirm = { confirmClear = false; vm.clearHistory() }, onDismiss = { confirmClear = false })
+}
+
+/** 一条解析记录：点一下重新解析，长按出菜单（重命名、移至分区……） */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ParseRow(r: ParseRecord, vm: MainViewModel, goHome: () -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().combinedClickable(onClick = { vm.reparse(r.url); goHome() }, onLongClick = { menu = true })
+        .padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(r.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 15.sp, lineHeight = 20.sp, color = P.text)
+            Spacer(Modifier.height(5.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                PlatformTag(r.platform)
+                Text("  " + listOf(if (r.kind == "pan") "网盘分享" else "", r.info, fmtAgo(r.ts)).filter { it.isNotEmpty() }.joinToString(" · "),
+                    fontSize = 12.sp, color = P.text3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Box {
+            RoundIcon(LineIcons.More, { menu = true }, size = 40.dp, iconSize = 20.dp)
+            ParseMenu(r, vm, menu, { menu = false }, goHome)
+        }
+    }
+    Box(Modifier.padding(start = 20.dp, end = 20.dp).fillMaxWidth().height(1.dp).background(P.border))
+}
+
+@Composable
+private fun ParseMenu(r: ParseRecord, vm: MainViewModel, expanded: Boolean, onDismiss: () -> Unit, goHome: () -> Unit) {
+    val ctx = LocalContext.current
+    DropdownMenu(expanded, onDismiss, containerColor = P.surface, shape = RoundedCornerShape(14.dp)) {
+        MenuItem(LineIcons.Refresh, "重新解析") { onDismiss(); vm.reparse(r.url); goHome() }
+        MenuItem(LineIcons.Edit, "重命名") { onDismiss(); vm.renamingParse = r }
+        if (r.kind == "pan") MenuItem(LineIcons.FolderMove, "移至分区") { onDismiss(); vm.movingParse = r }
+        MenuItem(LineIcons.Copy, "复制链接") {
+            onDismiss()
+            (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                .setPrimaryClip(android.content.ClipData.newPlainText("link", r.url))
+            vm.toast("已复制链接")
+        }
+        MenuItem(LineIcons.Trash, "删除记录", P.err) { onDismiss(); vm.deleteParse(r) }
+    }
 }
 
 @Composable
@@ -850,19 +926,33 @@ private fun SearchScreen(vm: MainViewModel, back: () -> Unit, onSection: (Long) 
         Row(Modifier.fillMaxWidth().padding(start = 6.dp, end = 14.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             RoundIcon(LineIcons.ArrowLeft, back, size = 44.dp, iconSize = 22.dp, tint = P.text)
             Spacer(Modifier.width(4.dp))
-            SearchField(vm.searchQuery, { vm.search(it) }, "搜索下载过的视频和分区", Modifier.weight(1f), focus)
+            SearchField(vm.searchQuery, { vm.search(it) }, "搜索解析记录、下载好的视频和分区", Modifier.weight(1f), focus)
         }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 20.dp)) {
             if (secs.isNotEmpty()) {
                 item { SearchHeader("分区") }
                 items(secs, key = { "ss${it.id}" }) { s ->
-                    SearchItem(LineIcons.named(s.icon), s.name, "${s.count} 个视频", onClick = { onSection(s.id) })
+                    SearchItem(LineIcons.named(s.icon), s.name, if (s.kind == "pan") "${s.count} 个网盘分享" else "${s.count} 个视频",
+                        onClick = { onSection(s.id) })
                 }
             }
-            item { SearchHeader(if (q.isEmpty()) "最近下载" else "下载记录") }
-            if (vm.searchResults.isEmpty()) item {
-                EmptyState(if (q.isEmpty()) "还没有下载记录" else "没有找到相关的视频", if (q.isEmpty()) "下载完成的视频会出现在这里" else "换个关键词试试")
+            if (vm.searchParses.isNotEmpty()) item { SearchHeader(if (q.isEmpty()) "最近解析" else "解析记录") }
+            items(vm.searchParses, key = { "sp${it.id}" }) { r ->
+                var menu by remember { mutableStateOf(false) }
+                val sec = vm.sections.firstOrNull { it.id == r.sectionId }
+                Box {
+                    SearchItem(if (sec != null) LineIcons.named(sec.icon) else if (r.kind == "pan") LineIcons.Folder else LineIcons.Film, r.title,
+                        listOf(if (r.kind == "pan") "网盘分享" else r.platform, r.info, fmtAgo(r.ts), "点击重新解析")
+                            .filter { it.isNotEmpty() }.joinToString(" · "),
+                        onClick = { vm.reparse(r.url); goHome() }, onLongClick = { menu = true })
+                    ParseMenu(r, vm, menu, { menu = false }, goHome)
+                }
             }
+            if (vm.searchParses.isEmpty() && vm.searchResults.isEmpty()) item {
+                EmptyState(if (q.isEmpty()) "还没有解析记录" else "没有找到相关的记录",
+                    if (q.isEmpty()) "解析过的视频和网盘分享会出现在这里" else "换个关键词试试")
+            }
+            if (vm.searchResults.isNotEmpty()) item { SearchHeader("已下载的视频") }
             items(vm.searchResults, key = { "sr${it.id}" }) { h ->
                 var menu by remember { mutableStateOf(false) }
                 val sec = vm.sections.firstOrNull { it.id == h.sectionId }
@@ -928,7 +1018,7 @@ private fun MoveDialog(h: HistoryRecord, vm: MainViewModel) {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(h.title, fontSize = 13.sp, color = P.text3, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(8.dp))
-                vm.sections.forEach { s ->
+                vm.sections.filter { it.kind == "video" }.forEach { s ->
                     val here = s.id == h.sectionId
                     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (here) P.selected else Color.Transparent)
                         .clickable(enabled = !here) { vm.moveRecord(h, s.id); vm.moving = null }
@@ -941,7 +1031,7 @@ private fun MoveDialog(h: HistoryRecord, vm: MainViewModel) {
                 }
                 Box(Modifier.padding(vertical = 6.dp).fillMaxWidth().height(1.dp).background(P.border))
                 Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                    .clickable { vm.moving = null; vm.sectionEditor = SectionEdit(null, h) }
+                    .clickable { vm.moving = null; vm.sectionEditor = SectionEdit(null, h, "video") }
                     .padding(horizontal = 10.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
                     LIcon(LineIcons.FolderPlus, P.text2, 21.dp)
                     Spacer(Modifier.width(14.dp))
@@ -959,6 +1049,62 @@ private fun MoveDialog(h: HistoryRecord, vm: MainViewModel) {
         confirmButton = { TextButton(onClick = { vm.moving = null }) { Text("取消", color = P.text2) } })
 }
 
+@Composable
+private fun ParseRenameDialog(r: ParseRecord, vm: MainViewModel) {
+    var name by remember(r.id) { mutableStateOf(r.title) }
+    AlertDialog(onDismissRequest = { vm.renamingParse = null }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
+        title = { Text("重命名", color = P.text, fontSize = 18.sp) },
+        text = {
+            Column {
+                Text("只改 App 里显示的名字。留空 = 恢复成原来的标题。", fontSize = 13.sp, color = P.text3, lineHeight = 19.sp)
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(name, { name = it }, singleLine = true, shape = RoundedCornerShape(12.dp),
+                    placeholder = { Text(r.origTitle, maxLines = 1) })
+            }
+        },
+        confirmButton = { TextButton(onClick = { vm.renameParse(r, name); vm.renamingParse = null }) { Text("保存", color = P.accent) } },
+        dismissButton = { TextButton(onClick = { vm.renamingParse = null }) { Text("取消", color = P.text2) } })
+}
+
+@Composable
+private fun ParseMoveDialog(r: ParseRecord, vm: MainViewModel) {
+    AlertDialog(onDismissRequest = { vm.movingParse = null }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
+        title = { Text("移至分区", color = P.text, fontSize = 18.sp) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(r.title, fontSize = 13.sp, color = P.text3, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(8.dp))
+                vm.sections.filter { it.kind == "pan" }.forEach { s ->
+                    val here = s.id == r.sectionId
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (here) P.selected else Color.Transparent)
+                        .clickable(enabled = !here) { vm.moveParse(r, s.id); vm.movingParse = null }
+                        .padding(horizontal = 10.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                        LIcon(LineIcons.named(s.icon), P.text2, 21.dp)
+                        Spacer(Modifier.width(14.dp))
+                        Text(s.name, fontSize = 16.sp, color = P.text, modifier = Modifier.weight(1f))
+                        if (here) Text("当前", fontSize = 13.sp, color = P.text3)
+                    }
+                }
+                Box(Modifier.padding(vertical = 6.dp).fillMaxWidth().height(1.dp).background(P.border))
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .clickable { vm.movingParse = null; vm.sectionEditor = SectionEdit(null, null, "pan", r) }
+                    .padding(horizontal = 10.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                    LIcon(LineIcons.FolderPlus, P.text2, 21.dp)
+                    Spacer(Modifier.width(14.dp))
+                    Text("新建分区…", fontSize = 16.sp, color = P.text)
+                }
+                if (r.sectionId >= 0) Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .clickable { vm.moveParse(r, -1); vm.movingParse = null }
+                    .padding(horizontal = 10.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                    LIcon(LineIcons.X, P.text2, 21.dp)
+                    Spacer(Modifier.width(14.dp))
+                    Text("移出分区", fontSize = 16.sp, color = P.text)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { vm.movingParse = null }) { Text("取消", color = P.text2) } })
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SectionDialog(edit: SectionEdit, vm: MainViewModel) {
@@ -967,14 +1113,16 @@ private fun SectionDialog(edit: SectionEdit, vm: MainViewModel) {
     var icon by remember(edit) { mutableStateOf(s?.icon?.takeIf { it in LineIcons.sectionIcons } ?: "folder") }
     var confirmDelete by remember { mutableStateOf(false) }
     AlertDialog(onDismissRequest = { vm.sectionEditor = null }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
-        title = { Text(if (s == null) "新建分区" else if (s.builtin) "重命名分区" else "编辑分区", color = P.text, fontSize = 18.sp) },
+        title = { Text(if (s == null) (if (edit.kind == "pan") "新建网盘分区" else "新建视频分区") else if (s.builtin) "重命名分区" else "编辑分区",
+            color = P.text, fontSize = 18.sp) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 OutlinedTextField(name, { name = it.take(20) }, singleLine = true, shape = RoundedCornerShape(12.dp),
                     placeholder = { Text("例如：收藏、学习、音乐、动漫") })
                 if (s?.builtin == true) {
                     Spacer(Modifier.height(10.dp))
-                    Text("${s.name} 的视频下载后会自动放进这个分区。", fontSize = 13.sp, color = P.text3)
+                    Text(if (s.kind == "pan") "解析过的${s.name}分享会自动放进这个分区。" else "${s.name} 的视频下载后会自动放进这个分区。",
+                        fontSize = 13.sp, color = P.text3)
                 } else {
                     Spacer(Modifier.height(14.dp))
                     Text("图标", fontSize = 13.sp, color = P.text3)
@@ -996,12 +1144,12 @@ private fun SectionDialog(edit: SectionEdit, vm: MainViewModel) {
         },
         confirmButton = {
             TextButton(enabled = name.isNotBlank(), onClick = {
-                if (s == null) vm.createSection(name, icon, edit.moveIn) else vm.updateSection(s, name, icon)
+                if (s == null) vm.createSection(name, icon, edit.moveIn, edit.kind, edit.moveParse) else vm.updateSection(s, name, icon)
                 vm.sectionEditor = null
             }) { Text(if (s == null) "创建" else "保存", color = if (name.isNotBlank()) P.accent else P.text4) }
         },
         dismissButton = { TextButton(onClick = { vm.sectionEditor = null }) { Text("取消", color = P.text2) } })
-    if (confirmDelete && s != null) VdAlert("删除分区「${s.name}」？", "里面的视频不会被删除，会回到所属平台的分区。", "删除", danger = true,
+    if (confirmDelete && s != null) VdAlert("删除分区「${s.name}」？", "里面的记录不会被删除，会回到所属平台的分区。", "删除", danger = true,
         onConfirm = { confirmDelete = false; vm.deleteSection(s); vm.sectionEditor = null; vm.showSection(-1) },
         onDismiss = { confirmDelete = false })
 }
@@ -1069,6 +1217,9 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                     onClick = { editName = true }) { LIcon(LineIcons.ChevronRight, P.text3, 18.dp) }
             }
             SettingsGroup("下载") { DownloadOptionRows(vm) }
+            LaunchedEffect(Unit) { vm.pan.refreshAccounts() }
+            SettingsGroup("网盘账号") { PanAccountRows(vm) }
+            SettingsGroup("网盘下载") { PanSettingRows(vm) }
             SettingsGroup("后台与登录") {
                 BackgroundRows(vm)
             }
@@ -1087,11 +1238,11 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                 }
             }
             SettingsGroup("关于") {
-                SettingsRow(LineIcons.Info, "版本", "视频解析下载器 ${vm.appVersion}")
+                SettingsRow(LineIcons.Info, "版本", "链接解析下载器 ${vm.appVersion}")
                 SettingsRow(LineIcons.Github, "GitHub 项目主页", "源码、更新说明和电脑版下载", onClick = { openWeb(ctx, GITHUB_URL) }) {
                     LIcon(LineIcons.External, P.text3, 18.dp)
                 }
-                SettingsRow(LineIcons.Heart, "致谢与开源许可", "yt-dlp、FFmpeg、界面字体等", divider = false, onClick = { credits = true }) {
+                SettingsRow(LineIcons.Heart, "致谢与开源许可", "yt-dlp、PanDL、FFmpeg、界面字体等", divider = false, onClick = { credits = true }) {
                     LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
                 }
             }
@@ -1117,10 +1268,11 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
             dismissButton = { TextButton(onClick = { editName = false }) { Text("取消", color = P.text2) } })
     }
     if (credits) VdAlert(title = "致谢与开源许可",
-        text = "· yt-dlp：视频解析核心（Unlicense）\n· FFmpeg：音视频处理（电脑版内置，GPL）\n" +
+        text = "· yt-dlp：视频解析核心（Unlicense）\n· PanDL 网盘下载器：网盘解析与下载核心（同一作者，Go 编写，已合并进本软件）\n" +
+            "· FFmpeg：音视频处理（电脑版内置，GPL）\n" +
             "· Media3 / Compose / Coil：安卓界面与视频处理（Apache 2.0）\n" +
             "· Chaquopy：在安卓上运行 Python\n· Hanken Grotesk、Source Serif 4：界面英文字体，截取拉丁字母后改名 VDSans / VDSerif（SIL Open Font License 1.1）\n" +
-            "· B站、X、YouTube、抖音、快手的 logo 是各自的商标，只用来标识对应的分区",
+            "· B站、X、YouTube、抖音、快手、百度网盘、夸克网盘、123云盘、Mega 的 logo 是各自的商标，只用来标识对应的分区",
         confirm = "知道了", onConfirm = { credits = false }, onDismiss = { credits = false })
 }
 

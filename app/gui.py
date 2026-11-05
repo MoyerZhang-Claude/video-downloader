@@ -20,13 +20,14 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
-from . import APP_NAME, APP_VERSION, avatar, bilibili, core, greetings, icons, task_store, theme, ui
+from . import APP_NAME, APP_VERSION, avatar, bilibili, core, greetings, icons, pan, task_store, theme, ui
 from .bili_dialog import BiliLoginDialog
 from .config import ROOT, Settings, ffmpeg_dir
 from .episode_dialog import EpisodeDialog
 from .folder_dialog import FolderDialog, TextDialog
+from .pan_ui import PanMixin
 from .search_panel import SearchPanel
-from .history import History
+from .history import PAN, VIDEO, History, video_key
 from .hotkey import GlobalHotkey
 from .section_dialog import SectionDialog
 from .settings_dialog import SettingsPanel
@@ -452,6 +453,77 @@ class HistoryRow(QWidget):
             p.drawRoundedRect(QRectF(self.rect()), 10, 10)
 
 
+class ParseRow(QWidget):
+    """历史记录（解析记录）里的一行：平台、标题、信息 · 时间。点一下重新解析，悬停时出现操作按钮。"""
+
+    def __init__(self, win, rec):
+        super().__init__()
+        self.win, self.rec = win, rec
+        self.setAttribute(Qt.WA_Hover)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(62)
+        pan_rec = rec['kind'] == PAN
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 8, 10, 8)
+        lay.setSpacing(12)
+        tag_box = clear_widget()
+        tag_box.setFixedWidth(92)
+        tl = QHBoxLayout(tag_box)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.addWidget(PlatformTag(rec['platform']))
+        tl.addStretch(1)
+        lay.addWidget(tag_box, 0, Qt.AlignVCenter)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        title = ElidedLabel(rec['title'] or rec['url'], 'rowLabel')
+        title.set_full_text(rec['title'] or rec['url'], f'{rec["title"]}\n{rec["url"]}\n点击重新解析')
+        sec = win.sections.get(rec['section_id']) if rec.get('section_id') else None
+        bits = ['网盘分享' if pan_rec else '视频', rec['info'] or '', f'「{sec["name"]}」分区' if sec and not sec['builtin'] else '',
+                fmt_ago(rec['ts'])]
+        col.addWidget(title)
+        col.addWidget(ElidedLabel('  ·  '.join(b for b in bits if b), 'meta'))
+        lay.addLayout(col, 1)
+        self.ops = clear_widget()
+        oh = QHBoxLayout(self.ops)
+        oh.setContentsMargins(0, 0, 0, 0)
+        oh.setSpacing(2)
+        for icon, tip, slot in (
+                ('refresh', '重新解析', lambda: win._reparse_record(rec)),
+                ('copy', '复制链接', lambda: (QGuiApplication.clipboard().setText(rec['url']), win.notify('已复制链接'))),
+                ('trash', '删除这条记录', lambda: win._delete_parse(rec)),
+                ('more', '重命名、移至分区…', None)):
+            b = IconButton(icon, tip, size=30, icon_size=17)
+            if slot:
+                b.clicked.connect(slot)
+            else:
+                b.clicked.connect(lambda _=False, bb=b: win._parse_menu(rec, bb.mapToGlobal(QPoint(0, bb.height() + 4))))
+            oh.addWidget(b)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(lambda pos: win._parse_menu(rec, self.mapToGlobal(pos)))
+        self.ops.setVisible(False)
+        lay.addWidget(self.ops)
+
+    def enterEvent(self, e):
+        self.ops.setVisible(True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.ops.setVisible(False)
+        super().leaveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.win._reparse_record(self.rec)
+
+    def paintEvent(self, e):
+        if self.underMouse():
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(Qt.NoPen)
+            p.setBrush(c('hover'))
+            p.drawRoundedRect(QRectF(self.rect()), 10, 10)
+
+
 class AccountButton(ui._HoverButton):
     """侧边栏左下角：头像 + 名字 + B站状态，点击弹出菜单（像 Claude 的账号菜单）。"""
 
@@ -502,7 +574,7 @@ class AccountButton(ui._HoverButton):
 
 # ---------------------------------------------------------------- 主窗口
 
-class MainWindow(QMainWindow):
+class MainWindow(PanMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = Settings.load()
@@ -530,6 +602,8 @@ class MainWindow(QMainWindow):
         self.settings_panel = None
         self.search_panel = None
         self.hist_section = None         # 历史记录页只看某个分区（None = 全部）
+        self.hist_kind = None            # 历史记录页只看视频 / 网盘（None = 两类都看）
+        self.hist_mode = 'parses'        # 历史记录页：parses 解析记录 / downloads 下载好的视频
         self.sections = {}
         try:
             self.history = History()
@@ -548,6 +622,9 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f'{APP_NAME} {APP_VERSION}')
         self.setMinimumSize(980, 640)
+        self._pan_init()
+        self._parse_timer = QTimer(self, singleShot=True, interval=400)     # 一次解析很多链接时合并刷新
+        self._parse_timer.timeout.connect(self._after_history_change)
         self._build_ui()
         theme.signals.changed.connect(self._on_theme_changed)
         if self.settings.window_geometry:
@@ -618,7 +695,7 @@ class MainWindow(QMainWindow):
         top.setContentsMargins(6, 0, 0, 0)
         top.setSpacing(8)
         self.side_spark = Spark(24)
-        self.brand = label('视频解析下载器', 'brandName')
+        self.brand = label(APP_NAME, 'brandName')
         self.collapse_btn = IconButton('sidebar', '收起侧边栏', size=32, icon_size=18)
         self.collapse_btn.clicked.connect(lambda: self._set_collapsed(not self.settings.sidebar_collapsed, save=True))
         top.addWidget(self.side_spark)
@@ -633,7 +710,7 @@ class MainWindow(QMainWindow):
         self.nav_new.clicked.connect(self._new_parse)
         self.nav_search = NavItem('搜索', 'search')       # 和 Claude 一样放在「新建」下面
         self.nav_search.setCheckable(False)
-        self.nav_search.setToolTip('搜索下载过的视频和分区（Ctrl+K）')
+        self.nav_search.setToolTip('搜索下载记录和分区（Ctrl+K）')
         self.nav_search.clicked.connect(self._open_search)
         self.nav_tasks = NavItem('下载', 'download')
         self.nav_tasks.clicked.connect(lambda: self._go('tasks'))
@@ -649,16 +726,19 @@ class MainWindow(QMainWindow):
         sl.setContentsMargins(0, 0, 0, 0)
         sl.setSpacing(1)
         extra = self.settings.extra
-        self.sec_header = ui.SideHeader('分区', extra.get('sections_open', True), '新建分区')
-        self.sec_header.toggled_open.connect(lambda on: self._toggle_side('sections_open', on))
-        self.sec_header.plus.clicked.connect(lambda: self._new_section())
-        sl.addWidget(self.sec_header)
-        sec = clear_widget()
-        self.sec_box = QVBoxLayout(sec)
-        self.sec_box.setContentsMargins(0, 0, 0, 0)
-        self.sec_box.setSpacing(1)
-        sl.addWidget(sec)
-        sl.addSpacing(10)
+        self.sec_headers, self.sec_boxes = {}, {}
+        for kind, title, key in ((VIDEO, '视频分区', 'sections_open'), (PAN, '网盘分区', 'pan_sections_open')):
+            head = ui.SideHeader(title, extra.get(key, True), '新建' + title)
+            head.toggled_open.connect(lambda on, k=key: self._toggle_side(k, on))
+            head.plus.clicked.connect(lambda _=False, k=kind: self._new_section(kind=k))
+            sl.addWidget(head)
+            sec = clear_widget()
+            box = QVBoxLayout(sec)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(1)
+            sl.addWidget(sec)
+            sl.addSpacing(10)
+            self.sec_headers[kind], self.sec_boxes[kind] = head, box
         self.recent_header = ui.SideHeader('最近下载', extra.get('recents_open', True))
         self.recent_header.toggled_open.connect(lambda on: self._toggle_side('recents_open', on))
         sl.addWidget(self.recent_header)
@@ -709,7 +789,7 @@ class MainWindow(QMainWindow):
     def _new_parse(self):
         """像 Claude 的「新建」：回到首页（问候语 + 居中输入框）。
         之前的解析结果先留着（首页有「回到刚才的解析结果」），在首页解析新链接时才清掉；下载不受影响。"""
-        if self.rows and not self.fresh:
+        if (self.rows or self.pan_cards) and not self.fresh:
             self.fresh = True
             self._update_parse_mode()
         self._go('parse')
@@ -748,45 +828,69 @@ class MainWindow(QMainWindow):
 
     def _refresh_sidebar(self):
         """侧边栏的「分区」和「最近下载」（像 Claude 侧边栏的项目和最近对话）。"""
-        self._clear_layout(self.sec_box)
+        for box in self.sec_boxes.values():
+            self._clear_layout(box)
         self._clear_layout(self.recent_box)
         if not self.history:
             return
         secs = self.history.sections()
         self.sections = {s['id']: s for s in secs}
-        if self.sec_header.open:
-            for s in secs:
-                n = NavItem(s['name'], s['icon'], height=34, font_px=14)
-                n.setCheckable(False)
-                n.set_trailing(str(s['count']) if s['count'] else '')
-                n.setToolTip(f'{s["name"]}：{s["count"]} 个视频\n点击展开 / 收起，右键可以' +
-                             ('改名' if s['builtin'] else '编辑或删除'))
-                n.clicked.connect(lambda _=False, sid=s['id']: self._toggle_section(sid))
-                n.setContextMenuPolicy(Qt.CustomContextMenu)
-                n.customContextMenuRequested.connect(lambda pos, sec=s, w=n: self._section_menu(sec, w.mapToGlobal(pos)))
-                self.sec_box.addWidget(n)
-                if s['id'] in self.expanded_sections:
-                    tree = ui.TreeBox()
-                    tv = QVBoxLayout(tree)
-                    tv.setContentsMargins(30, 0, 0, 4)
-                    tv.setSpacing(0)
+        for s in secs:
+            if not self.sec_headers[s['kind']].open:
+                continue
+            unit = '个下载好的视频' if s['kind'] == VIDEO else '个网盘分享（点开后点一下就重新解析）'
+            n = NavItem(s['name'], s['icon'], height=34, font_px=14)
+            n.setCheckable(False)
+            n.set_trailing(str(s['count']) if s['count'] else '')
+            n.setToolTip(f'{s["name"]}：{s["count"]} {unit}\n点击展开 / 收起，右键可以' +
+                         ('改名' if s['builtin'] else '编辑或删除'))
+            n.clicked.connect(lambda _=False, sid=s['id']: self._toggle_section(sid))
+            n.setContextMenuPolicy(Qt.CustomContextMenu)
+            n.customContextMenuRequested.connect(lambda pos, sec=s, w=n: self._section_menu(sec, w.mapToGlobal(pos)))
+            self.sec_boxes[s['kind']].addWidget(n)
+            if s['id'] in self.expanded_sections:
+                tree = ui.TreeBox()
+                tv = QVBoxLayout(tree)
+                tv.setContentsMargins(30, 0, 0, 4)
+                tv.setSpacing(0)
+                if s['kind'] == VIDEO:
                     for h in self.history.recent('', limit=5, section=s['id']):
                         tv.addWidget(self._record_row(h, 30))
-                    more = NavItem(f'查看全部（{s["count"]}）' if s['count'] else '还没有视频，右键视频可以移进来',
-                                   height=30, font_px=13)
-                    more.setCheckable(False)
-                    more.muted = True
-                    more.clicked.connect(lambda _=False, sid=s['id']: self._show_section(sid))
-                    tv.addWidget(more)
-                    self.sec_box.addWidget(tree)
+                else:
+                    for rec in self.history.parses('', limit=8, section=s['id']):
+                        tv.addWidget(self._parse_side_row(rec, 30))
+                more = NavItem(f'查看全部（{s["count"]}）' if s['count'] else
+                               ('还没有视频，右键视频可以移进来' if s['kind'] == VIDEO else '解析过的网盘分享会放进来'),
+                               height=30, font_px=13)
+                more.setCheckable(False)
+                more.muted = True
+                more.clicked.connect(lambda _=False, sid=s['id']: self._show_section(sid))
+                tv.addWidget(more)
+                self.sec_boxes[s['kind']].addWidget(tree)
         if self.recent_header.open:
-            recs = self.history.recent('', limit=16)
+            recs = self.history.recent('', limit=16, kind=VIDEO)
             for h in recs:
                 self.recent_box.addWidget(self._record_row(h))
             if not recs:
-                empty = label('下载过的视频会出现在这里', 'meta')
+                empty = label('下载好的视频会出现在这里', 'meta')
                 empty.setContentsMargins(10, 4, 0, 0)
                 self.recent_box.addWidget(empty)
+            elif self.history.count(kind=VIDEO) > len(recs):
+                more = NavItem('查看全部下载好的视频', height=30, font_px=13)
+                more.setCheckable(False)
+                more.muted = True
+                more.clicked.connect(self._show_downloads)
+                self.recent_box.addWidget(more)
+
+    def _parse_side_row(self, rec, height=32):
+        """侧边栏里的一条解析记录（网盘分区）：点一下重新解析。"""
+        n = NavItem(rec['title'] or rec['url'], height=height, font_px=13)
+        n.setCheckable(False)
+        n.setToolTip(f'{rec["title"]}\n{rec["url"]}\n{rec["info"] or ""} · {fmt_ago(rec["ts"])}\n点击重新解析')
+        n.clicked.connect(lambda _=False, r=rec: self._reparse_record(r))
+        n.setContextMenuPolicy(Qt.CustomContextMenu)
+        n.customContextMenuRequested.connect(lambda pos, r=rec, w=n: self._parse_menu(r, w.mapToGlobal(pos)))
+        return n
 
     def _toggle_section(self, sid):
         self.expanded_sections ^= {sid}
@@ -810,13 +914,14 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction(ic('edit'), '重命名…', lambda: self._rename_record(h))
         sub = m.addMenu(ic('folder_move'), '移至分区')
-        for s in (self.history.sections() if self.history else []):
+        kind = h.get('kind') or VIDEO
+        for s in (self.history.sections(kind) if self.history else []):
             here = h.get('section_id') == s['id']
             a = sub.addAction(ic(s['icon']), s['name'] + ('（当前）' if here else ''),
                               lambda sid=s['id']: self._move_record(h, sid))
             a.setEnabled(not here)
         sub.addSeparator()
-        sub.addAction(ic('folder_plus'), '新建分区…', lambda: self._new_section(move=h))
+        sub.addAction(ic('folder_plus'), '新建分区…', lambda: self._new_section(move=h, kind=kind))
         if h.get('section_id'):
             sub.addAction(ic('x'), '移出分区', lambda: self._move_record(h, None))
         m.addSeparator()
@@ -827,6 +932,66 @@ class MainWindow(QMainWindow):
         m.exec(pos)
         if after:
             after()
+
+    def _parse_menu(self, rec, pos, after=None):
+        """一条解析记录的菜单（历史记录、网盘分区、搜索里通用）：重新解析、重命名、移至分区……"""
+        m = ui.popup_menu(self)
+        ic = lambda name: icons.icon(name, c('text2'))   # noqa: E731
+        m.addAction(ic('refresh'), '重新解析', lambda: self._reparse_record(rec))
+        m.addAction(ic('copy'), '复制链接', lambda: QGuiApplication.clipboard().setText(rec['url']))
+        m.addSeparator()
+        m.addAction(ic('edit'), '重命名…', lambda: self._rename_parse(rec))
+        if rec['kind'] == PAN:
+            sub = m.addMenu(ic('folder_move'), '移至分区')
+            for s in (self.history.sections(PAN) if self.history else []):
+                here = rec.get('section_id') == s['id']
+                a = sub.addAction(ic(s['icon']), s['name'] + ('（当前）' if here else ''),
+                                  lambda sid=s['id']: self._move_parse(rec, sid))
+                a.setEnabled(not here)
+            sub.addSeparator()
+            sub.addAction(ic('folder_plus'), '新建分区…', lambda: self._new_section(kind=PAN, move_parse=rec))
+            if rec.get('section_id'):
+                sub.addAction(ic('x'), '移出分区', lambda: self._move_parse(rec, None))
+        m.addSeparator()
+        m.addAction(ic('trash'), '删除这条记录', lambda: self._delete_parse(rec))
+        m.exec(pos)
+        if after:
+            after()
+
+    def _reparse_record(self, rec):
+        if self.search_panel is not None and self.search_panel.isVisible():
+            self.search_panel.close_panel()
+        self._reparse_url(rec['url'])
+
+    def _rename_parse(self, rec):
+        what = '网盘分享' if rec['kind'] == PAN else '视频'
+        dlg = TextDialog(self, '重命名', rec['title'] or '', placeholder=rec.get('orig_title') or '',
+                         hint=f'只改软件里显示的名字。留空 = 恢复成{what}原来的标题。')
+        if dlg.exec():
+            self.history.rename_parse(rec['id'], dlg.value)
+            self._after_history_change()
+            self.notify('已重命名' if dlg.value else '已恢复原标题', 'ok')
+
+    def _move_parse(self, rec, sid):
+        self.history.move_parses([rec['id']], sid)
+        self._after_history_change()
+        name = self.sections.get(sid, {}).get('name') if sid else None
+        self.notify(f'已移至「{name}」' if name else '已移出分区', 'ok')
+
+    def _delete_parse(self, rec):
+        self.history.delete_parse(rec['id'])
+        self._after_history_change()
+
+    def _record_parse(self, kind, pkey, title, platform, uploader, url, info='', count=0, size=0):
+        """解析成功后记一条解析记录（历史记录页；网盘分享还会放进网盘分区）。"""
+        if not self.history or not pkey:
+            return
+        try:
+            self.history.add_parse(kind, pkey, title, platform, uploader, url, info, count, size)
+        except Exception as e:  # noqa: BLE001
+            log.warning('写入解析记录失败: %s', e)
+            return
+        self._parse_timer.start()
 
     def _rename_record(self, h):
         dlg = TextDialog(self, '重命名', h['title'] or '', placeholder=h.get('orig_title') or '',
@@ -842,19 +1007,24 @@ class MainWindow(QMainWindow):
         name = self.sections.get(sid, {}).get('name') if sid else None
         self.notify(f'已移至「{name}」' if name else '已移出分区', 'ok')
 
-    def _new_section(self, move=None):
-        dlg = FolderDialog(self, '新建分区')
+    def _new_section(self, move=None, kind=VIDEO, move_parse=None):
+        what = '视频' if kind == VIDEO else '网盘'
+        dlg = FolderDialog(self, f'新建{what}分区')
         if not dlg.exec():
             return
-        sid = self.history.create_section(dlg.name, dlg.icon)
+        sid = self.history.create_section(dlg.name, dlg.icon, kind)
         if move:
             self.history.move([move['id']], sid)
+        if move_parse:
+            self.history.move_parses([move_parse['id']], sid)
+            move = move_parse
         self.expanded_sections.add(sid)
-        if not self.sec_header.open:
-            self.sec_header.open = True
-            self.settings.extra['sections_open'] = True
+        head = self.sec_headers[kind]
+        if not head.open:
+            head.open = True
+            self.settings.extra['sections_open' if kind == VIDEO else 'pan_sections_open'] = True
         self._after_history_change()
-        self.notify(f'已新建分区「{dlg.name}」' + ('，视频已移进去' if move else '，右键视频可以「移至分区」'), 'ok')
+        self.notify(f'已新建{what}分区「{dlg.name}」' + ('，已移进去' if move else '，右键记录可以「移至分区」'), 'ok')
 
     def _section_menu(self, s, pos):
         m = ui.popup_menu(self)
@@ -863,7 +1033,8 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         if s['builtin']:
             m.addAction(ic('edit'), '重命名分区…', lambda: self._edit_section(s))
-            hint = m.addAction(f'{s["name"]} 的视频下载后会自动放进来')
+            hint = m.addAction(f'{s["name"]} 的视频下载后会自动放进来' if s['kind'] == VIDEO
+                               else f'解析过的{s["name"]}分享会自动放进来')
             hint.setEnabled(False)
         else:
             m.addAction(ic('edit'), '编辑分区…', lambda: self._edit_section(s))
@@ -877,7 +1048,7 @@ class MainWindow(QMainWindow):
             self._after_history_change()
 
     def _delete_section(self, s):
-        if QMessageBox.question(self, APP_NAME, f'删除分区「{s["name"]}」？\n里面的视频不会被删除，会回到所属平台的分区。'
+        if QMessageBox.question(self, APP_NAME, f'删除分区「{s["name"]}」？\n里面的记录和文件不会被删除，会回到所属平台的分区。'
                                 ) != QMessageBox.Yes:
             return
         self.history.delete_section(s['id'])
@@ -887,8 +1058,17 @@ class MainWindow(QMainWindow):
         self.notify(f'已删除分区「{s["name"]}」')
 
     def _show_section(self, sid):
-        """「查看全部」：打开历史记录页，只看这个分区。"""
+        """「查看全部」：打开历史记录页，只看这个分区（sid 为 None = 全部解析记录）。
+        视频分区里是下载好的视频，网盘分区里是网盘分享的解析记录。"""
+        kind = self.sections.get(sid, {}).get('kind') if sid else None
         self.hist_section = sid
+        self.hist_mode = 'downloads' if kind == VIDEO else 'parses'
+        self.hist_kind = kind if kind == PAN else None
+        self._go('history')
+
+    def _show_downloads(self):
+        """「查看全部下载好的视频」"""
+        self.hist_mode, self.hist_section, self.hist_kind = 'downloads', None, None
         self._go('history')
 
     def _open_search(self):
@@ -908,7 +1088,7 @@ class MainWindow(QMainWindow):
         elif info and info.get('offline'):
             self.account.set_info(nick or 'B站 · 已登录', '网络不通，稍后自动重试', nick)
         else:
-            self.account.set_info(nick or '视频解析下载器', '未登录 B站 · 设置与更多', nick)
+            self.account.set_info(nick or APP_NAME, '未登录 B站 · 设置与更多', nick)
         if hasattr(self, 'bili_chip'):
             logged = info and not info.get('expired')
             self.bili_chip.setText(f'B站 · {info.get("name") or "已登录"}' if logged else 'B站扫码登录')
@@ -931,6 +1111,7 @@ class MainWindow(QMainWindow):
         else:
             m.addAction(icons.icon('tv', c('text2')), 'B站长效登录（电视端扫码，约 180 天）', lambda: self._bili_login(True))
             m.addAction(icons.icon('tv', c('text2')), 'B站网页扫码登录（约 7 天）', lambda: self._bili_login(False))
+        m.addAction(icons.icon('user', c('text2')), '网盘账号…', lambda: self._open_settings('network'))
         m.addAction(icons.icon('cube', c('text2')), '检查解析内核更新', lambda: self._open_settings('core'))
         m.addAction(icons.icon('file_text', c('text2')), '查看日志', lambda: self._go('log'))
         m.addAction(icons.icon('folder', c('text2')), '打开下载文件夹', self._open_dir)
@@ -965,7 +1146,7 @@ class MainWindow(QMainWindow):
         self.parse_status = label('', 'meta')
         hh.addWidget(self.parse_status)
         hh.addSpacing(6)
-        hh.addWidget(button('全部下载', self._download_all, 'primary', '按每张卡片选好的清晰度全部下载', 'download'))
+        hh.addWidget(button('全部下载', self._download_all, 'primary', '按每张卡片的选择全部下载（视频按选好的清晰度，网盘按勾选的文件）', 'download'))
         clear_btn = IconButton('trash', '清空解析结果', size=34, icon_size=18)
         clear_btn.clicked.connect(self._clear_results)
         hh.addWidget(clear_btn)
@@ -1020,10 +1201,6 @@ class MainWindow(QMainWindow):
                 self.bili_chip = chip
         chips.addStretch(1)
         hv.addLayout(chips)
-        hv.addSpacing(18)
-        tip = label('支持 抖音 · 快手 · B站 · YouTube · X · TikTok 等上千个网站，可一次粘贴多条链接', 'hint')
-        tip.setAlignment(Qt.AlignCenter)
-        hv.addWidget(tip)
         ev.addWidget(centered(hero, 720, (0, 0, 0, 0)))
         ev.addStretch(13)
         self.parse_stack.addWidget(empty)
@@ -1053,7 +1230,7 @@ class MainWindow(QMainWindow):
         bv.setSpacing(4)
         self.clip_bar = self._build_clip_bar()
         bv.addWidget(self.clip_bar)
-        self.composer = Composer('粘贴视频链接，或 App 里「复制链接」得到的整段文字…')
+        self.composer = Composer('粘贴视频或网盘分享链接…')
         self.composer.submitted.connect(self._parse_input)
         self.composer.plus.setToolTip('粘贴、从文件导入链接…')
         self.composer.plus.clicked.connect(self._plus_menu)
@@ -1105,11 +1282,12 @@ class MainWindow(QMainWindow):
         return wrap
 
     def _update_parse_mode(self):
-        if not self.rows:
+        n = len(self.rows) + len(self.pan_cards)
+        if not n:
             self.fresh = False
-        has = bool(self.rows) and not self.fresh       # 有结果、且没点「解析新链接」时显示结果列表
+        has = bool(n) and not self.fresh       # 有结果、且没点「解析新链接」时显示结果列表
         if hasattr(self, 'back_chip'):
-            self.back_chip.setText(f'回到刚才的 {len(self.rows)} 个解析结果')
+            self.back_chip.setText(f'回到刚才的 {n} 个解析结果')
             self.back_chip.setVisible(self.fresh)
         want = 1 if has else 0
         slot = self.dock_slot if has else self.hero_slot
@@ -1189,6 +1367,7 @@ class MainWindow(QMainWindow):
         m.addAction(icons.icon('file_text', c('text2')), '从文本文件导入链接…', self._import_links)
         m.addSeparator()
         m.addAction(icons.icon('settings', c('text2')), '下载选项…', lambda: self._open_settings('download'))
+        m.addAction(icons.icon('user', c('text2')), '网盘账号…', lambda: self._open_settings('network'))
         m.exec(self.composer.plus.mapToGlobal(QPoint(0, self.composer.plus.height() + 4)))
 
     # 下载页 ----------------------------------------------------------
@@ -1222,7 +1401,7 @@ class MainWindow(QMainWindow):
         self.task_list = QVBoxLayout(col)
         self.task_list.setContentsMargins(0, 4, 0, 24)
         self.task_list.setSpacing(10)
-        self.tasks_empty = self._empty_state('还没有下载任务', '在「解析新链接」里粘贴链接，选好清晰度点「下载」')
+        self.tasks_empty = self._empty_state('还没有下载任务', '在「解析新链接」里粘贴视频或网盘分享链接')
         self.task_list.addWidget(self.tasks_empty)
         self.task_list.addStretch(1)
         v.addWidget(scroll_area(centered(col, COLUMN, (32, 0, 32, 0))), 1)
@@ -1250,8 +1429,8 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         self.hist_count = label('', 'meta')
-        head = self._page_header('历史记录', [button('清空历史', self._clear_history, 'danger', icon='trash',
-                                                     icon_role='err')], self.hist_count)
+        self.hist_clear_btn = button('清空历史', self._clear_history, 'danger', icon='trash', icon_role='err')
+        head = self._page_header('历史记录', [self.hist_clear_btn], self.hist_count)
         hv = head.layout()
         self.hist_search = QLineEdit()
         self.hist_search.setObjectName('search')
@@ -1351,6 +1530,35 @@ class MainWindow(QMainWindow):
             w.update()
 
     # ------------------------------------------------------------ 解析
+    def _submit_text(self, text):
+        """一段文字里的链接：网盘分享交给网盘引擎，其余的交给视频解析。
+        返回 (新加入的个数, 识别到的个数)；一个链接都没有时返回 None。"""
+        shares = self.pan.detect(text) if pan.has_pan_link(text) else []
+        urls = [u for u in core.extract_urls(text) if not pan.is_pan_url(u)]
+        if not urls and not shares:
+            if pan.has_pan_link(text) and not self.pan.alive:
+                self.notify(f'没法解析网盘链接：{self.pan.error or "网盘解析组件还没启动好，请稍后再试"}', 'error')
+                return 0, 0
+            return None
+        if self.fresh:
+            # 点过「解析新链接」：这是新的一批，清掉之前的解析结果（正在进行的下载不受影响）
+            self._clear_results()
+            self.fresh = False
+        added = self._submit_urls(urls) if urls else 0
+        n_pan = self._pan_submit_links(shares) if shares else 0
+        if n_pan:
+            self._go('parse')
+            QTimer.singleShot(0, lambda: self.res_scroll.verticalScrollBar().setValue(0))
+        return added + n_pan, len(urls) + len(shares)
+
+    def _notify_submitted(self, res):
+        added, total = res
+        if not total:
+            return
+        skipped = total - added
+        self.notify(f'开始解析 {added} 个链接' + (f'（{skipped} 个已在列表中）' if skipped else '') if added
+                    else '这些链接已经在列表里了')
+
     def _paste_and_parse(self):
         text = QGuiApplication.clipboard().text()
         if text.strip():
@@ -1366,25 +1574,24 @@ class MainWindow(QMainWindow):
             return
         try:
             with open(path, encoding='utf-8', errors='replace') as f:
-                urls = core.extract_urls(f.read())
+                text = f.read()
         except OSError as e:
             self.notify(f'读取失败：{e}', 'error')
             return
-        if not urls:
+        res = self._submit_text(text)
+        if res is None:
             self.notify('文件里没有找到链接', 'error')
             return
-        n = self._submit_urls(urls)
-        self.notify(f'开始解析 {n} 个链接' + (f'（{len(urls) - n} 个已在列表中）' if len(urls) > n else ''))
+        self._notify_submitted(res)
 
     def _parse_input(self):
-        urls = core.extract_urls(self.composer.text())
-        if not urls:
+        res = self._submit_text(self.composer.text())
+        if res is None:
             self.notify('没有识别到链接', 'error')
             return
-        added = self._submit_urls(urls)
-        self.composer.clear()
-        skipped = len(urls) - added
-        self.notify(f'开始解析 {added} 个链接' + (f'（{skipped} 个已在列表中）' if skipped else ''))
+        if res[1]:
+            self.composer.clear()
+        self._notify_submitted(res)
 
     def _submit_urls(self, urls, force=False, auto_download=False, from_collection=False):
         if self.fresh and urls:
@@ -1452,6 +1659,10 @@ class MainWindow(QMainWindow):
         row.state, row.video = 'ok', video
         self._render_result(row)
         self._update_res_label()
+        best = next((o.tag for o in video.options if o.kind == 'video'), '')
+        self._record_parse(VIDEO, video_key(video.info), video.title, video.platform, video.uploader,
+                           video.info.get('webpage_url') or row.url,
+                           ' · '.join(x for x in (fmt_duration(video.duration), f'最高 {best}' if best else '') if x))
         if row.cover_url:
             self.thumbs.request(row.cover_url, video.info.get('webpage_url') or row.url)
         if row.auto_download:
@@ -1672,13 +1883,16 @@ class MainWindow(QMainWindow):
     def _clear_results(self):
         for token in list(self.rows):
             self._remove_result(token)
+        self._pan_clear_cards()
         self._update_res_label()
 
     def _update_res_label(self):
         total = len(self.rows)
         ok = sum(1 for r in self.rows.values() if r.state == 'ok')
         busy = sum(1 for r in self.rows.values() if r.state == 'parsing')
-        txt = f'{ok} / {total} 个视频' if total else ''
+        busy += sum(1 for card in self.pan_cards.values() if shiboken6.isValid(card) and card.state == 'opening')
+        bits = [f'{ok} / {total} 个视频' if total else '', f'{len(self.pan_cards)} 个网盘分享' if self.pan_cards else '']
+        txt = ' · '.join(b for b in bits if b)
         if busy:
             txt += f' · 正在解析 {busy} 个'
         self.res_label.setText(txt)
@@ -1852,6 +2066,11 @@ class MainWindow(QMainWindow):
             elif row.state == 'ok' and row.combo is not None and row.combo.currentData() is not None and any(
                     h['quality'] == row.combo.currentData().tag and h['exists'] for h in self._history_of(row.video)):
                 skipped += 1
+        # 网盘分享：还没下载过、不需要先登录的，按卡片里勾选的文件下载
+        for card in list(self.pan_cards.values()):
+            if shiboken6.isValid(card) and card.state == 'list' and card.tree is not None and not card.adding                     and not (card.result or {}).get('downloadNote') and card.lines.count() == 0 and card.tree.picked():
+                card.download()
+                n += 1
         if n:
             msg = f'已添加 {n} 个下载任务' + (f'，跳过 {skipped} 个已下载过的' if skipped else '')
         else:
@@ -1930,7 +2149,7 @@ class MainWindow(QMainWindow):
                     v.setParent(None)
                     v.deleteLater()
             self.task_row.pop(task.id, None)
-            self.tasks_empty.setVisible(not self.task_views)
+            self.tasks_empty.setVisible(not (self.task_views or self.pan_views))
 
     def _open_file(self, task):
         # 有弹幕版时优先打开弹幕版（弹幕流畅，任何播放器都能看）
@@ -1946,6 +2165,10 @@ class MainWindow(QMainWindow):
             if t.status in (core.QUEUED, core.RUNNING):
                 self.manager.pause(t)
                 n += 1
+        pc = self._pan_counts()
+        if pc['running'] + pc['queued']:
+            self.pan.call('pauseAll')
+            n += pc['running'] + pc['queued']
         self.notify(f'已暂停 {n} 个任务' if n else '没有进行中的任务')
 
     def _resume_all(self):
@@ -1954,12 +2177,17 @@ class MainWindow(QMainWindow):
             if t.status == core.PAUSED:
                 self.manager.resume(t)
                 n += 1
+        pc = self._pan_counts()
+        if pc['paused']:
+            self.pan.call('resumeAll')
+            n += pc['paused']
         self.notify(f'已继续 {n} 个任务' if n else '没有暂停的任务')
 
     def _clear_finished(self):
         for t in list(self.manager.tasks):
             if t.status in (core.DONE, core.EXISTS, core.CANCELED):
                 self._remove_task(t)
+        self._pan_clear_finished()
 
     # ------------------------------------------------------------ 下载历史
     def _history_of(self, video):
@@ -2030,60 +2258,114 @@ class MainWindow(QMainWindow):
             self._open_dir()
 
     def _refresh_history(self, reset=False):
+        """历史记录页：解析记录（全部 / 视频 / 网盘 / 某个网盘分区），或者下载好的视频（全部 / 某个视频分区）。"""
         if reset:
             self._hist_limit = 150
         lay = self.hist_list
         while lay.count() > 1:
-            item = lay.takeAt(0)
-            if item.widget():
-                item.widget().hide()
-                item.widget().setParent(None)
-                item.widget().deleteLater()
+            w = lay.takeAt(0).widget()
+            if w is not None:
+                w.hide()
+                w.setParent(None)
+                w.deleteLater()
         if not self.history:
             self.hist_count.setText('历史记录不可用')
             return
         self._refresh_hist_filters()
         search = self.hist_search.text().strip()
         sec = self.sections.get(self.hist_section) if self.hist_section else None
-        recs = self.history.recent(search, limit=self._hist_limit + 1, section=self.hist_section)
+        downloads = self.hist_mode == 'downloads'
+        if downloads:
+            recs = self.history.recent(search, limit=self._hist_limit + 1, section=self.hist_section, kind=VIDEO)
+            total = self.history.count(self.hist_section, VIDEO)
+            head = f'「{sec["name"]}」分区 {total} 个下载好的视频' if sec else f'下载好的视频 {total} 个'
+        else:
+            kind = None if sec else self.hist_kind
+            recs = self.history.parses(search, limit=self._hist_limit + 1, kind=kind, section=self.hist_section)
+            total = self.history.parse_count(kind, self.hist_section)
+            what = {VIDEO: '视频', PAN: '网盘分享'}.get(kind, '')
+            head = (f'「{sec["name"]}」分区 {total} 个网盘分享，点一下重新解析' if sec else
+                    f'共 {total} 条{what}解析记录，点一下重新解析')
         more = len(recs) > self._hist_limit
         recs = recs[:self._hist_limit]
-        total = self.history.count(self.hist_section)
-        self.hist_count.setText((f'「{sec["name"]}」分区 {total} 条' if sec else f'共 {total} 条下载记录') +
-                                (f'，找到 {len(recs)}{"+" if more else ""} 条' if search else ''))
+        self.hist_count.setText(head + (f'；找到 {len(recs)}{"+" if more else ""} 条' if search else ''))
+        self.hist_clear_btn.setText('清空下载记录' if downloads else '清空历史')
         i = 0
         for h in recs:
             if i:
                 lay.insertWidget(i, HLine(margin=12))
                 i += 1
-            lay.insertWidget(i, HistoryRow(self, h))
+            lay.insertWidget(i, HistoryRow(self, h) if downloads else ParseRow(self, h))
             i += 1
         if more:
             b = button('显示更多', self._more_history, 'ghost')
             lay.insertWidget(i, b, 0, Qt.AlignHCenter)
             i += 1
         if not recs:
-            lay.insertWidget(0, self._empty_state('没有找到记录' if search else '还没有下载记录',
-                                                  '换个关键词试试' if search else '下载完成的视频会记录在这里，方便再次打开或重新下载'))
+            if search:
+                t, sub = '没有找到记录', '换个关键词试试'
+            elif downloads:
+                t, sub = '还没有下载好的视频', '视频下载完成后会记录在这里，方便再次打开'
+            else:
+                t, sub = '还没有解析记录', '解析过的视频和网盘分享会记录在这里，点一下就能重新解析'
+            lay.insertWidget(0, self._empty_state(t, sub))
 
     def _refresh_hist_filters(self):
-        """历史记录页顶部的分区筛选：全部 / B站 / X / … / 自建分区。"""
+        """历史记录页顶部的筛选：全部 / 视频 / 网盘 是解析记录，「已下载的视频」是下载好的视频；
+        选了网盘或已下载的视频后，再列出对应的分区。"""
         self._clear_layout(self.hist_filters)
         if self.history:
             self.sections = {s['id']: s for s in self.history.sections()}
         if self.hist_section not in self.sections:
             self.hist_section = None
-        items = [(None, '全部', 'list')] + [(s['id'], f'{s["name"]} {s["count"]}', s['icon'])
-                                           for s in self.sections.values()]
-        for sid, text, icon in items:
+        sec = self.sections.get(self.hist_section)
+        downloads = self.hist_mode == 'downloads'
+        kind = None if downloads else (sec['kind'] if sec else self.hist_kind)
+        h = self.history
+        n = (lambda **kw: h.parse_count(**kw)) if h else (lambda **kw: 0)
+        chips = [(f'全部 {n()}', 'list', not downloads and kind is None, lambda: self._filter_kind(None)),
+                 (f'视频 {n(kind=VIDEO)}', 'film', not downloads and kind == VIDEO, lambda: self._filter_kind(VIDEO)),
+                 (f'网盘 {n(kind=PAN)}', 'folder', not downloads and kind == PAN and sec is None,
+                  lambda: self._filter_kind(PAN)),
+                 (f'已下载的视频 {h.count(kind=VIDEO) if h else 0}', 'download', downloads and sec is None,
+                  self._show_downloads_here)]
+        group = VIDEO if downloads else (PAN if kind == PAN else None)
+        if group:
+            chips.append(None)           # 分隔
+            chips += [(f'{s["name"]} {s["count"]}', s['icon'], s['id'] == self.hist_section,
+                       lambda sid=s['id']: self._filter_history(sid))
+                      for s in self.sections.values() if s['kind'] == group]
+        for item in chips:
+            if item is None:
+                bar = QFrame()
+                bar.setFixedSize(1, 20)
+                col = c('border_strong')
+                bar.setStyleSheet(f'background: rgba({col.red()}, {col.green()}, {col.blue()}, {col.alpha()});')
+                self.hist_filters.addSpacing(4)
+                self.hist_filters.addWidget(bar, 0, Qt.AlignVCenter)
+                self.hist_filters.addSpacing(4)
+                continue
+            text, icon, on, slot = item
             chip = Chip(text, icon, checkable=True, height=32)
-            chip.setChecked(sid == self.hist_section)
-            chip.clicked.connect(lambda _=False, s=sid: self._filter_history(s))
+            chip.setChecked(on)
+            chip.clicked.connect(lambda _=False, f=slot: f())
             self.hist_filters.addWidget(chip)
         self.hist_filters.addStretch(1)
 
+    def _filter_kind(self, kind):
+        self.hist_mode, self.hist_kind, self.hist_section = 'parses', kind, None
+        self._refresh_history(reset=True)
+
+    def _show_downloads_here(self):
+        self.hist_mode, self.hist_kind, self.hist_section = 'downloads', None, None
+        self._refresh_history(reset=True)
+
     def _filter_history(self, sid):
+        kind = self.sections.get(sid, {}).get('kind') if sid else None
         self.hist_section = sid
+        self.hist_mode = 'downloads' if kind == VIDEO else 'parses'
+        if kind == PAN:
+            self.hist_kind = PAN
         self._refresh_history(reset=True)
 
     def _more_history(self):
@@ -2091,18 +2373,40 @@ class MainWindow(QMainWindow):
         self._refresh_history()
 
     def _reparse_url(self, url):
-        if url and self._submit_urls([url]):
+        """重新解析一条记录的链接；已经在解析列表里的，直接跳到那张卡片。"""
+        self._pan_last_hit = None
+        res = self._submit_text(url) if url else None
+        if res and res[0]:
             self.notify('已加入解析列表')
+        elif res and res[1]:
+            if self.fresh:
+                self._back_to_results()
+            else:
+                self._go('parse')
+            card = self._pan_last_hit or next((r.card for r in self.rows.values() if r.url == url), None)
+            if card is not None and shiboken6.isValid(card):
+                QTimer.singleShot(50, lambda: shiboken6.isValid(card) and self.res_scroll.ensureWidgetVisible(card, 0, 40))
+            self.notify('已经在解析列表里了')
 
     def _delete_history(self, row_id):
         self.history.delete(row_id)
         self._after_history_change()
 
     def _clear_history(self):
-        if not self.history or QMessageBox.question(
-                self, APP_NAME, '确定清空全部下载历史吗？（只删除记录，不会删除已下载的文件）') != QMessageBox.Yes:
+        if not self.history:
             return
-        self.history.clear()
+        if self.hist_mode == 'downloads':
+            if QMessageBox.question(self, APP_NAME, '确定清空全部视频下载记录吗？（只删除记录，不会删除已下载的文件；'
+                                                    '侧边栏「最近下载」和视频分区里的记录也会清空）') != QMessageBox.Yes:
+                return
+            self.history.clear()
+        else:
+            kind = self.hist_kind
+            what = {VIDEO: '视频的', PAN: '网盘分享的'}.get(kind, '全部')
+            extra = '（网盘分区里保存的分享链接也会清空）' if kind != VIDEO else ''
+            if QMessageBox.question(self, APP_NAME, f'确定清空{what}解析记录吗？{extra}') != QMessageBox.Yes:
+                return
+            self.history.clear_parses(kind)
         self._after_history_change()
 
     def _after_history_change(self):
@@ -2151,12 +2455,11 @@ class MainWindow(QMainWindow):
         text = QGuiApplication.clipboard().text()
         self._last_clip = text
         self._hide_clip_bar()
-        urls = core.extract_urls(text)
-        if not urls:
+        res = self._submit_text(text)
+        if res is None:
             self.notify('剪贴板里没有链接', 'error')
             return
-        n = self._submit_urls(urls)
-        self.notify(f'开始解析 {n} 个链接' if n else '这些链接已经在列表里了')
+        self._notify_submitted(res)
 
     def _apply_hotkey(self, silent=False):
         seq = (self.settings.hotkey or '').strip()
@@ -2292,6 +2595,8 @@ class MainWindow(QMainWindow):
             self._update_account()
         elif key == 'download_dir':
             self._update_folder_btn()
+        elif key == 'proxy':
+            self._pan_apply_proxy()
         elif key == 'avatar':
             self._update_account()
             if self.settings_panel is not None:
@@ -2386,7 +2691,7 @@ class MainWindow(QMainWindow):
         urls = [u for u in core.extract_urls(text) if u not in known]
         if not urls:
             return
-        self._clip_urls = urls
+        self._clip_urls, self._clip_text = urls, text
         self.clip_label.set_full_text(f'剪贴板里有新链接：{urls[0]}' if len(urls) == 1
                                       else f'剪贴板里有 {len(urls)} 个新链接：{urls[0]} …', '\n'.join(urls))
         self.clip_icon.setPixmap(icons.pixmap('clipboard', c('text3'), 16))
@@ -2394,10 +2699,11 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._place_toast)
 
     def _parse_clip(self):
-        urls, self._clip_urls = self._clip_urls, []
+        text, self._clip_urls, self._clip_text = getattr(self, '_clip_text', ''), [], ''
         self._hide_clip_bar()
-        n = self._submit_urls(urls)
-        self.notify(f'开始解析 {n} 个链接' if n else '这些链接已经在列表里了')
+        res = self._submit_text(text)
+        if res is not None:
+            self._notify_submitted(res)
 
     def _hide_clip_bar(self):
         self.clip_bar.hide()
@@ -2419,7 +2725,14 @@ class MainWindow(QMainWindow):
         failed = sum(1 for t in tasks if t.status == core.FAILED)
         paused = sum(1 for t in tasks if t.status == core.PAUSED)
         speed = sum(t.speed or 0 for t in running if t.status == core.RUNNING)
-        parts = [f'下载中 {len(running)}', f'等待 {queued}', f'完成 {done}']
+        pc = self._pan_counts()
+        n_run = len(running) + pc['running']
+        queued += pc['queued']
+        done += pc['done']
+        failed += pc['failed']
+        paused += pc['paused']
+        speed += self.pan.total_speed or 0
+        parts = [f'下载中 {n_run}', f'等待 {queued}', f'完成 {done}']
         if paused:
             parts.append(f'暂停 {paused}')
         if failed:
@@ -2427,11 +2740,11 @@ class MainWindow(QMainWindow):
         if speed:
             parts.append(fmt_speed(speed))
         self.tasks_status.set_full_text('  ·  '.join(parts) + f'　　保存到 {self.settings.download_dir}')
-        active = len(running) + queued
+        active = n_run + queued
         self.nav_tasks.set_badge(str(active) if active else '')
         self._refresh_greeting()
-        self.parse_status.setText(f'下载中 {len(running)} 个 · {fmt_speed(speed)}' if speed else
-                                  (f'下载中 {len(running)} 个' if running else ''))
+        self.parse_status.setText(f'下载中 {n_run} 个 · {fmt_speed(speed)}' if speed else
+                                  (f'下载中 {n_run} 个' if n_run else ''))
 
     def closeEvent(self, event):
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
@@ -2450,10 +2763,12 @@ class MainWindow(QMainWindow):
             return
         self._really_quit = False
         active = [t for t in self.manager.tasks if t.status in (core.RUNNING, core.MERGING, core.QUEUED)]
-        if active:
+        pc = self._pan_counts()
+        n_pan = pc['running'] + pc['queued']
+        if active or n_pan:
             ret = QMessageBox.question(
-                self, APP_NAME, f'还有 {len(active)} 个任务未完成，确定退出吗？\n'
-                                '（已下载的部分会保留，下次下载同一视频同一清晰度时自动续传）')
+                self, APP_NAME, f'还有 {len(active) + n_pan} 个任务未完成，确定退出吗？\n'
+                                '（已下载的部分会保留：视频下次下载同一清晰度时自动续传，网盘文件下次打开软件自动继续）')
             if ret != QMessageBox.Yes:
                 event.ignore()
                 return
@@ -2462,6 +2777,7 @@ class MainWindow(QMainWindow):
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         self._save_settings()
         self._save_tasks()
+        self.pan.stop()
         self.hotkey.unregister()
         if self.tray:
             self.tray.hide()

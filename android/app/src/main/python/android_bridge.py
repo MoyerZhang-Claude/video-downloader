@@ -138,6 +138,17 @@ def parse(url, probe=True):
         hist = [{'quality': h['quality'], 'uri': h['filepath'], 'ts': h['ts']} for h in _history.lookup(info)]
     except Exception:  # noqa: BLE001
         pass
+    try:
+        from app.history import video_key
+        best = next((o.tag for o in options if o.kind == 'video'), '')
+        dur = int(round(info.get('duration') or 0))
+        length = (f'{dur // 3600}:{dur // 60 % 60:02d}:{dur % 60:02d}' if dur >= 3600 else f'{dur // 60:02d}:{dur % 60:02d}') \
+            if dur else ''
+        _history.add_parse('video', video_key(info), info.get('title') or url, core.platform_name(info),
+                           info.get('uploader') or info.get('channel') or '', info.get('webpage_url') or url,
+                           ' · '.join(x for x in (length, f'最高 {best}' if best else '') if x))
+    except Exception:  # noqa: BLE001 - 记不上历史不影响解析
+        pass
     return json.dumps({
         'key': key,
         'url': info.get('webpage_url') or url,
@@ -470,19 +481,55 @@ def history_add(key, index, uri, size, suffix=''):
 
 
 def history_list(search='', section=-1):
-    """section：-1 = 全部，其它 = 某个分区的 id"""
+    """下载好的视频。section：-1 = 全部，其它 = 某个视频分区的 id"""
     sec = None if int(section) < 0 else int(section)
-    return json.dumps(_history.recent(search, section=sec), ensure_ascii=False)
+    return json.dumps(_history.recent(search, section=sec, kind='video'), ensure_ascii=False)
 
 
 # ---------------------------------------------------------------- 分区（和电脑版共用 app/history.py）
 
 def history_sections():
+    """全部分区（视频分区 + 网盘分区），每个带 kind。"""
     return json.dumps(_history.sections(), ensure_ascii=False)
 
 
-def section_create(name, icon):
-    return int(_history.create_section(name, icon))
+def section_create(name, icon, kind='video'):
+    return int(_history.create_section(name, icon, kind or 'video'))
+
+
+# ---------------------------------------------------------------- 解析记录（历史记录页、网盘分区）
+
+def parse_add(kind, pkey, title, platform, uploader, url, info, count=0, size=0):
+    return int(_history.add_parse(kind, pkey, title, platform, uploader, url, info, int(count), int(size)))
+
+
+def parse_list(search='', kind='', section=-1, limit=500):
+    """kind：'' = 全部，'video' / 'pan'；section：-1 = 不限，其它 = 某个网盘分区"""
+    sec = None if int(section) < 0 else int(section)
+    return json.dumps(_history.parses(search, limit=int(limit), kind=kind or None, section=sec), ensure_ascii=False)
+
+
+def parse_counts():
+    h = _history
+    return json.dumps({'all': h.parse_count(), 'video': h.parse_count(kind='video'), 'pan': h.parse_count(kind='pan'),
+                       'downloads': h.count(kind='video')})
+
+
+def parse_rename(row_id, title):
+    _history.rename_parse(int(row_id), title)
+
+
+def parse_move(row_id, section_id):
+    sid = int(section_id)
+    _history.move_parses([int(row_id)], None if sid < 0 else sid)
+
+
+def parse_delete(row_id):
+    _history.delete_parse(int(row_id))
+
+
+def parse_clear(kind=''):
+    _history.clear_parses(kind or None)
 
 
 def section_update(section_id, name, icon):

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import APP_NAME, APP_VERSION, avatar, bilibili, core_update, hotkey, ui
+from . import APP_NAME, APP_VERSION, avatar, bilibili, core_update, hotkey, pan, ui
 from .config import (
     BROWSERS, CODEC_PREFERENCES, COOKIE_MODES, FILENAME_TEMPLATES, ROOT, SUB_LANG_MODES, SUBFOLDER_MODES,
 )
@@ -102,6 +102,8 @@ class SettingsPanel(ui.Overlay):
     def open_at(self, page=None):
         self.refresh_account()
         self.refresh_avatar()
+        self.refresh_pan_accounts()
+        self.refresh_pan_settings()
         self._refresh_cookie_hint()
         self._refresh_core_version()
         if page:
@@ -278,6 +280,45 @@ class SettingsPanel(ui.Overlay):
         self._row(lay, '同时保存封面', '下载视频时另存一张与视频同名的 JPG（也可以在输入框下方的「封面」开关切换）',
                   self._toggle('save_cover'))
         self._row(lay, '把封面写进视频文件', '资源管理器缩略图、播放器里直接显示封面', self._toggle('embed_cover'))
+        self._section(lay, '网盘下载')
+        self.pan_spins = {}
+        self._row(lay, '同时下载的文件数', '网盘分享里的文件同时下载几个', self._pan_spin('maxConcurrent', 1, 20))
+        self._row(lay, '每个文件的连接数', '多条连接一起下，能跑满带宽（百度网盘非会员会自动只用 1 条，避免被限速）',
+                  self._pan_spin('connsPerTask', 1, 64))
+        self._row(lay, '限速', '所有网盘下载加起来的速度上限；0 = 不限速', self._pan_spin('speedLimitKB', 0, 1_000_000, 130, ' KB/s'))
+        self._row(lay, '失败后自动重试', '网络断了、下载地址过期等情况自动重试的次数', self._pan_spin('maxAutoRetries', 0, 20))
+
+    def _pan_spin(self, key, lo, hi, width=90, suffix=''):
+        sp = QSpinBox()
+        sp.setRange(lo, hi)
+        sp.setFixedWidth(width)
+        sp.setAlignment(Qt.AlignCenter)
+        if suffix:
+            sp.setSuffix(suffix)
+        if key == 'speedLimitKB':
+            sp.setSpecialValueText('不限速')
+        sp.setValue(int(self.win.pan.settings.get(key, lo) or lo))
+        sp.editingFinished.connect(lambda k=key, w=sp: self._set_pan(k, w.value()))
+        sp.valueChanged.connect(lambda v, k=key, w=sp: None if w.hasFocus() else self._set_pan(k, v))
+        self.pan_spins[key] = sp
+        return sp
+
+    def _set_pan(self, key, value):
+        eng = self.win.pan
+        if not eng.settings or eng.settings.get(key) == value:
+            return
+        st = dict(eng.settings)
+        st[key] = value
+        eng.settings.update(st)
+        eng.call('saveSettings', {'settings': st}, lambda r, e: r and eng.settings.update(r))
+
+    def refresh_pan_settings(self):
+        for key, sp in self.pan_spins.items():
+            if key in self.win.pan.settings:
+                sp.blockSignals(True)
+                sp.setValue(int(self.win.pan.settings[key] or 0))
+                sp.blockSignals(False)
+            sp.setEnabled(self.win.pan.alive)
 
     def _change_dir(self):
         d = QFileDialog.getExistingDirectory(self, '选择保存位置', self.s.download_dir)
@@ -327,11 +368,18 @@ class SettingsPanel(ui.Overlay):
                 self.s.proxy = proxy.text().strip()
                 self.win.setting_changed('proxy')
         proxy.editingFinished.connect(set_proxy)
-        self._row(lay, '代理', '例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080', proxy)
+        self._row(lay, '代理', '例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080（网盘下载重启软件后生效）', proxy)
         self._section(lay, 'B站账号')
         self.bili_box = QHBoxLayout()
         self.bili_box.setSpacing(6)
         self.bili_desc = self._row(lay, '扫码登录', '', self.bili_box)
+        self._section(lay, '网盘账号')
+        self.pan_rows = {}
+        for prov in pan.LOGIN_PROVIDERS:
+            box = QHBoxLayout()
+            box.setSpacing(6)
+            self.pan_rows[prov] = (self._row(lay, pan.PROVIDERS[prov], '', box), box)
+        self._row(lay, 'Mega', 'Mega 的分享链接不需要登录就能下载')
         self._section(lay, '其它网站的登录信息（Cookies）')
         self.cookie_hint = self._row(lay, 'cookies 文件夹', '', _btn('打开文件夹', self._open_cookie_dir))
         mode = self._combo('cookie_mode', COOKIE_MODES.items(), 220)
@@ -382,6 +430,51 @@ class SettingsPanel(ui.Overlay):
             self.bili_desc.show()
             self.bili_box.addWidget(_btn('长效登录', lambda: self.win._bili_login(True), 'primary'))
             self.bili_box.addWidget(_btn('网页登录', lambda: self.win._bili_login(False)))
+
+    def refresh_pan_accounts(self):
+        eng = self.win.pan
+        for prov, (desc, box) in self.pan_rows.items():
+            while box.count():
+                w = box.takeAt(0).widget()
+                if w:
+                    w.deleteLater()
+            if not eng.alive:
+                desc.setText(eng.error or '网盘解析组件正在启动…')
+                desc.show()
+        if not eng.alive:
+            return
+
+        def done(res, err):
+            if err or not res:
+                return
+            for a in res:
+                row = self.pan_rows.get(a.get('provider'))
+                if not row:
+                    continue
+                desc, box = row
+                prov = a['provider']
+                if a.get('loggedIn'):
+                    bits = [a.get('nickname') or '已登录', a.get('vip') or '']
+                    if a.get('expiresAt'):
+                        bits.append(f'有效期至 {datetime.datetime.fromtimestamp(a["expiresAt"]):%Y-%m-%d}')
+                    desc.setText('已登录：' + ' · '.join(b for b in bits if b))
+                    box.addWidget(_btn('重新扫码', lambda p=prov: self._pan_login(p)))
+                    box.addWidget(_btn('退出登录', lambda p=prov: self._pan_logout(p), 'danger'))
+                else:
+                    desc.setText((a.get('note') or '') + '。登录信息加密保存在本机（只有当前 Windows 用户能解开）')
+                    box.addWidget(_btn('扫码登录', lambda p=prov: self._pan_login(p), 'primary'))
+                desc.show()
+        eng.call('accounts', None, done)
+
+    def _pan_login(self, provider):
+        if self.win.pan_login(provider):
+            self.refresh_pan_accounts()
+
+    def _pan_logout(self, provider):
+        name = pan.PROVIDERS.get(provider, provider)
+        if QMessageBox.question(self.win, f'退出{name}', f'退出{name}登录？本机保存的登录信息会被删除。') != QMessageBox.Yes:
+            return
+        self.win.pan.call('logout', {'provider': provider}, lambda r, e: self.refresh_pan_accounts())
 
     def _refresh_cookie_hint(self):
         from . import core
@@ -499,17 +592,20 @@ class SettingsPanel(ui.Overlay):
         top.addLayout(tv, 1)
         lay.addLayout(top)
         lay.addSpacing(20)
-        text = _label('粘贴分享链接、选择清晰度、一键下载。支持 抖音、快手、B站、YouTube、X、TikTok 等上千个网站。\n\n'
+        text = _label('粘贴分享链接就能下载：视频支持 抖音、快手、B站、YouTube、X、TikTok 等上千个网站；'
+                      '网盘支持 百度网盘、夸克网盘、123云盘、Mega 的分享。\n\n'
                       '这个软件的代码几乎全部由 Claude 编写。图标「星芒落点」和界面风格都是向 Claude 应用致敬的原创设计，'
                       '不是 Anthropic 的官方作品，本项目与 Anthropic 没有任何官方关系。', 'rowDesc', wrap=True)
         text.setStyleSheet('font-size: 13px;')
         lay.addWidget(text)
         self._section(lay, '致谢')
         for name, desc in (('yt-dlp', '视频解析核心（Unlicense）'), ('FFmpeg', '音视频合并与转换（GPL）'),
+                           ('PanDL 网盘下载器', '网盘解析与下载核心（同一作者的项目，Go 编写，已合并进本软件）'),
                            ('Qt / PySide6', '界面框架（LGPL）'),
                            ('Hanken Grotesk、Source Serif 4', '界面英文字体，截取拉丁字母后改名 VDSans / VDSerif'
                                                               '（SIL Open Font License 1.1）'),
-                           ('各平台 logo', 'B站、X、YouTube、抖音、快手的 logo 是各自的商标，只用来标识对应的分区')):
+                           ('各平台 logo', 'B站、X、YouTube、抖音、快手、百度网盘、夸克网盘、123云盘、Mega 的 logo '
+                                          '是各自的商标，只用来标识对应的分区')):
             self._row(lay, name, desc)
         lay.addSpacing(18)
         h = QHBoxLayout()

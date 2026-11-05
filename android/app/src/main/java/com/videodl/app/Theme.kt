@@ -82,6 +82,7 @@ val PlatformColors = mapOf(
     "B站" to Color(0xFFFB7299), "B站番剧" to Color(0xFFFB7299), "抖音" to Color(0xFF4B4B52), "快手" to Color(0xFFFF5000),
     "YouTube" to Color(0xFFFF0033), "X" to Color(0xFF6B7280), "TikTok" to Color(0xFFFE2C55), "微博" to Color(0xFFE6162D),
     "小红书" to Color(0xFFFF2442), "Instagram" to Color(0xFFC13584), "Vimeo" to Color(0xFF1AB7EA),
+    "百度网盘" to Color(0xFF06A7FF), "夸克网盘" to Color(0xFF4F6BF6), "123云盘" to Color(0xFF5A7CFA), "Mega" to Color(0xFFD9272E),
 )
 
 @Composable

@@ -21,7 +21,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-/** 前台服务：有下载任务时保持运行（切到后台、锁屏都继续下载），通知栏显示汇总进度。 */
+/** 前台服务：有下载任务（视频或网盘）时保持运行（切到后台、锁屏都继续下载），通知栏显示汇总进度。 */
 class DownloadService : Service() {
     companion object {
         private const val ONGOING_ID = 1
@@ -58,7 +58,7 @@ class DownloadService : Service() {
             while (true) {
                 delay(1000)
                 val active = DownloadRepo.activeTasks
-                if (active.isEmpty()) {
+                if (active.isEmpty() && PanEngine.activeCount == 0) {
                     if (++idle >= 2) break            // 连续 2 秒没有任务才停，避免刚加入的任务还没登记
                     continue
                 }
@@ -100,15 +100,20 @@ object Notifier {
 
     fun progress(ctx: Context, active: List<DownloadTask>): Notification {
         val running = active.filter { it.status != "queued" }
-        val total = active.sumOf { it.total }
-        val done = active.sumOf { if (it.status in setOf("merging", "converting", "burning", "saving")) it.total else it.done }
-        val speed = running.sumOf { it.speed }
+        val pan = PanEngine.tasks.values.filter { it.active }
+        val total = active.sumOf { it.total } + pan.sumOf { maxOf(0L, it.size) }
+        val done = active.sumOf { if (it.status in setOf("merging", "converting", "burning", "saving")) it.total else it.done } +
+            pan.sumOf { maxOf(0L, it.downloaded) }
+        val speed = running.sumOf { it.speed } + PanEngine.totalSpeed
         val title = when {
-            active.isEmpty() -> "准备下载…"
-            active.size == 1 -> active[0].title
-            else -> "正在下载 ${active.size} 个视频"
+            active.isEmpty() && pan.isEmpty() -> "准备下载…"
+            pan.isEmpty() && active.size == 1 -> active[0].title
+            pan.isEmpty() -> "正在下载 ${active.size} 个视频"
+            active.isEmpty() && pan.size == 1 -> pan[0].name
+            active.isEmpty() -> "正在下载 ${pan.size} 个网盘文件"
+            else -> "正在下载 ${active.size} 个视频、${pan.size} 个网盘文件"
         }
-        val one = active.singleOrNull()
+        val one = if (pan.isEmpty()) active.singleOrNull() else null
         val text = when {
             one?.status == "merging" -> "合并音视频…"
             one?.status == "converting" -> "转换为 MP4…"
@@ -156,10 +161,25 @@ object Notifier {
             .setAutoCancel(true))
     }
 
-    private fun post(ctx: Context, task: DownloadTask, b: NotificationCompat.Builder) {
+    /** 网盘的一批文件下完了（点通知打开系统的「下载」文件夹） */
+    fun panDone(ctx: Context, title: String, count: Int, dir: String) {
+        val view = Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val pi = PendingIntent.getActivity(ctx, title.hashCode(), view, PendingIntent.FLAG_IMMUTABLE)
+        val where = dir.substringAfter("/Download/", dir)
+        notify(ctx, 5000 + (title.hashCode() and 0xfff), NotificationCompat.Builder(ctx, CH_RESULT)
+            .setSmallIcon(R.drawable.ic_stat_download)
+            .setContentTitle("网盘下载完成 · $count 个文件")
+            .setContentText("$title（已存到 下载/$where）")
+            .setContentIntent(pi)
+            .setAutoCancel(true))
+    }
+
+    private fun post(ctx: Context, task: DownloadTask, b: NotificationCompat.Builder) = notify(ctx, 1000 + task.id.toInt(), b)
+
+    private fun notify(ctx: Context, id: Int, b: NotificationCompat.Builder) {
         if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) return
         try {
-            NotificationManagerCompat.from(ctx).notify(1000 + task.id.toInt(), b.build())
+            NotificationManagerCompat.from(ctx).notify(id, b.build())
         } catch (_: SecurityException) {
             // 用户没给通知权限：不提醒，不影响下载
         }

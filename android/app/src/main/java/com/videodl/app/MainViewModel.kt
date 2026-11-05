@@ -30,11 +30,16 @@ data class HistoryRecord(val id: Long, val title: String, val platform: String, 
                          val size: Long, val ts: Double, val url: String, val exists: Boolean,
                          val sectionId: Long = -1, val origTitle: String = "")
 
-/** 分区（和电脑版共用 app/history.py）：icon 是图标名，如 "star"、"brand_bilibili" */
-data class Section(val id: Long, val name: String, val icon: String, val builtin: Boolean, val count: Int)
+/** 分区（和电脑版共用 app/history.py）：icon 是图标名，如 "star"、"brand_bilibili"。
+ *  kind：video 视频分区（放下载好的视频）/ pan 网盘分区（放网盘分享的解析记录） */
+data class Section(val id: Long, val name: String, val icon: String, val builtin: Boolean, val count: Int, val kind: String = "video")
 
-/** 正在新建（section = null）或编辑的分区；moveIn：新建后把这个视频移进去 */
-data class SectionEdit(val section: Section?, val moveIn: HistoryRecord?)
+/** 正在新建（section = null）或编辑的分区；moveIn / moveParse：新建后把这条记录移进去 */
+data class SectionEdit(val section: Section?, val moveIn: HistoryRecord?, val kind: String = "video", val moveParse: ParseRecord? = null)
+
+/** 解析记录（历史记录页、网盘分区）：解析过的视频或网盘分享，点一下重新解析。kind：video / pan */
+data class ParseRecord(val id: Long, val kind: String, val title: String, val origTitle: String, val platform: String,
+                       val url: String, val info: String, val ts: Double, val sectionId: Long)
 
 class VideoItem(val id: Long, val url: String) {
     var state by mutableStateOf("parsing")        // parsing / ok / error
@@ -389,20 +394,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------ 解析
 
-    /** 从输入框 / 分享过来的文字里提取链接并解析。 */
+    /** 从输入框 / 分享过来的文字里提取链接并解析：网盘分享交给网盘引擎，其余的交给视频解析。 */
     fun submit(text: String) {
         viewModelScope.launch(Dispatchers.IO) {
             awaitReady()
-            val urls = PyBridge.extractUrls(text)
+            val urls = PyBridge.extractUrls(text).filter { !PanModel.isPanUrl(it) }
+            val hasPan = PanModel.hasPanLink(text)
+            if (hasPan) {
+                var waited = 0
+                while (!PanEngine.alive && waited++ < 50) delay(100)      // 刚打开 App 时引擎可能还在启动
+            }
+            val shares = if (hasPan) PanEngine.detect(text) else emptyList()
             withContext(Dispatchers.Main) {
-                if (urls.isEmpty()) toast("没有识别到链接") else submitUrls(urls)
+                if (urls.isEmpty() && shares.isEmpty()) {
+                    toast(if (hasPan) PanEngine.error.ifEmpty { "网盘解析组件还没启动好，请稍后再试" } else "没有识别到链接")
+                    return@withContext
+                }
+                if (fresh) {        // 新的一批：清掉之前的解析结果（下载不受影响）
+                    items.clear()
+                    pan.clear()
+                    fresh = false
+                }
+                val nv = if (urls.isNotEmpty()) submitUrls(urls, quiet = true) else 0
+                val np = pan.addShares(shares)
+                val total = urls.size + shares.size
+                toast(if (nv + np == 0) "这些链接已经在列表里了"
+                      else "开始解析 ${nv + np} 个链接" + if (total > nv + np) "（${total - nv - np} 个已在列表中）" else "")
             }
         }
     }
 
-    fun submitUrls(urls: List<String>, fromCollection: Boolean = false, autoRes: Int? = null): Int {
+    fun submitUrls(urls: List<String>, fromCollection: Boolean = false, autoRes: Int? = null, quiet: Boolean = false): Int {
         if (fresh && urls.isNotEmpty()) {       // 新的一批：清掉之前的解析结果（下载不受影响）
             items.clear()
+            pan.clear()
             fresh = false
         }
         val known = items.map { it.url }.toSet()
@@ -416,7 +441,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 parse(it)
             }
         }
-        toast(when {
+        if (!quiet) toast(when {
             fresh.isEmpty() -> "这些链接已经在列表里了"
             autoRes != null -> "已加入 ${fresh.size} 个视频，解析完自动下载"
             else -> "开始解析 ${fresh.size} 个链接"
@@ -472,6 +497,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         item.selected = 0
         item.state = "ok"
+        afterParseRecorded()        // 解析成功会记一条解析记录（Python 那边记的），刷新历史记录
         item.autoRes?.let { res ->
             item.autoRes = null
             item.selected = pickByRes(item.options, res)
@@ -488,11 +514,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun remove(item: VideoItem) {
         items.remove(item)
-        if (items.isEmpty()) { fresh = false; refreshGreeting(force = true) }
+        if (items.isEmpty() && pan.shares.isEmpty()) { fresh = false; refreshGreeting(force = true) }
     }
 
     fun clearItems() {
         items.clear()
+        pan.clear()
         fresh = false
         refreshGreeting(force = true)
     }
@@ -502,7 +529,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     fun newSession() {
-        if (items.isNotEmpty()) fresh = true
+        if (items.isNotEmpty() || pan.shares.isNotEmpty()) fresh = true
         refreshGreeting(force = true)
     }
 
@@ -553,6 +580,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun downloadAll() {
         var n = 0
         var skipped = 0
+        // 网盘分享：还没下载过、不用先登录的，按勾选的文件下载
+        pan.shares.filter { it.state == "list" && it.note.isEmpty() && it.batchIds.isEmpty() && !it.adding && pan.picked(it).isNotEmpty() }
+            .forEach { pan.download(it); n++ }
         items.filter { it.state == "ok" }.forEach { item ->
             val busy = tasks.any { it.item === item && it.optIndex == item.selected && (it.active || it.status == "done") }
             when {
@@ -588,20 +618,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ------------------------------------------------------------ 历史
+    // 历史记录页默认是「解析记录」（视频和网盘分享都记，点一下重新解析）；「已下载的视频」是下载记录。
+    // 侧边栏：视频分区里是下载好的视频，网盘分区里是网盘分享的解析记录，「最近下载」只放下载好的视频。
 
     var historySearch by mutableStateOf("")
-    /** 历史记录页只看某个分区（-1 = 全部） */
+    /** parses 解析记录 / downloads 下载好的视频 */
+    var historyMode by mutableStateOf("parses")
+        private set
+    /** 解析记录只看一类：空 = 全部，video / pan */
+    var historyKind by mutableStateOf("")
+        private set
+    /** 只看某个分区（-1 = 不限） */
     var historySection by mutableStateOf(-1L)
     var sections by mutableStateOf(listOf<Section>())
         private set
-    /** 侧边栏「最近下载」（不受历史页搜索 / 筛选影响） */
+    val parses = mutableStateListOf<ParseRecord>()
+    var counts by mutableStateOf(JSONObject())
+        private set
+    /** 侧边栏「最近下载」（只有下载好的视频，不受历史页筛选影响） */
     val recent = mutableStateListOf<HistoryRecord>()
-    /** 搜索页的结果 */
+    /** 搜索页的结果：解析记录 + 下载好的视频 */
     val searchResults = mutableStateListOf<HistoryRecord>()
+    val searchParses = mutableStateListOf<ParseRecord>()
     var searchQuery by mutableStateOf("")
     /** 正在重命名 / 移至分区的记录、正在编辑的分区（界面据此弹窗） */
     var renaming by mutableStateOf<HistoryRecord?>(null)
     var moving by mutableStateOf<HistoryRecord?>(null)
+    var renamingParse by mutableStateOf<ParseRecord?>(null)
+    var movingParse by mutableStateOf<ParseRecord?>(null)
     var sectionEditor by mutableStateOf<SectionEdit?>(null)
 
     private fun parseRecords(arr: org.json.JSONArray) = List(arr.length()) { i -> arr.getJSONObject(i).let {
@@ -611,21 +655,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (it.isNull("section_id")) -1 else it.optLong("section_id", -1), it.optString("orig_title"))
     } }
 
+    private fun parseParses(arr: org.json.JSONArray) = List(arr.length()) { i -> arr.getJSONObject(i).let {
+        ParseRecord(it.getLong("id"), it.optString("kind"), it.optString("title"), it.optString("orig_title"), it.optString("platform"),
+            it.optString("url"), it.optString("info"), it.optDouble("ts"), if (it.isNull("section_id")) -1 else it.optLong("section_id", -1))
+    } }
+
     fun loadHistory(search: String = historySearch) {
         viewModelScope.launch(Dispatchers.IO) {
             awaitReady()
-            val arr = runCatching { PyBridge.historyList(search, historySection) }.getOrNull() ?: return@launch
-            val list = parseRecords(arr)
+            val downloads = historyMode == "downloads"
+            val list = if (downloads) runCatching { parseRecords(PyBridge.historyList(search, historySection)) }.getOrNull() else null
+            val pl = if (!downloads) runCatching { parseParses(PyBridge.parseList(search, if (historySection >= 0) "" else historyKind,
+                historySection)) }.getOrNull() else null
             val recentList = runCatching { parseRecords(PyBridge.historyList("", -1)).take(40) }.getOrNull()
             val secs = runCatching { PyBridge.sections() }.getOrNull()?.let { a ->
                 List(a.length()) { i -> a.getJSONObject(i).let {
-                    Section(it.getLong("id"), it.optString("name"), it.optString("icon"), it.optInt("builtin") == 1, it.optInt("count"))
+                    Section(it.getLong("id"), it.optString("name"), it.optString("icon"), it.optInt("builtin") == 1, it.optInt("count"),
+                        it.optString("kind", "video"))
                 } }
             }
+            val c = runCatching { PyBridge.parseCounts() }.getOrNull()
             withContext(Dispatchers.Main) {
-                history.clear(); history.addAll(list)
+                list?.let { history.clear(); history.addAll(it) }
+                pl?.let { parses.clear(); parses.addAll(it) }
                 recentList?.let { recent.clear(); recent.addAll(it) }
                 secs?.let { sections = it }
+                c?.let { counts = it }
                 if (historySection >= 0 && sections.none { it.id == historySection }) historySection = -1
             }
         }
@@ -635,9 +690,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         searchQuery = q
         viewModelScope.launch(Dispatchers.IO) {
             awaitReady()
-            val list = runCatching { parseRecords(PyBridge.historyList(q.trim(), -1)).take(80) }.getOrNull() ?: return@launch
+            val pl = runCatching { parseParses(PyBridge.parseList(q.trim(), "", -1, if (q.isBlank()) 30 else 60)) }.getOrNull()
+            val list = if (q.isBlank()) emptyList() else runCatching { parseRecords(PyBridge.historyList(q.trim(), -1)).take(60) }.getOrNull()
             withContext(Dispatchers.Main) {
-                if (searchQuery == q) { searchResults.clear(); searchResults.addAll(list) }
+                if (searchQuery == q) {
+                    pl?.let { searchParses.clear(); searchParses.addAll(it) }
+                    list?.let { searchResults.clear(); searchResults.addAll(it) }
+                }
             }
         }
     }
@@ -648,18 +707,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         search(searchQuery)
     }
 
+    /** 解析成功后刷新（记录是在解析的同时写进去的） */
+    fun afterParseRecorded() = loadHistory()
+
+    /** 打开某个分区（-1 = 全部解析记录）：视频分区看下载好的视频，网盘分区看网盘分享的解析记录 */
     fun showSection(id: Long) {
+        val kind = sections.firstOrNull { it.id == id }?.kind
         historySection = id
+        historyMode = if (kind == "video") "downloads" else "parses"
+        historyKind = if (kind == "pan") "pan" else ""
         historySearch = ""
         loadHistory("")
+    }
+
+    /** 解析记录：全部 / 视频 / 网盘 */
+    fun filterKind(kind: String) {
+        historyMode = "parses"; historyKind = kind; historySection = -1
+        loadHistory()
+    }
+
+    fun showDownloads() {
+        historyMode = "downloads"; historyKind = ""; historySection = -1
+        loadHistory()
     }
 
     fun deleteHistory(rec: HistoryRecord) {
         viewModelScope.launch(Dispatchers.IO) { PyBridge.historyDelete(rec.id); afterChange() }
     }
 
+    /** 清空：下载记录，或者解析记录（全部 / 只清一类） */
     fun clearHistory() {
-        viewModelScope.launch(Dispatchers.IO) { PyBridge.historyClear(); afterChange() }
+        val downloads = historyMode == "downloads"
+        val kind = historyKind
+        viewModelScope.launch(Dispatchers.IO) {
+            if (downloads) PyBridge.historyClear() else PyBridge.parseClear(kind)
+            afterChange()
+        }
     }
 
     /** 重命名：只改 App 里显示的名字，不动文件；留空 = 恢复原标题 */
@@ -681,12 +764,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun createSection(name: String, icon: String, moveIn: HistoryRecord? = null) {
+    // ---- 解析记录
+    /** 重新解析一条记录（回到首页） */
+    fun reparse(url: String) = submit(url)
+
+    fun renameParse(rec: ParseRecord, title: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val id = PyBridge.sectionCreate(name.trim(), icon)
-            moveIn?.let { PyBridge.historyMove(it.id, id) }
+            PyBridge.parseRename(rec.id, title.trim())
             afterChange()
-            withContext(Dispatchers.Main) { toast("✓ 已新建分区「${name.trim()}」" + if (moveIn != null) "，视频已移进去" else "") }
+            withContext(Dispatchers.Main) { toast(if (title.isBlank()) "已恢复原标题" else "✓ 已重命名") }
+        }
+    }
+
+    fun moveParse(rec: ParseRecord, sectionId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            PyBridge.parseMove(rec.id, sectionId)
+            afterChange()
+            val name = sections.firstOrNull { it.id == sectionId }?.name
+            withContext(Dispatchers.Main) { toast(if (name != null) "✓ 已移至「$name」" else "已移出分区") }
+        }
+    }
+
+    fun deleteParse(rec: ParseRecord) {
+        viewModelScope.launch(Dispatchers.IO) { PyBridge.parseDelete(rec.id); afterChange() }
+    }
+
+    fun createSection(name: String, icon: String, moveIn: HistoryRecord? = null, kind: String = "video", moveParse: ParseRecord? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val id = PyBridge.sectionCreate(name.trim(), icon, kind)
+            moveIn?.let { PyBridge.historyMove(it.id, id) }
+            moveParse?.let { PyBridge.parseMove(it.id, id) }
+            afterChange()
+            withContext(Dispatchers.Main) {
+                toast("✓ 已新建${if (kind == "pan") "网盘" else "视频"}分区「${name.trim()}」" + if (moveIn != null || moveParse != null) "，已移进去" else "")
+            }
         }
     }
 
@@ -698,7 +809,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             PyBridge.sectionDelete(s.id)
             afterChange()
-            withContext(Dispatchers.Main) { toast("已删除分区「${s.name}」，里面的视频回到所属平台的分区") }
+            withContext(Dispatchers.Main) { toast("已删除分区「${s.name}」，里面的记录回到所属平台的分区") }
         }
     }
 
@@ -710,4 +821,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 ?.use { it.count > 0 } ?: false
         }.getOrDefault(false)
     }
+
+    /** 网盘分享、网盘下载、网盘账号（引擎在这里启动） */
+    val pan = PanModel(this, app)
 }

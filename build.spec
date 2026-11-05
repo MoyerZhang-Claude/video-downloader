@@ -9,8 +9,11 @@ excludes = ['tkinter', 'unittest', 'pydoc', 'PySide6.QtNetwork', 'PySide6.QtQml'
             'PySide6.QtSql', 'PySide6.QtTest', 'PySide6.QtXml', 'PySide6.QtOpenGL', 'PySide6.QtPdf',
             'PySide6.QtDBus', 'PySide6.QtConcurrent', 'PySide6.QtPrintSupport']
 
-a = Analysis(['main.py'], pathex=['.'], hiddenimports=hiddenimports, datas=datas, excludes=excludes)
+# 网盘解析下载引擎（Go 编写，源码在 pan/；打包.bat 会先编译它）放进 _internal，由 app/pan.py 启动
+binaries = [('pan/bin/pan-engine.exe', '.')]
+
+a = Analysis(['main.py'], pathex=['.'], hiddenimports=hiddenimports, datas=datas, binaries=binaries, excludes=excludes)
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='视频解析下载器', icon='app/icon.ico',
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='链接解析下载器', icon='app/icon.ico',
           console=False, upx=False)
-coll = COLLECT(exe, a.binaries, a.datas, name='视频解析下载器', upx=False)
+coll = COLLECT(exe, a.binaries, a.datas, name='链接解析下载器', upx=False)

@@ -56,6 +56,7 @@ PLATFORM_COLORS = {
     'B站': '#fb7299', 'B站番剧': '#fb7299', '抖音': '#4b4b52', '快手': '#ff5000', 'YouTube': '#ff0033',
     'X': '#6b7280', 'TikTok': '#fe2c55', '微博': '#e6162d', '小红书': '#ff2442', 'Instagram': '#c13584',
     'Vimeo': '#1ab7ea', 'Facebook': '#1877f2', 'Twitch': '#9146ff', '西瓜视频': '#ff3b30',
+    '百度网盘': '#06a7ff', '夸克网盘': '#4f6bf6', '123云盘': '#5a7cfa', 'Mega': '#d9272e',
 }
 
 # 任务状态 → 颜色令牌
@@ -202,6 +203,7 @@ def _make_icons():
     save('chevron_right', stroke(P['text3'], [(5.5, 3.5), (9, 7), (5.5, 10.5)]))
     save('check', stroke(P['on_primary'], [(3.5, 7.2), (6, 9.8), (10.8, 4.4)], 1.8))
     save('check_menu', stroke(P['text'], [(3.5, 7.2), (6, 9.8), (10.8, 4.4)], 1.6))
+    save('dash', stroke(P['on_primary'], [(4, 7), (10, 7)], 1.8))
     return paths
 
 
@@ -317,6 +319,19 @@ QListWidget::item:disabled {{ color: {p['text4']}; }}
 QListView::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid {p['border_focus']};
     background: {p['field']}; }}
 QListView::indicator:checked {{ border: none; background: {p['primary']}; image: url({ic['check']}); }}
+
+/* ---------- 网盘分享的文件树 ---------- */
+QTreeWidget#panTree {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 10px; padding: 4px;
+    outline: 0; }}
+QTreeWidget#panTree::item {{ height: 30px; color: {p['text']}; border: none; }}
+QTreeWidget#panTree::item:hover {{ background: {p['hover']}; }}
+QTreeView::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid {p['border_focus']};
+    background: {p['field']}; }}
+QTreeView::indicator:checked {{ border: none; background: {p['primary']}; image: url({ic['check']}); }}
+QTreeView::indicator:indeterminate {{ border: none; background: {p['primary']}; image: url({ic['dash']}); }}
+QTreeView::branch {{ background: transparent; }}
+QTreeView::branch:has-children:closed {{ image: url({ic['chevron_right']}); }}
+QTreeView::branch:has-children:open {{ image: url({ic['chevron']}); }}
 
 QScrollArea {{ background: transparent; border: none; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 3px 2px; }}

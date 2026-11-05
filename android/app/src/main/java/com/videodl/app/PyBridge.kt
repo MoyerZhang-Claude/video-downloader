@@ -51,7 +51,21 @@ object PyBridge {
 
     // ---------------------------------------------------------- 分区（和电脑版共用）
     fun sections(): JSONArray = JSONArray(module.callAttr("history_sections").toString())
-    fun sectionCreate(name: String, icon: String): Long = module.callAttr("section_create", name, icon).toLong()
+    fun sectionCreate(name: String, icon: String, kind: String = "video"): Long =
+        module.callAttr("section_create", name, icon, kind).toLong()
+
+    // ---------------------------------------------------------- 解析记录（历史记录页、网盘分区）
+    fun parseAdd(kind: String, pkey: String, title: String, platform: String, uploader: String, url: String, info: String,
+                 count: Int, size: Long): Long =
+        module.callAttr("parse_add", kind, pkey, title, platform, uploader, url, info, count, size).toLong()
+    /** kind：空 = 全部，"video" / "pan"；section：-1 = 不限 */
+    fun parseList(search: String = "", kind: String = "", section: Long = -1, limit: Int = 500): JSONArray =
+        JSONArray(module.callAttr("parse_list", search, kind, section, limit).toString())
+    fun parseCounts(): JSONObject = JSONObject(module.callAttr("parse_counts").toString())
+    fun parseRename(id: Long, title: String) { module.callAttr("parse_rename", id, title) }
+    fun parseMove(id: Long, sectionId: Long) { module.callAttr("parse_move", id, sectionId) }
+    fun parseDelete(id: Long) { module.callAttr("parse_delete", id) }
+    fun parseClear(kind: String = "") { module.callAttr("parse_clear", kind) }
     fun sectionUpdate(id: Long, name: String, icon: String) { module.callAttr("section_update", id, name, icon) }
     fun sectionDelete(id: Long) { module.callAttr("section_delete", id) }
     /** sectionId < 0 = 移出分区 */

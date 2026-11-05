@@ -9,9 +9,9 @@ import android.os.Environment
 import android.provider.MediaStore
 import java.io.File
 
-/** 保存到手机的「下载/视频解析下载器」文件夹（Android 10+ 不需要存储权限）。 */
+/** 保存到手机的「下载/链接解析下载器」文件夹（Android 10+ 不需要存储权限）。网盘文件在里面的「网盘」文件夹。 */
 object Storage {
-    const val FOLDER = "视频解析下载器"
+    const val FOLDER = "链接解析下载器"
     const val DANMAKU_FOLDER = "弹幕数据"
 
     fun safeName(name: String, limit: Int = 80): String =
@@ -19,7 +19,7 @@ object Storage {
             .replace(Regex("[\\\\/*\"<>\\r\\n\\t]+"), " ").replace(Regex("\\s{2,}"), " ")
             .trim().trim('.').take(limit).ifBlank { "video" }
 
-    /** subfolder：在「下载/视频解析下载器」下再建一层（如「弹幕数据」）。 */
+    /** subfolder：在「下载/链接解析下载器」下再建一层（如「弹幕数据」）。 */
     fun saveToDownloads(ctx: Context, src: File, displayName: String, mime: String, subfolder: String = ""): Uri {
         val dir = "${Environment.DIRECTORY_DOWNLOADS}/$FOLDER" + if (subfolder.isNotEmpty()) "/$subfolder" else ""
         return save(ctx, MediaStore.Downloads.EXTERNAL_CONTENT_URI, dir, displayName, mime) { out ->
@@ -27,7 +27,7 @@ object Storage {
         }
     }
 
-    /** 封面存到相册（「图片/视频解析下载器」），统一转成 JPG，相册和各种 App 都能直接看。 */
+    /** 封面存到相册（「图片/链接解析下载器」），统一转成 JPG，相册和各种 App 都能直接看。 */
     fun saveCover(ctx: Context, src: File, displayName: String): Uri {
         val dir = "${Environment.DIRECTORY_PICTURES}/$FOLDER"
         val isJpeg = src.extension.lowercase() in setOf("jpg", "jpeg")

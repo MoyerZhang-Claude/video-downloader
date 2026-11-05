@@ -58,7 +58,7 @@ def to_ass(items, width=1920, height=1080, font='Microsoft YaHei', base_size=Non
     base = base_size or _base_size(width, height)
     alpha = f'{round((1 - OPACITY) * 255):02X}'
     header = f"""[Script Info]
-; 由 视频解析下载器 从 B站弹幕生成
+; 从 B站弹幕生成
 ScriptType: v4.00+
 PlayResX: {width}
 PlayResY: {height}

@@ -14,8 +14,8 @@ android {
         applicationId = "com.videodl.app"
         minSdk = 29                 // Android 10+：可以免权限写入「下载」文件夹
         targetSdk = 36
-        versionCode = 8
-        versionName = "1.4.0"
+        versionCode = 9
+        versionName = "2.0.0"
         ndk {
             abiFilters += listOf("arm64-v8a")     // 手机基本都是 arm64，只打这一种，安装包小一半
         }
@@ -49,7 +49,44 @@ android {
     buildFeatures {
         compose = true
     }
+    // 网盘引擎是一个可执行文件（libpanengine.so）：安装时要解压到 nativeLibraryDir 才能运行
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDir(layout.buildDirectory.dir("panlib").get().asFile)
+        }
+    }
 }
+
+// 网盘下载引擎（Go，源码在项目根目录的 pan/，和电脑版同一份）：用 NDK 编译成安卓可执行文件。
+// 文件名必须是 lib*.so，安装时才会放进 App 可以执行的目录。需要 Go 1.26+ 和 Android NDK。
+val buildPanEngine = tasks.register<Exec>("buildPanEngine") {
+    val panDir = rootProject.file("../pan")
+    val out = layout.buildDirectory.file("panlib/arm64-v8a/libpanengine.so")
+    inputs.dir(panDir.resolve("internal"))
+    inputs.dir(panDir.resolve("cmd/pan-engine"))
+    inputs.file(panDir.resolve("go.mod"))
+    outputs.file(out)
+    val sdkDir = Properties().apply {
+        rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+    }.getProperty("sdk.dir") ?: System.getenv("ANDROID_HOME") ?: "${System.getenv("LOCALAPPDATA")}/Android/Sdk"
+    val ndk = File(sdkDir, "ndk").listFiles()?.filter { it.isDirectory }?.maxByOrNull { it.name }
+        ?: error("找不到 Android NDK（$sdkDir/ndk）")
+    val windows = System.getProperty("os.name").lowercase().contains("windows")
+    val host = if (windows) "windows-x86_64" else if (System.getProperty("os.name").lowercase().contains("mac")) "darwin-x86_64" else "linux-x86_64"
+    val clang = File(ndk, "toolchains/llvm/prebuilt/$host/bin/aarch64-linux-android29-clang" + if (windows) ".cmd" else "")
+    workingDir = panDir
+    environment("GOOS", "android")
+    environment("GOARCH", "arm64")
+    environment("CGO_ENABLED", "1")          // 用 Android 自己的 DNS 解析（纯 Go 在安卓上找不到 DNS 服务器）
+    environment("CC", clang.absolutePath)
+    commandLine("go", "build", "-trimpath", "-ldflags", "-s -w", "-o", out.get().asFile.absolutePath, "./cmd/pan-engine")
+}
+tasks.named("preBuild") { dependsOn(buildPanEngine) }
 
 // 解析核心直接复用电脑版源码：构建前把需要的文件同步进来（电脑版改了，手机版重新编译就会带上）
 val syncPythonCore = tasks.register<Sync>("syncPythonCore") {

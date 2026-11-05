@@ -18,7 +18,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
+    QAbstractButton, QApplication, QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QMainWindow,
     QMenu, QPlainTextEdit, QSizePolicy, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 

@@ -9,10 +9,14 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- 防止锁屏后被系统限速：申请「不受电池优化限制」 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 网盘下载：引擎直接把文件写进「下载/链接解析下载器/网盘」。Android 11 起写自己创建的文件不需要权限，
+         只有 Android 10 需要这个权限（配合 requestLegacyExternalStorage） -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
 
     <application
         android:name="com.chaquo.python.android.PyApplication"
-        android:label="视频解析下载器"
+        android:label="链接解析下载器"
+        android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:theme="@style/AppTheme"
