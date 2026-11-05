@@ -59,6 +59,7 @@ object DownloadRepo {
     @Volatile var wantSubs = true
     @Volatile var wantCover = false
     @Volatile var wantDanmaku = false
+    @Volatile var danmakuFps = 60            // 弹幕版里弹幕的帧率：60 / 120（画面保持原来的帧率）
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val slots = Semaphore(2)
@@ -218,9 +219,15 @@ object DownloadRepo {
         val layout = DanmakuBurner.loadLayout(File(dm.getString("layout")))
         val out = File(work, "danmaku.mp4")
         withContext(Dispatchers.Main) { task.stage = "${layout.items.size} 条弹幕" }
-        DanmakuBurner.burn(app, video, out, layout, videoStreamBytes,
+        val want = danmakuFps
+        withContext(Dispatchers.Main) { task.stage = "${layout.items.size} 条弹幕 · ${want} 帧" }
+        val got = DanmakuBurner.burn(app, video, out, layout, videoStreamBytes, want,
             onProgress = { p -> task.progress = p / 100f },
             isCancelled = { task.callback?.cancelled == true })
+        if (got != want) withContext(Dispatchers.Main) {
+            task.note = listOf(task.note, if (got == 0) "这台手机不支持 ${want} 帧，弹幕按视频原帧率生成" else "这台手机不支持 ${want} 帧，弹幕改用 ${got} 帧")
+                .filter { it.isNotEmpty() }.joinToString("；")
+        }
         return out to File(dm.getString("xml"))
     }
 

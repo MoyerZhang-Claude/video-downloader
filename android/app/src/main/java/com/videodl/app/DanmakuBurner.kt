@@ -96,10 +96,38 @@ object DanmakuBurner {
 
     /**
      * 把 [layout] 的弹幕画进 [input]，输出 H.264 MP4 到 [output]。
+     * 弹幕按 [fps]（60 / 120）帧刷新，画面保持原来的帧率（[DanmakuGl]）；
+     * 手机不支持这个帧率、HDR 视频或中途出错时，改用原帧率方案（弹幕跟着画面帧率走）。
      * [onProgress] 0~100；[isCancelled] 返回 true 时中止（抛 CancellationException）。
+     * 返回实际的弹幕帧率；0 = 用了原帧率方案。
      */
-    suspend fun burn(ctx: Context, input: File, output: File, layout: Layout, sourceVideoBytes: Long,
-                     onProgress: (Int) -> Unit, isCancelled: () -> Boolean) = withContext(Dispatchers.Main) {
+    suspend fun burn(ctx: Context, input: File, output: File, layout: Layout, sourceVideoBytes: Long, fps: Int,
+                     onProgress: (Int) -> Unit, isCancelled: () -> Boolean): Int {
+        val src = DanmakuGl.probe(input)
+        val (w, h) = if (src.rotation % 180 != 0) src.height to src.width else src.width to src.height
+        val use = if (src.hdr) 0 else DanmakuGl.supportedFps(w, h, fps)
+        if (use > 0) {
+            val main = Handler(Looper.getMainLooper())
+            try {
+                val info = VideoInfo(src.width, src.height, src.rotation, src.durationUs)
+                return withContext(Dispatchers.IO) {
+                    DanmakuGl.burn(input, output, layout, src, use, bitrateFor(info, sourceVideoBytes),
+                        onProgress = { p -> main.post { onProgress(p) } }, isCancelled = isCancelled)
+                }
+            } catch (e: java.util.concurrent.CancellationException) {
+                throw CancellationException("已取消")
+            } catch (e: Exception) {
+                android.util.Log.w("DanmakuBurner", "高帧率弹幕版失败，改用原帧率方案", e)
+                if (isCancelled()) throw CancellationException("已取消")
+            }
+        }
+        burnSourceRate(ctx, input, output, layout, sourceVideoBytes, onProgress, isCancelled)
+        return 0
+    }
+
+    /** 原帧率方案（Media3）：每一帧画面画一次弹幕，弹幕帧率 = 视频帧率。 */
+    private suspend fun burnSourceRate(ctx: Context, input: File, output: File, layout: Layout, sourceVideoBytes: Long,
+                                       onProgress: (Int) -> Unit, isCancelled: () -> Boolean) = withContext(Dispatchers.Main) {
         val info = probe(input)
         // 竖着拍的视频（旋转 90/270）显示时宽高互换
         val (frameW, frameH) = if (info.rotation % 180 != 0) info.height to info.width else info.width to info.height

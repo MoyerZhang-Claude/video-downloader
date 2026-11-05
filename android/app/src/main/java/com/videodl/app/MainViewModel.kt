@@ -86,6 +86,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var wantCover by mutableStateOf(false)
         private set
     var wantDanmaku by mutableStateOf(false)
+    var danmakuFps by mutableStateOf(60)
         private set
     /** 后台下载是否已经不受电池优化限制 */
     var bgUnrestricted by mutableStateOf(true)
@@ -123,6 +124,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         wantSubs = prefs.getBoolean("want_subs", true)
         wantCover = prefs.getBoolean("want_cover", false)
         wantDanmaku = prefs.getBoolean("want_danmaku", false)
+        danmakuFps = prefs.getInt("danmaku_fps", 60).let { if (it == 120) 120 else 60 }
         themeMode = prefs.getString("theme", "system") ?: "system"
         nickname = prefs.getString("nickname", "") ?: ""
         newGreeting()
@@ -130,6 +132,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         DownloadRepo.wantSubs = wantSubs
         DownloadRepo.wantCover = wantCover
         DownloadRepo.wantDanmaku = wantDanmaku
+        DownloadRepo.danmakuFps = danmakuFps
         refreshBattery()
         DownloadRepo.onMessage = { toast(it) }
         DownloadRepo.onDone = { task -> onDownloaded(task) }
@@ -228,6 +231,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         wantCover = on
         DownloadRepo.wantCover = on
         prefs.edit().putBoolean("want_cover", on).apply()
+    }
+
+    fun chooseDanmakuFps(fps: Int) {
+        danmakuFps = fps
+        DownloadRepo.danmakuFps = fps
+        prefs.edit().putInt("danmaku_fps", fps).apply()
+        toast(if (fps == 120) "弹幕 120 帧：高刷屏上更顺滑，文件更大、生成更久" else "弹幕 60 帧")
     }
 
     fun toggleDanmaku(on: Boolean) {

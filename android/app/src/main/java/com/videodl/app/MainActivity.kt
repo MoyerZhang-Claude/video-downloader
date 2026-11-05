@@ -472,8 +472,29 @@ private fun DownloadOptionRows(vm: MainViewModel) {
         Switch(vm.wantCover, { vm.toggleCover(it) })
     }
     SettingsRow(LineIcons.Danmaku, "B站弹幕版", if (vm.wantDanmaku) "开：只下载弹幕版（弹幕画进视频，下载完需等一会儿）"
-                else "关：只下载原视频", divider = false) {
+                else "关：只下载原视频", divider = vm.wantDanmaku) {
         Switch(vm.wantDanmaku, { vm.toggleDanmaku(it) })
+    }
+    if (vm.wantDanmaku) {
+        SettingsRow(null, "弹幕帧率", "画面保持下载时的画质和帧率，只有弹幕按这个帧率刷新" +
+                if (vm.danmakuFps == 120) "；120 帧在高刷屏上更顺滑，文件更大、生成更久" else "", divider = false) {
+            FpsChoice(vm.danmakuFps) { vm.chooseDanmakuFps(it) }
+        }
+    }
+}
+
+/** 两个选项的小胶囊：60 / 120 帧 */
+@Composable
+private fun FpsChoice(value: Int, onChange: (Int) -> Unit) {
+    Row(Modifier.clip(RoundedCornerShape(10.dp)).background(P.subtle).padding(3.dp)) {
+        for (fps in listOf(60, 120)) {
+            val on = value == fps
+            Box(Modifier.clip(RoundedCornerShape(8.dp)).background(if (on) P.surface else Color.Transparent)
+                .clickable { if (!on) onChange(fps) }.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                Text("$fps 帧", fontSize = 13.sp, color = if (on) P.text else P.text3,
+                    fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
+            }
+        }
     }
 }
 
