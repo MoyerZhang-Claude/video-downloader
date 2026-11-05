@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from . import APP_NAME, APP_VERSION, avatar, bilibili, core, greetings, icons, pan, task_store, theme, ui
 from .bili_dialog import BiliLoginDialog
-from .config import ROOT, Settings, ffmpeg_dir
+from .config import DATA, ROOT, Settings, ffmpeg_dir
 from .episode_dialog import EpisodeDialog
 from .folder_dialog import FolderDialog, TextDialog
 from .pan_ui import PanMixin
@@ -864,6 +864,10 @@ class MainWindow(PanMixin, QMainWindow):
                                height=30, font_px=13)
                 more.setCheckable(False)
                 more.muted = True
+                if not s['count']:
+                    more.setToolTip('在历史记录、最近下载或解析结果里右键视频，选「移至分区」，就会放进这个分区'
+                                    if s['kind'] == VIDEO else
+                                    '网盘分享解析后会自动放进对应网盘的分区；也可以在历史记录里右键一条记录，选「移至分区」')
                 more.clicked.connect(lambda _=False, sid=s['id']: self._show_section(sid))
                 tv.addWidget(more)
                 self.sec_boxes[s['kind']].addWidget(tree)
@@ -1094,7 +1098,11 @@ class MainWindow(PanMixin, QMainWindow):
             self.bili_chip.setText(f'B站 · {info.get("name") or "已登录"}' if logged else 'B站扫码登录')
 
     def _account_menu(self):
+        # 菜单开着时再点一下头像框：那次点击先把菜单关掉了，这里就不要再打开（再点一次 = 收起）
+        if time.monotonic() - getattr(self, '_account_menu_closed', 0) < 0.3:
+            return
         m = ui.popup_menu(self)
+        m.aboutToHide.connect(lambda: setattr(self, '_account_menu_closed', time.monotonic()))
         info = self.bili_account
         logged = info and not info.get('expired')
         head = m.addAction(f'B站 · {info.get("name") or "已登录"}' if logged else '未登录 B站')
@@ -2786,7 +2794,7 @@ class MainWindow(PanMixin, QMainWindow):
 
 
 def _setup_logging():
-    log_dir = os.path.join(ROOT, 'logs')
+    log_dir = os.path.join(DATA, 'logs')
     try:
         os.makedirs(log_dir, exist_ok=True)
         handler = RotatingFileHandler(os.path.join(log_dir, 'app.log'), maxBytes=1_000_000, backupCount=2,

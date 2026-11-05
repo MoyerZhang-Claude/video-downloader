@@ -4,6 +4,13 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 hiddenimports = collect_submodules('yt_dlp_ejs') + ['curl_cffi']
 # app/fonts：界面英文字体 VDSans / VDSerif（Hanken Grotesk、Source Serif 4 子集，OFL 授权）；界面图标用 QtSvg 渲染
 datas = [('app/icon.ico', 'app'), ('app/fonts', 'app/fonts')] + collect_data_files('yt_dlp_ejs')
+# 记下自带的 yt-dlp 版本：在线更新过的内核只有比它新时才用（app/core_update.py）
+import os  # noqa: E402
+import yt_dlp.version as _ytv  # noqa: E402
+os.makedirs('build', exist_ok=True)
+with open('build/ytdlp_version.txt', 'w', encoding='utf-8') as _f:
+    _f.write(_ytv.__version__)
+datas.append(('build/ytdlp_version.txt', '.'))
 
 excludes = ['tkinter', 'unittest', 'pydoc', 'PySide6.QtNetwork', 'PySide6.QtQml', 'PySide6.QtQuick',
             'PySide6.QtSql', 'PySide6.QtTest', 'PySide6.QtXml', 'PySide6.QtOpenGL', 'PySide6.QtPdf',

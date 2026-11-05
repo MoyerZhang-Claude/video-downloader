@@ -19,7 +19,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QMainWindow,
-    QMenu, QPlainTextEdit, QSizePolicy, QStyledItemDelegate, QVBoxLayout, QWidget,
+    QMenu, QPlainTextEdit, QSizePolicy, QStyledItemDelegate, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import icons, theme
@@ -339,6 +339,7 @@ class NavItem(_HoverButton):
         self.trailing = ''          # 右侧的灰色小字（如分区里的视频数）
         self.muted = False          # 文字用浅灰色（如「查看全部」）
         self.collapsed = False
+        self._elided = False        # 文字太长被省略成「…」时，鼠标停留显示完整文字
         self.setCheckable(not special)
         self.setFixedHeight(height)
         self.setFont(px_font(font_px))
@@ -358,6 +359,15 @@ class NavItem(_HoverButton):
         self.collapsed = on
         self.setToolTip(self.text() if on else '')
         self.update()
+
+    def event(self, e):
+        if e.type() == QEvent.ToolTip and not self.toolTip():
+            if self._elided:
+                QToolTip.showText(e.globalPos(), self.text(), self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(e)
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -406,8 +416,9 @@ class NavItem(_HoverButton):
         p.setPen(c('text3' if self.muted and not hov else 'text' if on or self.special else 'text2'))
         fm = QFontMetrics(self.font())
         avail = self.width() - tx - (40 if self.badge else max(10, tail))
-        p.drawText(QRectF(tx, 0, avail, self.height()), int(Qt.AlignVCenter | Qt.AlignLeft),
-                   fm.elidedText(self.text(), Qt.ElideRight, int(avail)))
+        shown = fm.elidedText(self.text(), Qt.ElideRight, int(avail))
+        self._elided = shown != self.text()
+        p.drawText(QRectF(tx, 0, avail, self.height()), int(Qt.AlignVCenter | Qt.AlignLeft), shown)
 
 
 class SideHeader(_HoverButton):

@@ -16,13 +16,13 @@ from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QImageReader, QPainter, QPainterPath, QPen, QTransform
 from PySide6.QtWidgets import QDialog, QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
-from .config import ROOT
+from .config import DATA
 from .theme import c
 from .ui import Avatar, IconButton
 
 log = logging.getLogger(__name__)
 
-DIR = os.path.join(ROOT, 'avatar')
+DIR = os.path.join(DATA, 'avatar')
 AVATAR = os.path.join(DIR, 'avatar.png')
 CROP = os.path.join(DIR, 'crop.json')
 OUT_SIZE = 512

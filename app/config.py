@@ -1,19 +1,100 @@
 import json
 import os
+import shutil
 import sys
 from dataclasses import asdict, dataclass, field, fields
 
 
 def app_root():
-    """程序所在目录：源码运行时为项目根目录，打包后为 exe 所在目录。"""
+    """程序所在目录：源码运行时为项目根目录，打包后为 exe 所在目录。只放程序文件（ffmpeg、网盘引擎等），不写数据。"""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def data_root():
+    """用户数据目录 %APPDATA%\\VideoDownloader：设置、下载历史、未完成的任务、网站登录信息、头像、日志、内核更新。
+    装在 Program Files 里也能写；卸载 / 升级软件不会丢。B站登录和网盘账号本来就在这里。"""
+    return os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'VideoDownloader')
+
+
 ROOT = app_root()
-CONFIG_PATH = os.path.join(ROOT, 'config.json')
-DEFAULT_DOWNLOAD_DIR = r'D:\Claude\vedio download\Download'
+DATA = data_root()
+CONFIG_PATH = os.path.join(DATA, 'config.json')
+DEFAULT_DOWNLOAD_DIR = os.path.join(os.path.expanduser('~'), 'Downloads', '链接解析下载器')
+
+# 2.1 之前这些数据放在程序文件夹里
+LEGACY_ITEMS = ('config.json', 'history.db', 'history.db-wal', 'history.db-shm', 'tasks.json', 'cookies', 'avatar')
+
+
+def has_legacy_data(folder):
+    return any(os.path.isfile(os.path.join(folder, n)) for n in ('config.json', 'history.db'))
+
+
+PENDING = os.path.join(DATA, 'import_pending')
+
+
+def import_legacy(src, overwrite=True, dest=DATA):
+    """把旧版程序文件夹里的数据复制到数据目录（原文件保留）。返回复制了哪些。"""
+    os.makedirs(dest, exist_ok=True)
+    done = []
+    for name in LEGACY_ITEMS:
+        s, d = os.path.join(src, name), os.path.join(dest, name)
+        if not os.path.exists(s) or (os.path.exists(d) and not overwrite):
+            continue
+        if os.path.isdir(s):
+            shutil.copytree(s, d, dirs_exist_ok=True)
+        else:
+            shutil.copy2(s, d)
+        done.append(name)
+    if 'history.db' in done:
+        # 旧文件夹里没有 -wal / -shm 时，数据目录里残留的旧 -wal 会和新库对不上
+        for ext in ('-wal', '-shm'):
+            if not os.path.exists(os.path.join(src, 'history.db' + ext)):
+                try:
+                    os.remove(os.path.join(dest, 'history.db' + ext))
+                except OSError:
+                    pass
+    return done
+
+
+def _auto_migrate():
+    """第一次用新版：数据目录里还没有设置和历史，就从旧版的程序文件夹搬过来（取最近用过的那份，原文件保留）。"""
+    if has_legacy_data(DATA):
+        return
+    cands = [ROOT]
+    if not getattr(sys, 'frozen', False):
+        cands += [os.path.join(ROOT, 'dist', '链接解析下载器'), os.path.join(ROOT, 'dist', '视频解析下载器')]
+    cands = [c for c in cands if has_legacy_data(c)]
+    if not cands:
+        return
+
+    def mtime(c):
+        return max((os.path.getmtime(os.path.join(c, n)) for n in ('history.db', 'config.json')
+                    if os.path.isfile(os.path.join(c, n))), default=0)
+    src = max(cands, key=mtime)
+    import_legacy(src, overwrite=False)
+    try:
+        with open(os.path.join(DATA, 'migrated_from.txt'), 'w', encoding='utf-8') as f:
+            f.write(src)
+    except OSError:
+        pass
+
+
+def _apply_pending():
+    """设置里「导入旧版数据」放进来的文件：启动时（还没打开数据库）换上。"""
+    if not os.path.isdir(PENDING):
+        return
+    import_legacy(PENDING, overwrite=True)
+    shutil.rmtree(PENDING, ignore_errors=True)
+
+
+try:
+    os.makedirs(DATA, exist_ok=True)
+    _apply_pending()
+    _auto_migrate()
+except OSError:
+    pass
 
 FILENAME_TEMPLATES = {
     'title_quality': ('标题 [清晰度]', '%(title).80s [{quality}].%(ext)s'),

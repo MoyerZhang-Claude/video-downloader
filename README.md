@@ -17,8 +17,12 @@
 
 到 [Releases 发布页](https://github.com/MoyerZhang-Claude/video-downloader/releases/latest) 下载最新版：
 
-- **电脑版**：`LinkDownloader-x.x.x-windows.zip`（1.x 版叫 `VideoDownloader-x.x.x-windows.zip`），**解压整个文件夹**后双击
-  `链接解析下载器.exe`（Windows 10/11）
+- **电脑版（推荐）**：`LinkDownloader-x.x.x-windows-setup.exe` 安装包，双击安装，装好后桌面和开始菜单里都有「链接解析下载器」
+  （Windows 10/11，不需要管理员权限；以后的新版直接装在上面就是升级）
+- **电脑版（免安装）**：`LinkDownloader-x.x.x-windows.zip`，**解压整个文件夹**后双击 `链接解析下载器.exe`
+
+  两种版本的设置、历史记录、登录信息、头像都保存在 `%APPDATA%\VideoDownloader`，卸载、升级、换版本都不会丢。
+  从 2.0 及更早的版本升级：新版第一次打开时会自动搬过来；如果新版装在了别的地方，在 设置 → 关于 →「导入旧版数据…」里选旧版所在的文件夹。
 - **安卓版**：`LinkDownloader-x.x.x-android.apk`（1.x 版叫 `VideoDownloader-x.x.x-android.apk`），手机下载后点击安装，可以直接覆盖升级
 
 程序没有代码签名，Windows 若提示“已保护你的电脑”，点“更多信息 → 仍要运行”。
@@ -48,6 +52,7 @@
 | --- | --- |
 | 双击 `启动.bat` | 源码版，用项目里的 `.venv` 运行，可在设置里在线更新解析内核；第一次运行会先编译网盘引擎（需要 [Go](https://go.dev/dl/)） |
 | `dist\链接解析下载器\链接解析下载器.exe` | 打包版（`打包.bat` 生成），整个 `链接解析下载器` 文件夹可以拷到别的电脑直接用 |
+| `dist\installer\LinkDownloader-x.x.x-windows-setup.exe` | 安装包（`打包.bat` 最后一步用 [Inno Setup 6](https://jrsoftware.org/isinfo.php) 生成，配置在 `installer.iss`） |
 
 ## 使用
 
@@ -152,7 +157,7 @@ B站片段的弹幕会自动对齐到片段时间（弹幕版照常生成）；�
 ## 下载历史 · 完成提醒 · 自动分文件夹
 
 - **下载记录**：历史记录页的「已下载的视频」可搜索、打开文件、重新解析（鼠标移到某一行上会出现操作按钮），侧边栏下方也列出最近下载的视频。解析到下载过的视频时显示绿色「✓ 已下载」标记；
-  再点「下载」会询问「打开已有文件 / 重新下载」，「全部下载」会自动跳过已下载过的。记录保存在程序目录的 `history.db`。
+  再点「下载」会询问「打开已有文件 / 重新下载」，「全部下载」会自动跳过已下载过的。记录保存在数据目录（`%APPDATA%\VideoDownloader`）的 `history.db`。
 - **完成提醒**：窗口不在前台时弹系统通知；全部完成时播放提示音；也可以设置全部完成后自动打开下载文件夹。
 - **自动分文件夹**：设置里可选按平台（`Download\B站\`）或按平台 + 作者（`Download\B站\UP主名\`）。
 - **封面写进视频**：默认开启，资源管理器缩略图和播放器里直接显示封面。
@@ -171,7 +176,7 @@ B站片段的弹幕会自动对齐到片段时间（弹幕版照常生成）；�
 
 - **缩小到托盘**：点窗口的关闭按钮只是缩小到右下角托盘，下载继续；右键托盘图标选「退出」才真正退出（设置里可改回直接退出）。
 - **全局快捷键**（默认 `Ctrl+Alt+D`）：在任何地方复制视频链接后按一下，软件弹出来并开始解析。可在 设置 → 常规 里改。
-- **一键更新解析内核**：设置 → 解析内核 →「检查并更新」。打包版把新内核下载到 `core_update` 文件夹，重启生效，不用重新打包；
+- **一键更新解析内核**：设置 → 解析内核 →「检查并更新」。打包版把新内核下载到数据目录的 `core_update` 文件夹，重启生效，不用重新打包（装了自带更新内核的新版后，旧的下载自动作废）；
   启动时也会自动检查新版本并提示。更新后出问题可以点「恢复为打包时内置的版本」。
 
 ## 设置说明
@@ -188,9 +193,9 @@ B站片段的弹幕会自动对齐到片段时间（弹幕版照常生成）；�
 ## 常见问题
 
 - **某个网站突然解析失败**：网站经常改版，先在 设置 → 解析内核 点 **检查并更新**，重启程序。
-- **YouTube 提示人机验证**：这是 YouTube 对代理 / VPN 节点的风控，换个节点，或把 YouTube 的 cookies.txt 放进 `cookies` 文件夹。
+- **YouTube 提示人机验证**：这是 YouTube 对代理 / VPN 节点的风控，换个节点，或把 YouTube 的 cookies.txt 放进 `cookies` 文件夹（设置 → 网络与登录 里点「打开文件夹」）。
 - **B站下载很慢**：B站给的默认地址常是 PCDN 节点，软件会自动测速换成官方节点；日志里能看到「已选用较快的下载节点」。
-- **出错详情**：鼠标悬停在红色错误上可以看到原始信息；左下角头像菜单 →「查看日志」有完整记录，`logs\app.log` 里也有。
+- **出错详情**：鼠标悬停在红色错误上可以看到原始信息；左下角头像菜单 →「查看日志」有完整记录，数据目录的 `logs\app.log` 里也有。
 
 ## 目录结构
 
@@ -198,16 +203,27 @@ B站片段的弹幕会自动对齐到片段时间（弹幕版照常生成）；�
 app\            程序源码（gui.py 界面，core.py 视频解析/下载核心，extractors.py 抖音/快手解析，pan.py / pan_ui.py 网盘部分）
 pan\            网盘下载核心（Go，原 PanDL）：internal\ 各网盘适配与下载引擎，cmd\pan-engine 给界面用的后台进程，docs\ 设计与交接记录
 编译网盘引擎.bat  编译 pan\bin\pan-engine.exe（需要 Go）
-cookies\        浏览器导出的 cookies.txt（如 TikTok），放进来自动生效（勿外传）
-core_update\    打包版在线更新的解析内核
-history.db      下载历史
-avatar\         头像（圆形 avatar.png + 原图，用于重新调整）
 ffmpeg\         合并音视频、转 MP3 用的 ffmpeg（来自 github.com/yt-dlp/FFmpeg-Builds）
-Download\       默认下载目录
 main.py         程序入口
 build.spec      PyInstaller 打包配置
-config.json     设置（首次修改设置后生成）
+installer.iss   安装包配置（Inno Setup 6）；installer\ChineseSimplified.isl 是安装界面的简体中文（Inno Setup 社区翻译）
 ```
+
+用户数据都在 `%APPDATA%\VideoDownloader`（设置 → 关于 →「数据文件夹」可以直接打开）：
+
+```
+config.json     设置
+history.db      解析记录和下载历史
+tasks.json      没下完的任务（下次打开时恢复）
+cookies\        浏览器导出的 cookies.txt（如 TikTok），放进来自动生效（勿外传）
+avatar\         头像（圆形 avatar.png + 原图，用于重新调整）
+logs\           日志
+core_update\    打包版在线更新的解析内核
+pan\            网盘账号（加密）、网盘下载任务和设置
+bilibili.txt    B站登录信息
+```
+
+默认下载目录是「下载\链接解析下载器」，可以在输入框下方或设置里改。
 
 ## 图标与致谢
 

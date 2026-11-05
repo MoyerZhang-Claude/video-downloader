@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 
 from . import bilibili, collection, danmaku
-from .config import FILENAME_TEMPLATES, ROOT, ffmpeg_dir
+from .config import DATA, FILENAME_TEMPLATES, ROOT, ffmpeg_dir
 
 # yt-dlp 首次导入较慢（冷启动可达数秒），延迟到第一次使用或后台预加载时再导入，让窗口先显示出来
 _yt = None
@@ -78,7 +78,7 @@ _ERROR_HINTS = [
      'YouTube 暂时拦截了当前网络（多半是代理 / VPN 节点被风控）：换一个节点后重试；'
      '经常出现的话，把 YouTube 的 cookies 放进 cookies 文件夹（设置 → 网络与登录 有说明）'),
     (r'Log ?in|login|logged|sign in|cookies|authentication|premium member|会员',
-     '该内容需要登录：把该网站导出的 cookies.txt 放进程序目录的 cookies 文件夹（或已过期，请重新导出）'),
+     '该内容需要登录：把该网站导出的 cookies.txt 放进 cookies 文件夹（设置 → 网络与登录 里打开；或已过期，请重新导出）'),
     (r'Private video', '视频为私密内容，需要有权限的账号 cookies'),
     (r'geo.?restrict|not available in your (?:country|region)|in your country', '地区限制：请尝试更换代理节点'),
     (r'Video unavailable|has been removed|This video is not available|已删除|不存在',
@@ -180,7 +180,7 @@ def base_options(settings, logger):
     return opts
 
 
-COOKIE_DIR = os.path.join(ROOT, 'cookies')
+COOKIE_DIR = os.path.join(DATA, 'cookies')
 _cookie_cache = {}      # 路径 -> (修改时间, cookies 列表)
 
 

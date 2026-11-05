@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (
 
 from . import APP_NAME, APP_VERSION, avatar, bilibili, core_update, hotkey, pan, ui
 from .config import (
-    BROWSERS, CODEC_PREFERENCES, COOKIE_MODES, FILENAME_TEMPLATES, ROOT, SUB_LANG_MODES, SUBFOLDER_MODES,
+    BROWSERS, CODEC_PREFERENCES, COOKIE_MODES, DATA, FILENAME_TEMPLATES, PENDING, ROOT, SUB_LANG_MODES,
+    SUBFOLDER_MODES, has_legacy_data, import_legacy,
 )
 from .ui import Combo, HLine, IconButton, NavItem, Segmented, Toggle
 
@@ -480,7 +481,7 @@ class SettingsPanel(ui.Overlay):
         from . import core
         found = core.cookie_file_names()
         self.cookie_hint.setText('TikTok、Vimeo 等需要登录的网站：用浏览器扩展「Get cookies.txt LOCALLY」在对应网站导出 '
-                                 '.txt，放进程序目录的 cookies 文件夹，自动生效。\n'
+                                 '.txt，放进 cookies 文件夹（点右边的按钮打开），自动生效。\n'
                                  f'当前已生效：{"、".join(found) if found else "（空）"}')
         self.cookie_hint.show()
 
@@ -607,6 +608,12 @@ class SettingsPanel(ui.Overlay):
                            ('各平台 logo', 'B站、X、YouTube、抖音、快手、百度网盘、夸克网盘、123云盘、Mega 的 logo '
                                           '是各自的商标，只用来标识对应的分区')):
             self._row(lay, name, desc)
+        self._section(lay, '数据')
+        box = QHBoxLayout()
+        box.setSpacing(6)
+        box.addWidget(_btn('打开', lambda: os.startfile(DATA)))
+        box.addWidget(_btn('导入旧版数据…', self._import_legacy))
+        self._row(lay, '数据文件夹', f'设置、历史记录、登录信息、头像和日志都在这里，卸载或升级软件不会丢：\n{DATA}', box)
         lay.addSpacing(18)
         h = QHBoxLayout()
         h.setSpacing(8)
@@ -615,6 +622,30 @@ class SettingsPanel(ui.Overlay):
         h.addWidget(_btn('打开程序文件夹', lambda: os.startfile(ROOT)))
         h.addStretch(1)
         lay.addLayout(h)
+
+    def _import_legacy(self):
+        """2.1 之前的版本把数据放在程序文件夹里：选那个文件夹，把设置、历史、登录信息、头像搬过来。"""
+        src = QFileDialog.getExistingDirectory(self.win, '选择旧版「链接解析下载器 / 视频解析下载器」所在的文件夹')
+        if not src:
+            return
+        if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(DATA)):
+            return
+        if not has_legacy_data(src):
+            QMessageBox.information(self.win, '导入旧版数据', '这个文件夹里没有找到旧版的数据（config.json / history.db）。\n'
+                                                       '请选择旧版软件 exe 所在的那个文件夹。')
+            return
+        if QMessageBox.question(self.win, '导入旧版数据',
+                                '用这个文件夹里的设置、历史记录、网站登录信息和头像，替换现在的？\n'
+                                '（旧文件夹里的文件不会动。导入后需要重新打开软件。）') != QMessageBox.Yes:
+            return
+        try:
+            got = import_legacy(src, dest=PENDING)
+        except OSError as e:
+            QMessageBox.warning(self.win, '导入旧版数据', f'导入失败：{e}')
+            return
+        if QMessageBox.question(self.win, '导入旧版数据',
+                                f'已准备好（{len(got)} 项），重新打开软件后生效。现在退出软件吗？') == QMessageBox.Yes:
+            self.win._quit()
 
 
 def ui_scroll(content):

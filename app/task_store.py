@@ -4,9 +4,9 @@ import os
 from dataclasses import asdict
 
 from . import core
-from .config import ROOT
+from .config import DATA
 
-PATH = os.path.join(ROOT, 'tasks.json')
+PATH = os.path.join(DATA, 'tasks.json')
 UNFINISHED = (core.QUEUED, core.RUNNING, core.MERGING, core.PAUSED)
 
 

@@ -1,4 +1,4 @@
-"""历史：数据存在程序目录的 history.db（手机版在 App 私有目录），电脑版和手机版共用这份代码。
+"""历史：数据存在数据目录（%APPDATA%\\VideoDownloader）的 history.db（手机版在 App 私有目录），电脑版和手机版共用这份代码。
 
 两种记录：
 - downloads 下载记录：下载好的视频。用于「已下载过」提示、侧边栏「最近下载」和视频分区。
@@ -15,9 +15,9 @@ import sqlite3
 import threading
 import time
 
-from .config import ROOT
+from .config import DATA
 
-DB_PATH = os.path.join(ROOT, 'history.db')
+DB_PATH = os.path.join(DATA, 'history.db')
 SCHEMA = 3
 VIDEO, PAN = 'video', 'pan'
 

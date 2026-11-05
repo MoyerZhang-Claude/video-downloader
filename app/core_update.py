@@ -1,8 +1,9 @@
 """解析内核（yt-dlp）更新。
 
 源码版：直接 pip install -U。
-打包版：从 PyPI 下载最新的 yt-dlp（纯 Python 的 wheel 包），解压到 exe 旁边的 core_update 文件夹；
+打包版：从 PyPI 下载最新的 yt-dlp（纯 Python 的 wheel 包），解压到数据目录的 core_update 文件夹；
 启动时 install_override() 让 `import yt_dlp` 优先使用这里的新版本，不需要重新打包。
+只有比安装包自带的版本新时才用（装了新版安装包后，旧的更新自动作废）。
 """
 import importlib.machinery
 import json
@@ -12,9 +13,9 @@ import sys
 import urllib.request
 import zipfile
 
-from .config import ROOT
+from .config import DATA, ROOT
 
-OVERRIDE_DIR = os.path.join(ROOT, 'core_update')
+OVERRIDE_DIR = os.path.join(DATA, 'core_update')
 _PACKAGES = ('yt_dlp',)
 
 
@@ -33,13 +34,37 @@ class _OverrideFinder:
         return None
 
 
+def _read_version(path):
+    import re
+    try:
+        with open(path, encoding='utf-8') as f:
+            m = re.search(r"__version__\s*=\s*'([^']+)'", f.read())
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
+def bundled_version():
+    """安装包自带的 yt-dlp 版本（打包时写进 ytdlp_version.txt）。"""
+    try:
+        with open(os.path.join(getattr(sys, '_MEIPASS', ROOT), 'ytdlp_version.txt'), encoding='utf-8') as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
 def install_override():
     """程序最开始调用（在导入 yt_dlp 之前）。"""
-    if os.path.isfile(os.path.join(OVERRIDE_DIR, 'yt_dlp', '__init__.py')):
-        if not any(isinstance(f, _OverrideFinder) for f in sys.meta_path):
-            sys.meta_path.insert(0, _OverrideFinder())
-        return True
-    return False
+    if not os.path.isfile(os.path.join(OVERRIDE_DIR, 'yt_dlp', '__init__.py')):
+        return False
+    ov, bv = _read_version(os.path.join(OVERRIDE_DIR, 'yt_dlp', 'version.py')), bundled_version()
+    if ov and bv and _norm(ov) <= _norm(bv):
+        # 新装的安装包自带的版本已经不旧了：以前下载的更新作废，免得反而用回旧版
+        shutil.rmtree(OVERRIDE_DIR, ignore_errors=True)
+        return False
+    if not any(isinstance(f, _OverrideFinder) for f in sys.meta_path):
+        sys.meta_path.insert(0, _OverrideFinder())
+    return True
 
 
 def _version_from_file():
