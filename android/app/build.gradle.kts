@@ -14,8 +14,8 @@ android {
         applicationId = "com.videodl.app"
         minSdk = 29                 // Android 10+：可以免权限写入「下载」文件夹
         targetSdk = 36
-        versionCode = 10
-        versionName = "2.1.1"
+        versionCode = 11
+        versionName = "2.2.0"
         ndk {
             abiFilters += listOf("arm64-v8a")     // 手机基本都是 arm64，只打这一种，安装包小一半
         }
@@ -88,13 +88,24 @@ val buildPanEngine = tasks.register<Exec>("buildPanEngine") {
 }
 tasks.named("preBuild") { dependsOn(buildPanEngine) }
 
+// 内置的解析内核版本：和电脑版一致；yt-dlp-ejs（YouTube 验证脚本）必须和 yt-dlp 配套，升级时两个一起改
+val ytDlpVersion = "2026.10.21"
+val ytDlpEjsVersion = "0.8.0"
+
 // 解析核心直接复用电脑版源码：构建前把需要的文件同步进来（电脑版改了，手机版重新编译就会带上）
 val syncPythonCore = tasks.register<Sync>("syncPythonCore") {
     from(rootProject.file("../app")) {
         include("__init__.py", "core.py", "extractors.py", "collection.py", "bilibili.py", "danmaku.py", "config.py",
-            "history.py", "fastdl.py")
+            "history.py", "fastdl.py", "core_update.py", "app_update.py")
     }
     into(layout.buildDirectory.dir("pycore/app"))
+    // 内置内核的版本号：App 里在线更新内核时，只有比它新才会使用下载的版本
+    inputs.property("ytDlpVersion", ytDlpVersion)
+    inputs.property("ytDlpEjsVersion", ytDlpEjsVersion)
+    doLast {
+        layout.buildDirectory.file("pycore/app/_bundled.py").get().asFile.writeText(
+            "# 构建时生成，不要手改\nYTDLP = '$ytDlpVersion'\nYTDLP_EJS = '$ytDlpEjsVersion'\n")
+    }
 }
 tasks.named("preBuild") { dependsOn(syncPythonCore) }
 tasks.matching { it.name.endsWith("PythonSources") }.configureEach { dependsOn(syncPythonCore) }
@@ -104,9 +115,8 @@ chaquopy {
         version = "3.13"
         buildPython("D:/AI/Python/Python313/python.exe")
         pip {
-            // 版本和电脑版一致；yt-dlp-ejs（YouTube 验证脚本）必须和 yt-dlp 配套，升级时两个一起改
-            install("yt-dlp==2026.10.21")
-            install("yt-dlp-ejs==0.8.0")
+            install("yt-dlp==$ytDlpVersion")
+            install("yt-dlp-ejs==$ytDlpEjsVersion")
             install("requests")
             install("segno")
         }

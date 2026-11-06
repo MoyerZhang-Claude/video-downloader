@@ -96,6 +96,7 @@ class SettingsPanel(ui.Overlay):
         self._sig = _UpdateSignals()
         self._sig.progress.connect(lambda p: self.update_btn.setText(f'下载中 {p * 100:.0f}%'))
         self._sig.done.connect(self._frozen_update_done)
+        self._sig.app_done.connect(self._app_check_done)
         self._refresh_core_version()
         self.show_page('general')
 
@@ -608,6 +609,11 @@ class SettingsPanel(ui.Overlay):
                            ('各平台 logo', 'B站、X、YouTube、抖音、快手、百度网盘、夸克网盘、123云盘、Mega 的 logo '
                                           '是各自的商标，只用来标识对应的分区')):
             self._row(lay, name, desc)
+        self._section(lay, '软件更新')
+        self.app_check_btn = _btn('检查更新', self._check_app)
+        self.app_update_row = self._row(lay, f'当前版本 {APP_VERSION}', '新版本发布在 GitHub；下载新的安装包装在原来的位置就是升级',
+                                        self.app_check_btn)
+        self._row(lay, '启动时检查软件新版本', '有新版本时弹窗提示，可以选择跳过某个版本', self._toggle('check_app_update'))
         self._section(lay, '数据')
         box = QHBoxLayout()
         box.setSpacing(6)
@@ -622,6 +628,35 @@ class SettingsPanel(ui.Overlay):
         h.addWidget(_btn('打开程序文件夹', lambda: os.startfile(ROOT)))
         h.addStretch(1)
         lay.addLayout(h)
+
+    def _check_app(self):
+        from . import app_update
+        self._app_rel = getattr(self, '_app_rel', None)
+        if self._app_rel:           # 已经查到新版：按钮变成「去下载」
+            QDesktopServices.openUrl(QUrl(self._app_rel['page']))
+            return
+        self.app_check_btn.setEnabled(False)
+        self.app_check_btn.setText('检查中…')
+
+        def work():
+            try:
+                self._sig.app_done.emit(app_update.check('windows'), '')
+            except Exception as e:  # noqa: BLE001
+                self._sig.app_done.emit(None, str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _app_check_done(self, rel, error):
+        self.app_check_btn.setEnabled(True)
+        if error:
+            self.app_check_btn.setText('检查更新')
+            QMessageBox.warning(self, '软件更新', f'检查失败：{error}\n（GitHub 在国内有时连不上，可以稍后再试或开代理）')
+        elif rel:
+            self._app_rel = rel
+            self.app_check_btn.setText('去下载')
+            self.app_update_row.title.setText(f'有新版本 {rel["version"]}（当前 {APP_VERSION}）')
+        else:
+            self.app_check_btn.setText('检查更新')
+            self.app_update_row.title.setText(f'当前版本 {APP_VERSION} · 已经是最新版')
 
     def _import_legacy(self):
         """2.1 之前的版本把数据放在程序文件夹里：选那个文件夹，把设置、历史、登录信息、头像搬过来。"""
@@ -656,3 +691,4 @@ def ui_scroll(content):
 class _UpdateSignals(QObject):
     progress = Signal(float)
     done = Signal(bool, str, str, bool, str)
+    app_done = Signal(object, str)         # 软件新版本检查：(新版本信息或 None, 错误)

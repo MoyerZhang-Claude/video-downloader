@@ -209,6 +209,7 @@ fun App(vm: MainViewModel, activity: ComponentActivity) {
         vm.duplicate?.let { (item, hit) -> DuplicateDialog(item, hit, vm) }
         vm.coverItem?.let { CoverDialog(it, vm) }
         if (vm.askBattery) BatteryDialog(vm)
+        if (vm.showAppUpdate) AppUpdateDialog(vm)
         if (vm.showCookieHelp) CookieHelpDialog(vm)
         if (vm.showCookieManager) CookieManagerDialog(vm)
         vm.renaming?.let { RenameDialog(it, vm) }
@@ -465,7 +466,7 @@ private fun MenuItem(icon: androidx.compose.ui.graphics.vector.ImageVector, text
 
 @Composable
 private fun DownloadOptionRows(vm: MainViewModel) {
-    SettingsRow(LineIcons.Subtitles, "同时下载字幕", "有中文 / 原语言字幕时，和视频同名保存") {
+    SettingsRow(LineIcons.Subtitles, "同时下载字幕", "有中文 / 原语言字幕时，和视频同名保存在「字幕」文件夹") {
         Switch(vm.wantSubs, { vm.toggleSubs(it) })
     }
     SettingsRow(LineIcons.Image, "同时保存封面", "下载视频时把封面原图存到相册") {
@@ -1258,8 +1259,20 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                     }
                 }
             }
+            SettingsGroup("解析内核") { CoreRows(vm) }
             SettingsGroup("关于") {
-                SettingsRow(LineIcons.Info, "版本", "链接解析下载器 ${vm.appVersion}")
+                val rel = vm.appRelease
+                SettingsRow(LineIcons.Info, "版本", "链接解析下载器 ${vm.appVersion}" +
+                        (if (vm.appCheckStatus.isNotEmpty()) " · ${vm.appCheckStatus}" else "") +
+                        (if (rel == null) "\n点击检查新版本" else "\n点击查看新版本"),
+                    subtitleColor = if (rel != null) P.accent else null,
+                    onClick = { if (rel != null) vm.showAppUpdate = true else vm.checkApp() }) {
+                    if (vm.appCheckBusy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = P.text3)
+                    else LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
+                }
+                SettingsRow(null, "启动时检查新版本", "有新版本时弹窗提示，可以选择跳过某个版本") {
+                    Switch(vm.checkAppUpdate, { vm.changeCheckAppUpdate(it) })
+                }
                 SettingsRow(LineIcons.Github, "GitHub 项目主页", "源码、更新说明和电脑版下载", onClick = { openWeb(ctx, GITHUB_URL) }) {
                     LIcon(LineIcons.External, P.text3, 18.dp)
                 }
@@ -1390,6 +1403,75 @@ private fun requestUnrestricted(ctx: Context, vm: MainViewModel) {
     }.recoverCatching {
         ctx.startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
     }.onFailure { vm.toast("请在 设置 → 电池 → 应用耗电管理 里允许本应用后台运行") }
+}
+
+/** 设置 → 解析内核：版本、在线更新、自动更新、恢复内置版本 */
+@Composable
+private fun CoreRows(vm: MainViewModel) {
+    val ctx = LocalContext.current
+    val info = vm.coreInfo
+    val ver = info?.version ?: "加载中"
+    SettingsRow(LineIcons.Refresh, "yt-dlp $ver" + if (info?.active == true) "（已在线更新）" else "",
+        vm.coreStatus.ifEmpty { "网站改版导致解析失败时，更新内核通常就能恢复，不用等新的 App" },
+        subtitleColor = if (vm.coreStatus.startsWith("更新失败")) P.err else null,
+        onClick = if (vm.coreBusy) null else ({ vm.updateCore() })) {
+        if (vm.coreBusy) CircularProgressIndicator(progress = { vm.coreProgress }, modifier = Modifier.size(18.dp),
+            strokeWidth = 2.dp, color = P.accent)
+        else Text("检查更新", fontSize = 13.sp, color = P.accent)
+    }
+    if (vm.corePending) {
+        SettingsRow(null, "重启 App", if (vm.canRestart) (if (info?.downloaded.isNullOrEmpty()) "恢复为内置版本，重启后生效" else "新内核 ${info?.downloaded} 已下载，重启后生效") else "有下载正在进行，下载完再重启",
+            onClick = if (vm.canRestart) ({ restartApp(ctx) }) else null) {
+            Text("立即重启", fontSize = 13.sp, color = if (vm.canRestart) P.accent else P.text3)
+        }
+    }
+    val canReset = info != null && info.downloaded.isNotEmpty()
+    SettingsRow(null, "自动更新内核", "连着 Wi-Fi 时每天检查一次，有新版本自动下载，下次打开 App 生效", divider = canReset) {
+        Switch(vm.autoCoreUpdate, { vm.changeAutoCoreUpdate(it) })
+    }
+    if (canReset) {
+        SettingsRow(null, "恢复为内置版本", "在线更新后反而出问题时使用（内置 ${info?.bundled}）", divider = false,
+            onClick = { vm.resetCore() }) {
+            Text("恢复", fontSize = 13.sp, color = P.text2)
+        }
+    }
+}
+
+/** 重新打开 App（新内核要重启 Python 才能生效） */
+private fun restartApp(ctx: Context) {
+    // 在前台直接启动新的任务再结束进程：系统发现界面所在的进程没了，会新开一个进程把它打开
+    // （安卓 14 起不允许用定时器从后台拉起界面）
+    val component = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)?.component ?: return
+    ctx.startActivity(Intent.makeRestartActivityTask(component))
+    Runtime.getRuntime().exit(0)
+}
+
+@Composable
+private fun AppUpdateDialog(vm: MainViewModel) {
+    val ctx = LocalContext.current
+    val rel = vm.appRelease ?: return
+    // 发布说明里「## 更新内容」那一节
+    val notes = rel.notes.lines().map { it.trim() }
+        .dropWhile { !it.startsWith("## 更新内容") }.drop(1).takeWhile { !it.startsWith("## ") }
+        .filter { it.isNotEmpty() }.joinToString("\n").replace("**", "").take(1200)
+    AlertDialog(onDismissRequest = { vm.showAppUpdate = false }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
+        title = { Text("有新版本 ${rel.version}", color = P.text, fontSize = 18.sp) },
+        text = {
+            Text("当前 ${vm.appVersion}。下载新的安装包直接安装就是升级，设置和历史记录都会保留。" +
+                    if (notes.isNotEmpty()) "\n\n$notes" else "",
+                color = P.text2, fontSize = 14.sp, lineHeight = 21.sp, modifier = Modifier.verticalScroll(rememberScrollState()))
+        },
+        confirmButton = {
+            TextButton(onClick = { vm.showAppUpdate = false; openWeb(ctx, rel.download.ifEmpty { rel.page }) }) {
+                Text("下载", color = P.accent)
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { vm.skipAppVersion() }) { Text("跳过此版本", color = P.text3) }
+                TextButton(onClick = { vm.showAppUpdate = false }) { Text("以后再说", color = P.text2) }
+            }
+        })
 }
 
 @Composable

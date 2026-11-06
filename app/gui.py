@@ -186,6 +186,7 @@ class Bridge(QObject):
     bili_status = Signal(object)
     collection_loaded = Signal(int, object, str)
     core_update = Signal(str, str)
+    app_update = Signal(object)
 
 
 class ResultRow:
@@ -619,6 +620,7 @@ class MainWindow(PanMixin, QMainWindow):
         self.bridge.bili_status.connect(self._on_bili_status)
         self.bridge.collection_loaded.connect(self._on_collection_loaded)
         self.bridge.core_update.connect(self._on_core_update)
+        self.bridge.app_update.connect(self._on_app_update)
 
         self.setWindowTitle(f'{APP_NAME} {APP_VERSION}')
         self.setMinimumSize(980, 640)
@@ -644,6 +646,8 @@ class MainWindow(PanMixin, QMainWindow):
         self._apply_hotkey(silent=True)
         if self.settings.check_core_update:
             QTimer.singleShot(8000, self._check_core_update)
+        if self.settings.check_app_update:
+            QTimer.singleShot(5000, self._check_app_update)
         self._check_bili()
         self._bili_timer = QTimer(self)            # 软件一直开着时，每 4 小时检查一次是否需要续期
         self._bili_timer.setInterval(4 * 3600 * 1000)
@@ -2498,6 +2502,38 @@ class MainWindow(PanMixin, QMainWindow):
 
     def _on_core_update(self, new, cur):
         self.notify(f'解析内核有新版本 {new}（当前 {cur}），可在 设置 → 解析内核 里一键更新')
+
+    def _check_app_update(self):
+        """启动时在后台看一下 GitHub 上有没有软件新版本；失败不打扰。"""
+        from . import app_update
+
+        def work():
+            try:
+                rel = app_update.check('windows')
+            except Exception as e:  # noqa: BLE001
+                self.bridge.log.emit('info', f'检查软件新版本失败：{e}')
+                return
+            if rel and rel['version'] != self.settings.skip_app_version:
+                self.bridge.log.emit('info', f'软件有新版本 {rel["version"]}（当前 {APP_VERSION}）')
+                self.bridge.app_update.emit(rel)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_app_update(self, rel):
+        box = QMessageBox(self)
+        box.setWindowTitle('软件更新')
+        box.setIcon(QMessageBox.Information)
+        box.setText(f'{APP_NAME} 有新版本 {rel["version"]}（当前 {APP_VERSION}）')
+        box.setInformativeText('打开下载页，下载新的安装包装在原来的位置就是升级，设置和历史记录都会保留。')
+        go = box.addButton('去下载', QMessageBox.AcceptRole)
+        box.addButton('以后再说', QMessageBox.RejectRole)
+        skip = box.addButton('跳过这个版本', QMessageBox.DestructiveRole)
+        box.setDefaultButton(go)
+        box.exec()
+        if box.clickedButton() is go:
+            QDesktopServices.openUrl(QUrl(rel['page']))
+        elif box.clickedButton() is skip:
+            self.settings.skip_app_version = rel['version']
+            self._save_settings()
 
     def _tray_message(self, title, text, icon=QSystemTrayIcon.Information):
         if self.tray:

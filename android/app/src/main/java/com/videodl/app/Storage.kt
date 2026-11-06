@@ -13,6 +13,7 @@ import java.io.File
 object Storage {
     const val FOLDER = "链接解析下载器"
     const val DANMAKU_FOLDER = "弹幕数据"
+    const val SUBS_FOLDER = "字幕"          // 主文件夹里只放视频（用户要求）
 
     fun safeName(name: String, limit: Int = 80): String =
         name.replace('|', '｜').replace(':', '：').replace('?', '？')      // 和电脑版一致：换成全角

@@ -22,6 +22,12 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicLong
 
+/** 解析内核（yt-dlp）：version 正在用的版本；downloaded 已下载的新版本（重启 App 后生效）；active 这次用的是在线更新的版本 */
+data class CoreInfo(val version: String, val bundled: String, val downloaded: String, val active: Boolean)
+
+/** GitHub 上的新版本 */
+data class AppRelease(val version: String, val page: String, val download: String, val notes: String)
+
 data class QualityOpt(val label: String, val tag: String, val kind: String, val size: Long, val res: Int, val streams: Int)
 data class HistoryHit(val quality: String, val uri: String, val ts: Double)
 data class CollectionInfo(val kind: String, val title: String, val current: Int, val count: Int)
@@ -116,6 +122,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 正在编辑的头像（不为 null 时显示编辑页） */
     var avatarEdit by mutableStateOf<AvatarEdit?>(null)
 
+    // ------------------------------------------------------------ 解析内核 / 软件更新（状态）
+    var coreInfo by mutableStateOf<CoreInfo?>(null)
+        private set
+    var coreBusy by mutableStateOf(false)
+        private set
+    var coreProgress by mutableStateOf(0f)
+        private set
+    var coreStatus by mutableStateOf("")
+        private set
+    var autoCoreUpdate by mutableStateOf(true)
+        private set
+    var checkAppUpdate by mutableStateOf(true)
+        private set
+    var appRelease by mutableStateOf<AppRelease?>(null)        // 查到的新版本
+        private set
+    var appCheckBusy by mutableStateOf(false)
+        private set
+    var appCheckStatus by mutableStateOf("")
+        private set
+    var showAppUpdate by mutableStateOf(false)                 // 新版本弹窗
+
     private val prefs = app.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private val ids = AtomicLong(1)
     private val parseSlots = Semaphore(3)
@@ -127,6 +154,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         danmakuFps = prefs.getInt("danmaku_fps", 60).let { if (it == 120) 120 else 60 }
         themeMode = prefs.getString("theme", "system") ?: "system"
         nickname = prefs.getString("nickname", "") ?: ""
+        autoCoreUpdate = prefs.getBoolean("auto_core_update", true)
+        checkAppUpdate = prefs.getBoolean("check_app_update", true)
         newGreeting()
         DownloadRepo.attach(app)
         DownloadRepo.wantSubs = wantSubs
@@ -146,7 +175,131 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             refreshBili()
             refreshCookies()
             loadHistory()
+            refreshCore()
+            delay(4000)                      // 不和启动时的其他事情抢网络
+            if (checkAppUpdate) withContext(Dispatchers.Main) { checkApp(manual = false) }
+            if (autoCoreUpdate && onUnmeteredNetwork() &&
+                System.currentTimeMillis() - prefs.getLong("core_checked_at", 0) > 20 * 3600_000L) {
+                withContext(Dispatchers.Main) { updateCore(manual = false) }
+            }
         }
+    }
+
+    // ------------------------------------------------------------ 解析内核在线更新
+    // 网站改版（尤其 YouTube）导致解析失败时，更新 yt-dlp 通常就能恢复，不用等新的 APK。
+    // 新内核下载到 App 私有目录，下次启动 App 时生效（Python 里已经加载的旧版本没法热替换）。
+
+    private fun onUnmeteredNetwork(): Boolean = runCatching {
+        val cm = getApplication<Application>().getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        cm.activeNetwork != null && !cm.isActiveNetworkMetered
+    }.getOrDefault(false)
+
+    private fun coreInfoOf(o: JSONObject) =
+        CoreInfo(o.optString("version"), o.optString("bundled"), o.optString("downloaded"), o.optBoolean("active"))
+
+    fun refreshCore() {
+        viewModelScope.launch(Dispatchers.IO) {
+            awaitReady()
+            val o = runCatching { PyBridge.coreInfo() }.getOrNull() ?: return@launch
+            withContext(Dispatchers.Main) { coreInfo = coreInfoOf(o) }
+        }
+    }
+
+    /** 需要重启 App 才生效：下载了新内核但还在用旧的，或者恢复了内置版本但还在用在线更新的 */
+    val corePending get() = coreInfo?.let {
+        (it.downloaded.isNotEmpty() && it.downloaded != it.version) || (it.downloaded.isEmpty() && it.active)
+    } == true
+
+    fun updateCore(manual: Boolean = true) {
+        if (coreBusy) return
+        coreBusy = true
+        coreProgress = 0f
+        if (manual) coreStatus = "正在检查新版本…"
+        viewModelScope.launch(Dispatchers.IO) {
+            awaitReady()
+            val r = runCatching {
+                PyBridge.coreUpdate { p ->
+                    viewModelScope.launch(Dispatchers.Main) {
+                        coreProgress = p
+                        if (manual) coreStatus = "正在下载新内核 ${(p * 100).toInt()}%"
+                    }
+                }
+            }.getOrElse { JSONObject().put("ok", false).put("error", it.message ?: "未知错误") }
+            if (r.optBoolean("ok")) prefs.edit().putLong("core_checked_at", System.currentTimeMillis()).apply()
+            val info = runCatching { PyBridge.coreInfo() }.getOrNull()
+            withContext(Dispatchers.Main) {
+                coreBusy = false
+                if (info != null) coreInfo = coreInfoOf(info)
+                val ok = r.optBoolean("ok")
+                val pending = ok && r.optBoolean("pending")
+                coreStatus = when {
+                    !ok -> if (manual) "更新失败：" + r.optString("error") else ""       // 自动更新失败不打扰
+                    pending -> "已下载 ${r.optString("new")}，重启 App 后生效"
+                    manual -> "已经是最新版本（${r.optString("new")}）"
+                    else -> ""
+                }
+                if (pending) toast(if (manual) "新内核已下载，重启 App 后生效"
+                                   else "解析内核已自动更新到 ${r.optString("new")}，下次打开 App 时生效")
+                else if (manual && !ok) toast("内核更新失败")
+            }
+        }
+    }
+
+    fun resetCore() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { PyBridge.coreReset() }
+            val info = runCatching { PyBridge.coreInfo() }.getOrNull()
+            withContext(Dispatchers.Main) {
+                if (info != null) coreInfo = coreInfoOf(info)
+                val restart = coreInfo?.active == true
+                coreStatus = if (restart) "已恢复为内置版本，重启 App 后生效" else ""
+                toast("已恢复为内置版本" + if (restart) "，重启 App 后生效" else "")
+            }
+        }
+    }
+
+    fun changeAutoCoreUpdate(on: Boolean) {
+        autoCoreUpdate = on
+        prefs.edit().putBoolean("auto_core_update", on).apply()
+    }
+
+    /** 有下载在进行时不能重启（会中断） */
+    val canRestart get() = DownloadRepo.tasks.none { it.active } && !pan.anyActive
+
+    // ------------------------------------------------------------ 软件新版本（GitHub 发布页）
+
+    fun checkApp(manual: Boolean = true) {
+        if (appCheckBusy) return
+        appCheckBusy = true
+        if (manual) appCheckStatus = "正在检查…"
+        viewModelScope.launch(Dispatchers.IO) {
+            awaitReady()
+            val r = runCatching { PyBridge.appCheck(appVersion) }
+                .getOrElse { JSONObject().put("ok", false).put("error", it.message ?: "未知错误") }
+            withContext(Dispatchers.Main) {
+                appCheckBusy = false
+                val v = r.optString("version")
+                when {
+                    !r.optBoolean("ok") -> if (manual) appCheckStatus = "检查失败：" + r.optString("error")
+                    v.isEmpty() -> if (manual) appCheckStatus = "已经是最新版本"
+                    else -> {
+                        appRelease = AppRelease(v, r.optString("page"), r.optString("download"), r.optString("notes"))
+                        appCheckStatus = "有新版本 $v"
+                        if (manual || prefs.getString("skip_app_version", "") != v) showAppUpdate = true
+                    }
+                }
+            }
+        }
+    }
+
+    fun skipAppVersion() {
+        appRelease?.let { prefs.edit().putString("skip_app_version", it.version).apply() }
+        showAppUpdate = false
+    }
+
+    fun changeCheckAppUpdate(on: Boolean) {
+        checkAppUpdate = on
+        prefs.edit().putBoolean("check_app_update", on).apply()
     }
 
     override fun onCleared() {

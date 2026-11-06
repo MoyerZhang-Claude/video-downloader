@@ -11,6 +11,8 @@ import threading
 import time
 
 _ready = False
+_core_override = False
+_core_override_error = ['']
 _infos = {}          # key -> (info, options)
 _cols = {}           # key -> 所属合集/播放列表（见 app/collection.py）
 _lock = threading.Lock()
@@ -26,6 +28,14 @@ def init(files_dir, cache_dir):
     os.environ['APPDATA'] = files_dir          # bilibili.py 把登录信息存在 %APPDATA%\\VideoDownloader
     os.environ.setdefault('HOME', files_dir)
     os.environ['TMPDIR'] = cache_dir
+    # 在线更新过的解析内核（files/VideoDownloader/core_update）：必须在第一次导入 yt_dlp 之前装上
+    global _core_override
+    try:
+        from app import core_update
+        _core_override = core_update.install_override()
+    except Exception as e:  # noqa: BLE001 - 更新包坏了也要能用内置版本启动
+        _core_override = False
+        _core_override_error[0] = str(e)
     from app import core
     from app.history import History
     _core = core
@@ -840,3 +850,69 @@ def _register_v8_provider():
         return 1000
 
     globals()['_V8_REGISTERED'] = True
+
+
+# ---------------------------------------------------------------- 解析内核在线更新 / 软件新版本
+# 和电脑版共用 app/core_update.py：从 PyPI 下载新版 yt-dlp（和配套的 yt-dlp-ejs），核对 sha256 后
+# 放进 App 私有目录；下次启动 App 时优先使用。网站改版导致解析失败时，不用等新的 APK。
+
+def core_info():
+    from app import core_update as cu
+    return json.dumps({
+        'version': cu.current_version(block=False),
+        'bundled': cu.bundled_version() or '',
+        'downloaded': cu.override_version() or '',      # 已下载的新内核（可能还没生效，要重启 App）
+        'active': bool(_core_override),                  # 这次启动用的是在线更新的版本
+        'error': _core_override_error[0],
+    })
+
+
+def core_latest():
+    """只查 PyPI 上的最新版本号，不下载。"""
+    from app import core_update as cu
+    try:
+        new, _ = cu.latest_version()
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({'ok': False, 'error': _net_error(e)})
+    have = cu.override_version() or cu.current_version(block=False)
+    newer = have not in ('未知', '（加载中）') and cu._norm(new) > cu._norm(have)
+    return json.dumps({'ok': True, 'latest': new, 'newer': newer})
+
+
+def core_update(callback):
+    """下载最新内核。callback.on_progress(0~1)。返回 {ok, old, new, updated, error}。"""
+    from app import core_update as cu
+    have = cu.override_version()        # 已经下载过但还没重启：和它比，不要重复下载
+    try:
+        if have:
+            new, _ = cu.latest_version()
+            if cu._norm(new) <= cu._norm(have):
+                return json.dumps({'ok': True, 'old': cu.current_version(block=False), 'new': have, 'updated': True,
+                                   'pending': not _core_override})
+        old, new, updated = cu.update_frozen(lambda p: callback.on_progress(float(p)))
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({'ok': False, 'error': _net_error(e)})
+    return json.dumps({'ok': True, 'old': old, 'new': new, 'updated': updated, 'pending': updated})
+
+
+def core_reset():
+    from app import core_update as cu
+    cu.reset_frozen()
+    return json.dumps({'ok': True})
+
+
+def app_check(current):
+    """GitHub 上有没有比 current 新的安卓版。返回 {ok, version, page, download, notes}；没有新版时 version 为空。"""
+    from app import app_update
+    try:
+        rel = app_update.check('android', current)
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({'ok': False, 'error': _net_error(e)})
+    return json.dumps({'ok': True, **(rel or {'version': ''})})
+
+
+def _net_error(e):
+    msg = str(e) or type(e).__name__
+    if any(k in msg for k in ('timed out', 'Timeout', 'URLError', 'getaddrinfo', 'Connection', 'SSL', 'Errno')):
+        return '网络连接失败，请检查网络后重试（' + msg[:120] + '）'
+    return msg[:300]

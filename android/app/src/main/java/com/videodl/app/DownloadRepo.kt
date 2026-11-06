@@ -170,14 +170,15 @@ object DownloadRepo {
                     danmakuXml?.let { xml ->
                         runCatching { Storage.saveToDownloads(app, xml, "$savedBase.xml", "text/xml", Storage.DANMAKU_FOLDER) }
                     }
-                    // 字幕和视频同名放在一起（如 标题 [1080P].zh-CN.srt），播放器会自动加载
+                    // 字幕放进「字幕」文件夹，文件名和视频同名（如 标题 [1080P].zh-CN.srt）：主文件夹里只有视频
                     val subs = r.optJSONArray("subs")
                     var subCount = 0
                     for (i in 0 until (subs?.length() ?: 0)) {
                         val sub = subs!!.getJSONObject(i)
                         runCatching {
                             Storage.saveToDownloads(app, File(sub.getString("path")),
-                                "$savedBase.${sub.getString("lang")}.${sub.optString("ext", "srt")}", "application/x-subrip")
+                                "$savedBase.${sub.getString("lang")}.${sub.optString("ext", "srt")}", "application/x-subrip",
+                                Storage.SUBS_FOLDER)
                             subCount++
                         }
                     }

@@ -87,10 +87,23 @@ object PyBridge {
     fun biliStatus(): JSONObject = JSONObject(module.callAttr("bili_status").toString())
     fun biliLogout(): JSONObject = JSONObject(module.callAttr("bili_logout").toString())
 
+    // 解析内核在线更新 / 软件新版本（android_bridge.py 末尾）
+    fun coreInfo(): JSONObject = JSONObject(module.callAttr("core_info").toString())
+    fun coreUpdate(onProgress: (Float) -> Unit): JSONObject =
+        JSONObject(module.callAttr("core_update", ProgressCallback(onProgress)).toString())
+    fun coreReset(): JSONObject = JSONObject(module.callAttr("core_reset").toString())
+    fun appCheck(current: String): JSONObject = JSONObject(module.callAttr("app_check", current).toString())
+
     fun extractUrls(text: String): List<String> {
         val arr = JSONArray(module.callAttr("extract_urls", text).toString())
         return List(arr.length()) { arr.getString(it) }
     }
+}
+
+/** 内核更新的下载进度（0~1）。 */
+@Suppress("FunctionName")
+class ProgressCallback(private val onProgress: (Float) -> Unit) {
+    fun on_progress(p: Double) = onProgress(p.toFloat())
 }
 
 /** Python 下载时回调：汇报进度、询问是否取消（方法名要和 Python 端一致）。 */

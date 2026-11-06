@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 判断是不是 Wi-Fi：只在不按流量计费的网络下自动更新解析内核 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- 后台下载：前台服务 + 通知栏进度 + 锁屏时保持 CPU 运行 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />

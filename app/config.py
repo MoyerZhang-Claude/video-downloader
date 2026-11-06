@@ -155,6 +155,8 @@ class Settings:
     tray_hint_shown: bool = False
     hotkey: str = 'Ctrl+Alt+D'    # 全局快捷键：解析剪贴板里的链接
     check_core_update: bool = True
+    check_app_update: bool = True   # 启动时检查软件新版本（GitHub 发布页）
+    skip_app_version: str = ''      # 用户选了「跳过这个版本」的版本号
     save_subs: bool = True        # 字幕（B站 CC / YouTube 等）
     sub_langs: str = 'zh_orig'
     theme: str = 'system'         # 外观：system 跟随系统 / light / dark
