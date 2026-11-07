@@ -118,7 +118,11 @@ object DownloadRepo {
                     var ext = r.optString("ext", "mp4")
                     var output = if (files.size == 2) {
                         setStatus(task, "merging")
-                        File(work, "merged.mp4").also { Muxer.merge(files[0], files[1], it); ext = "mp4" }
+                        val webm = ext == "webm"          // YouTube 2K/4K 的 VP9 只能合并成 WebM
+                        File(work, if (webm) "merged.webm" else "merged.mp4").also {
+                            Muxer.merge(files[0], files[1], it, webm)
+                            ext = if (webm) "webm" else "mp4"
+                        }
                     } else files[0]
                     // HLS 下载得到的往往是 MPEG-TS（哪怕名字叫 .mp4）：重新封装成标准 MP4，相册缩略图、拖动进度都正常
                     if (files.size == 1 && Muxer.isMpegTs(output)) {

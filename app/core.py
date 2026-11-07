@@ -288,6 +288,7 @@ _CODEC_LABEL = {'h264': 'H.264', 'h265': 'H.265', 'vp9': 'VP9', 'vp8': 'VP8', 'a
 _CODEC_RANK = {
     'compat': {'h264': 0, None: 0, 'vp9': 1, 'vp8': 2, 'h265': 2, 'av1': 3},
     'quality': {'av1': 0, 'vp9': 1, 'h265': 1, 'h264': 2, None: 2, 'vp8': 3},
+    'best': {},          # 画质优先：不看编码，同一清晰度选码率最高的
 }
 
 
@@ -341,6 +342,36 @@ def _special_audio(f):
     return (f.get('acodec') or '').lower().startswith(('flac', 'alac', 'ec-3', 'ac-3', 'eac3'))
 
 
+def _audio_name(f, info=None):
+    """音轨的编码名：AAC / Opus / FLAC 无损 / 杜比全景声 …"""
+    a = (f.get('acodec') or '').lower()
+    if a.startswith('flac'):
+        return 'FLAC 无损'
+    if a.startswith('alac'):
+        return 'ALAC 无损'
+    if a.startswith(('ec-3', 'eac3')):
+        # B站的杜比音轨是杜比全景声（Dolby Atmos，E-AC-3 JOC）
+        bili = ((info or {}).get('extractor_key') or '').startswith('BiliBili')
+        return '杜比全景声' if bili or 'atmos' in (f.get('format_note') or '').lower() else '杜比数字+'
+    if a.startswith('ac-3'):
+        return '杜比数字'
+    for prefix, name in (('mp4a', 'AAC'), ('aac', 'AAC'), ('opus', 'Opus'), ('vorbis', 'Vorbis'), ('mp3', 'MP3')):
+        if a.startswith(prefix):
+            return name
+    return (f.get('ext') or '音频').upper()
+
+
+def _rate(f):
+    """码率 kbps（总码率，没有就用视频 / 音频码率）"""
+    return f.get('tbr') or f.get('vbr') or f.get('abr') or 0
+
+
+def fmt_rate(kbps):
+    if not kbps:
+        return ''
+    return f'{kbps / 1000:.1f} Mbps' if kbps >= 1000 else f'{kbps:.0f} kbps'
+
+
 def _proto_rank(f):
     p = f.get('protocol') or ''
     if p in ('https', 'http'):
@@ -352,7 +383,8 @@ def _proto_rank(f):
     return 3
 
 
-def build_options(info, codec_pref='compat'):
+def build_options(info, codec_pref='compat', merge_audio=None):
+    """merge_audio：限制哪些音轨可以和视频合并（手机版：MP4 只能配 AAC）；所有音轨仍会列在「仅音频」里。"""
     formats = info.get('formats') or ([info] if info.get('url') else [])
     duration = info.get('duration')
     rank = _CODEC_RANK.get(codec_pref, _CODEC_RANK['compat'])
@@ -368,6 +400,8 @@ def build_options(info, codec_pref='compat'):
     # 无损 / 杜比音轨只作为单独的音频选项，合并视频时用兼容性好的 AAC/Opus
     special_audios = [f for f in audios if _special_audio(f)]
     merge_audios = [f for f in audios if not _special_audio(f)] or audios
+    if merge_audio:
+        merge_audios = [f for f in merge_audios if merge_audio(f)]
 
     def audio_key(f):
         is_aac = (f.get('acodec') or '').startswith('mp4a') or f.get('ext') == 'm4a'
@@ -407,36 +441,55 @@ def build_options(info, codec_pref='compat'):
             tag = f['format']
         fid = f.get('format_id')
         streams = [(fid, _size(f, duration))]
+        rate = _rate(f)
         if _has_audio(f) or not best_audio:
             selector = fid
         else:
             selector = f'{fid}+{best_audio["format_id"]}'
             streams.append((best_audio['format_id'], _size(best_audio, duration)))
+            rate = rate + _rate(best_audio) if rate else 0
         total = sum(s for _, s in streams)
+        if not rate and total and duration:
+            rate = total * 8 / duration / 1000
         parts = [tag]
         if fam:
             parts.append(_CODEC_LABEL.get(fam, fam))
+        if rate:
+            parts.append(fmt_rate(rate))
         parts.append(fmt_size(total) if total else '大小未知')
         if not _has_audio(f) and not best_audio:
             parts.append('无音轨')
         options.append(QualityOption(label=' · '.join(parts), tag=tag.replace(' ', ''), format=selector,
                                      kind='video', res=res, size=total, streams=streams))
 
-    if best_audio:
-        a = best_audio
-        sz = _size(a, duration)
-        abr = a.get('abr') or a.get('tbr')
-        abr_txt = f' {abr:.0f}kbps' if abr else ''
-        options.append(QualityOption(label=f'仅音频 · {a.get("ext", "").upper()}{abr_txt} · {fmt_size(sz)}',
-                                     tag='音频', format=a['format_id'], kind='audio', size=sz,
-                                     streams=[(a['format_id'], sz)]))
+    # 仅音频：每条音轨都列出来（编码 · 码率 · 大小），无损 / 杜比放最前；同编码同码率的只留一个
+    def audio_label(a, sz, ext=None):
+        rate = fmt_rate(a.get('abr') or a.get('tbr'))
+        ext = a.get('ext', '').upper() if ext is None else ext
+        return ' · '.join(x for x in ('仅音频', _audio_name(a, info), rate, ext, fmt_size(sz)) if x)
+
     for a in sorted(special_audios, key=lambda f: -(f.get('tbr') or 0)):
         sz = _size(a, duration)
         lossless = (a.get('acodec') or '').lower().startswith(('flac', 'alac'))
-        name, tag = ('FLAC 无损', 'FLAC') if lossless else ('杜比音效', '杜比音效')
-        options.append(QualityOption(label=f'仅音频 · {name} · {fmt_size(sz)}', tag=tag, format=a['format_id'],
-                                     kind='audio', size=sz, streams=[(a['format_id'], sz)],
+        tag = 'FLAC' if lossless else _audio_name(a, info)
+        # 无损音轨下载后转存成 .flac（电脑版用 ffmpeg，不重新编码）
+        options.append(QualityOption(label=audio_label(a, sz, 'FLAC' if lossless else None), tag=tag,
+                                     format=a['format_id'], kind='audio', size=sz, streams=[(a['format_id'], sz)],
                                      convert='flac' if lossless else ''))
+    # 合并视频用的那条（best_audio）排第一；可以和视频合并的音轨受 merge_audio 限制，单独下载不受限
+    seen = set()
+    plain = [a for a in audios if not _special_audio(f=a)]
+    plain.sort(key=lambda f: (f is not best_audio, audio_key(f)))
+    for a in plain:
+        k = (_audio_name(a, info), round((a.get('abr') or a.get('tbr') or 0) / 8))
+        if k in seen:
+            continue
+        seen.add(k)
+        sz = _size(a, duration)
+        abr = a.get('abr') or a.get('tbr')
+        tag = '音频' if a is best_audio else f'{_audio_name(a, info)}{abr:.0f}k' if abr else _audio_name(a, info)
+        options.append(QualityOption(label=audio_label(a, sz), tag=tag, format=a['format_id'], kind='audio', size=sz,
+                                     streams=[(a['format_id'], sz)]))
     if formats:
         src = best_audio or (min(groups.values(), key=lambda g: _size(g[1], duration))[1] if groups else None)
         if src is not None:

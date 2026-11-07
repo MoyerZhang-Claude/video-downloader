@@ -106,6 +106,7 @@ FILENAME_TEMPLATES = {
 CODEC_PREFERENCES = {
     'compat': '兼容优先（H.264，任何播放器都能放）',
     'quality': '体积优先（AV1/VP9/H.265，同画质文件更小）',
+    'best': '画质优先（同一清晰度选码率最高的，文件最大）',
 }
 
 COOKIE_MODES = {

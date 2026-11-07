@@ -466,6 +466,13 @@ private fun MenuItem(icon: androidx.compose.ui.graphics.vector.ImageVector, text
 
 @Composable
 private fun DownloadOptionRows(vm: MainViewModel) {
+    SettingsRow(LineIcons.Monitor, "编码偏好", when (vm.codecPref) {
+            "quality" -> "体积优先：同一清晰度优先选 AV1 / H.265，同画质文件更小，老设备可能放不了"
+            "best" -> "画质优先：同一清晰度选码率最高的，文件最大"
+            else -> "兼容优先：同一清晰度优先选 H.264，任何播放器都能放"
+        }) {
+        Choice(listOf("compat" to "兼容", "quality" to "体积", "best" to "画质"), vm.codecPref) { vm.chooseCodecPref(it) }
+    }
     SettingsRow(LineIcons.Subtitles, "同时下载字幕", "有中文 / 原语言字幕时，和视频同名保存在「字幕」文件夹") {
         Switch(vm.wantSubs, { vm.toggleSubs(it) })
     }
@@ -486,13 +493,18 @@ private fun DownloadOptionRows(vm: MainViewModel) {
 
 /** 两个选项的小胶囊：60 / 120 帧 */
 @Composable
-private fun FpsChoice(value: Int, onChange: (Int) -> Unit) {
+private fun FpsChoice(value: Int, onChange: (Int) -> Unit) =
+    Choice(listOf(60 to "60 帧", 120 to "120 帧"), value, onChange)
+
+/** 几个选项的小胶囊（[options]：值 to 显示的文字） */
+@Composable
+private fun <T> Choice(options: List<Pair<T, String>>, value: T, onChange: (T) -> Unit) {
     Row(Modifier.clip(RoundedCornerShape(10.dp)).background(P.subtle).padding(3.dp)) {
-        for (fps in listOf(60, 120)) {
-            val on = value == fps
+        for ((v, label) in options) {
+            val on = value == v
             Box(Modifier.clip(RoundedCornerShape(8.dp)).background(if (on) P.surface else Color.Transparent)
-                .clickable { if (!on) onChange(fps) }.padding(horizontal = 12.dp, vertical = 6.dp)) {
-                Text("$fps 帧", fontSize = 13.sp, color = if (on) P.text else P.text3,
+                .clickable { if (!on) onChange(v) }.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                Text(label, fontSize = 13.sp, color = if (on) P.text else P.text3,
                     fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
             }
         }
@@ -623,7 +635,9 @@ private fun QualitySelector(item: VideoItem) {
                 overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             LIcon(LineIcons.ChevronDown, P.text3, 18.dp)
         }
-        DropdownMenu(open, { open = false }, containerColor = P.surface, shape = RoundedCornerShape(14.dp)) {
+        // 选项多时（很多音轨）限制高度，其余滚动
+        DropdownMenu(open, { open = false }, containerColor = P.surface, shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.heightIn(max = 520.dp)) {
             item.options.forEachIndexed { i, o ->
                 DropdownMenuItem(text = { Text(o.label, fontSize = 14.sp, color = P.text) },
                     trailingIcon = { if (i == item.selected) LIcon(LineIcons.Check, P.accent, 18.dp) },

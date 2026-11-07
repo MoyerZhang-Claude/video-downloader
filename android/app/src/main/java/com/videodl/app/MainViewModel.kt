@@ -142,6 +142,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var appCheckStatus by mutableStateOf("")
         private set
     var showAppUpdate by mutableStateOf(false)                 // 新版本弹窗
+    var codecPref by mutableStateOf("compat")                  // 编码偏好：compat 兼容优先 / quality 体积优先
+        private set
 
     private val prefs = app.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private val ids = AtomicLong(1)
@@ -154,6 +156,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         danmakuFps = prefs.getInt("danmaku_fps", 60).let { if (it == 120) 120 else 60 }
         themeMode = prefs.getString("theme", "system") ?: "system"
         nickname = prefs.getString("nickname", "") ?: ""
+        codecPref = prefs.getString("codec_pref", "compat").let { if (it == "quality" || it == "best") it else "compat" }
         autoCoreUpdate = prefs.getBoolean("auto_core_update", true)
         checkAppUpdate = prefs.getBoolean("check_app_update", true)
         newGreeting()
@@ -171,6 +174,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch(Dispatchers.IO) {
             PyBridge.init(getApplication())      // 第一次启动要解压 Python 运行环境，稍慢
+            runCatching { PyBridge.setCodecPref(codecPref) }
             withContext(Dispatchers.Main) { ready = true }
             refreshBili()
             refreshCookies()
@@ -384,6 +388,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         wantCover = on
         DownloadRepo.wantCover = on
         prefs.edit().putBoolean("want_cover", on).apply()
+    }
+
+    fun chooseCodecPref(pref: String) {
+        codecPref = pref
+        prefs.edit().putString("codec_pref", pref).apply()
+        viewModelScope.launch(Dispatchers.IO) { awaitReady(); runCatching { PyBridge.setCodecPref(pref) } }
+        toast(when (pref) {
+            "quality" -> "体积优先：之后解析的视频优先选 AV1 / H.265，同画质文件更小"
+            "best" -> "画质优先：之后解析的视频同一清晰度选码率最高的"
+            else -> "兼容优先：之后解析的视频优先选 H.264，任何播放器都能放"
+        })
     }
 
     fun chooseDanmakuFps(fps: Int) {

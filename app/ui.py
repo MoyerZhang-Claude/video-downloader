@@ -713,6 +713,7 @@ class Combo(QComboBox):
         super().__init__(parent)
         self.setItemDelegate(QStyledItemDelegate(self))
         self.setCursor(Qt.PointingHandCursor)
+        self.setMaxVisibleItems(12)      # 选项多（如很多音轨）时最多显示 12 行，其余滚动
 
 
 # ---------------------------------------------------------------- 输入框

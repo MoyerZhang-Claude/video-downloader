@@ -15,7 +15,9 @@ import java.nio.ByteBuffer
 object Muxer {
     private class Source(val extractor: MediaExtractor, val track: Int, var done: Boolean = false)
 
-    fun merge(video: File, audio: File, out: File) = mux(listOf(video to "video/", audio to "audio/"), out)
+    /** webm = true：VP9 + Opus 合并成 WebM（MP4 装不了 VP9） */
+    fun merge(video: File, audio: File, out: File, webm: Boolean = false) =
+        mux(listOf(video to "video/", audio to "audio/"), out, webm = webm)
 
     /** 把一个文件里的视频轨和音频轨原样装进 MP4 */
     fun remux(input: File, out: File) = mux(listOf(input to "video/", input to "audio/"), out, audioOptional = true)
@@ -28,8 +30,9 @@ object Muxer {
         }
     }.getOrDefault(false)
 
-    private fun mux(inputs: List<Pair<File, String>>, out: File, audioOptional: Boolean = false) {
-        val muxer = MediaMuxer(out.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+    private fun mux(inputs: List<Pair<File, String>>, out: File, audioOptional: Boolean = false, webm: Boolean = false) {
+        val muxer = MediaMuxer(out.path, if (webm) MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM
+                                         else MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         val sources = mutableListOf<Source>()
         var maxSize = 2 * 1024 * 1024
         try {

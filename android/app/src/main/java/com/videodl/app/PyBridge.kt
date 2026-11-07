@@ -16,6 +16,8 @@ object PyBridge {
             if (!initialized) {
                 module.callAttr("init", ctx.filesDir.absolutePath, ctx.cacheDir.absolutePath)
                 JsEngine.attach(ctx)
+                MediaCaps.attach(ctx)
+                module.callAttr("set_media_caps", MediaCaps)    // 这台手机能合并 / 播放哪些编码（YouTube 2K、4K）
                 module.callAttr("set_js_engine", JsEngine)      // YouTube 的 JS 验证交给系统 V8
                 initialized = true
             }
@@ -93,6 +95,8 @@ object PyBridge {
         JSONObject(module.callAttr("core_update", ProgressCallback(onProgress)).toString())
     fun coreReset(): JSONObject = JSONObject(module.callAttr("core_reset").toString())
     fun appCheck(current: String): JSONObject = JSONObject(module.callAttr("app_check", current).toString())
+
+    fun setCodecPref(pref: String) { module.callAttr("set_codec_pref", pref) }
 
     fun extractUrls(text: String): List<String> {
         val arr = JSONArray(module.callAttr("extract_urls", text).toString())

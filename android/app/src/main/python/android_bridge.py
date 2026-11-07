@@ -77,8 +77,119 @@ def _settings():
     return s
 
 
-# MediaMuxer 能装进 MP4 的编码（VP9 只能进 WebM，暂不支持）
-_MUX_VIDEO = {'h264', 'h265', None}
+# ---------------------------------------------------------------- 手机能合并哪些格式
+# 分开下载的视频流和音频流由系统 MediaMuxer 合并（没有 ffmpeg）：
+#   MP4：H.264 / H.265 + AAC；AV1 + AAC（安卓 14 起）
+#   WebM：VP9 + Opus
+# YouTube 的 2K / 4K 只有 AV1 和 VP9：能不能用、装进哪种文件，由 Kotlin 端 MediaCaps 按这台手机实测
+# （能不能合并 + 有没有能解这个分辨率帧率的解码器）。
+_MUX_VIDEO = {'h264', 'h265', None, 'av1', 'vp9'}
+_media_caps = None
+_codec_pref = 'compat'               # 编码偏好：compat 兼容优先 / quality 体积优先 / best 画质优先，和电脑版同名
+_CONTAINER = '_vd_container'         # 写在格式信息里：这条视频流合并成 mp4 还是 webm
+
+
+def set_media_caps(caps):
+    """App 启动时由 Kotlin 传入 MediaCaps（container_for(codec, w, h, fps) -> 'mp4' / 'webm' / ''）。"""
+    global _media_caps
+    _media_caps = caps
+
+
+def set_codec_pref(pref):
+    """设置里改了编码偏好（之后新解析的视频生效）。"""
+    global _codec_pref
+    _codec_pref = pref if pref in ('quality', 'best') else 'compat'
+
+
+def _only_audio(formats, ok):
+    """合并用的音频只留 ok() 认可的（MP4 只能装 AAC、WebM 只能装 Opus）；一条都没有就不动。"""
+    audios = [f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') not in (None, 'none')]
+    if not any(ok(a) for a in audios):
+        return formats
+    return [f for f in formats if not (f in audios and not ok(f))]
+
+
+def _is_aac(a):
+    return (a.get('acodec') or '').lower().startswith('mp4a') or a.get('ext') == 'm4a'
+
+
+def _is_opus(a):
+    return (a.get('acodec') or '').lower().startswith('opus')
+
+
+def _phone_formats(info):
+    """去掉这台手机合并不了 / 播放不了的 AV1、VP9 视频流，其余标上合并成哪种文件。
+    VP9 只能合并成 WebM（配 Opus 音频），在 _phone_options 里另外列出。"""
+    core = _core
+    formats = info.get('formats') or []
+    has_opus = any(_is_opus(f) and f.get('vcodec') == 'none' for f in formats)
+    cache, keep = {}, []
+    for f in formats:
+        fam = core.codec_family(f.get('vcodec'))
+        if fam in ('av1', 'vp9') and core._is_video(f) and not core._has_audio(f):
+            w, h, fps = int(f.get('width') or 0), int(f.get('height') or 0), float(f.get('fps') or 0)
+            k = (fam, w, h, round(fps))
+            if k not in cache:
+                try:
+                    cache[k] = str(_media_caps.container_for(fam, w, h, fps)) if _media_caps else ''
+                except Exception:  # noqa: BLE001
+                    cache[k] = ''
+            c = cache[k]
+            if not c or (c == 'webm' and not has_opus):
+                continue
+            f[_CONTAINER] = c
+        keep.append(f)
+
+    return {**info, 'formats': keep}
+
+
+def _phone_options(info):
+    """手机版的清晰度列表：VP9（WebM）的选项把音频换成 Opus，其余和电脑版一样配 AAC。"""
+    core = _core
+    info = _phone_formats(info)
+    formats = info.get('formats') or []
+    # 主列表：MP4 能装的编码（H.264 / H.265 / AV1）
+    main = [f for f in formats if f.get(_CONTAINER) != 'webm']
+    # MP4 只能装 AAC：合并视频只用 AAC 音轨；没有 AAC 时不限制（如单文件视频的网站）
+    aac_only = _is_aac if any(_is_aac(f) and f.get('vcodec') == 'none' for f in formats) else None
+    options = core.build_options({**info, 'formats': main}, _codec_pref, merge_audio=aac_only)
+    # VP9（WebM）另列：2K / 4K 和 AV1 并列给用户选（VP9 码率更高、文件更大）；
+    # 1080p 及以下已有 H.264，只在这一档没有别的选择时才列 VP9
+    vp9_formats = _only_audio([f for f in formats if f.get(_CONTAINER) == 'webm' or f.get('vcodec') == 'none'], _is_opus)
+    vp9 = [o for o in core.build_options({**info, 'formats': vp9_formats}, _codec_pref)
+           if o.kind == 'video' and len(o.streams) == 2]
+    for o in vp9:
+        same = [i for i, x in enumerate(options) if x.kind == 'video' and x.tag == o.tag]
+        if same:
+            if o.res >= 1440:
+                options.insert(same[-1] + 1, o)
+        else:
+            pos = next((i for i, x in enumerate(options) if x.kind != 'video' or (x.res or 0) < o.res), len(options))
+            options.insert(pos, o)
+    fmts = {f.get('format_id'): f for f in formats}
+    opus = [f for f in info.get('formats') or [] if _is_opus(f) and f.get('vcodec') == 'none']
+    # 和电脑版选音频的规则一致：原声音轨优先，不要动态范围压缩（drc）的，码率高的优先
+    best_opus = max(opus, key=lambda f: ((f.get('language_preference') or 0) > -1,
+                                         'drc' not in (f.get('format_id') or ''),
+                                         f.get('abr') or f.get('tbr') or 0)) if opus else None
+    for o in options:
+        v = fmts.get(o.streams[0][0]) if o.streams else None
+        if not v or v.get(_CONTAINER) != 'webm' or len(o.streams) != 2 or not best_opus:
+            continue
+        a_size = core._size(best_opus, info.get('duration'))
+        o.streams = [o.streams[0], (best_opus['format_id'], a_size)]
+        o.format = f'{v["format_id"]}+{best_opus["format_id"]}'
+        o.size = sum(s for _, s in o.streams)
+        parts = o.label.split(' · ')
+        rate = (v.get('tbr') or v.get('vbr') or 0) + (best_opus.get('abr') or best_opus.get('tbr') or 0)
+        o.label = ' · '.join(parts[:2] + ([core.fmt_rate(rate)] if rate else [])
+                             + [core.fmt_size(o.size) if o.size else '大小未知', 'WebM'])
+    # 无损音轨：手机上没有 ffmpeg 转存 .flac，原样保存（MP4 容器里的 FLAC，存成 .m4a，播放器都能放）
+    for o in options:
+        if o.convert == 'flac':
+            o.convert = ''
+            o.label = o.label.replace(' · FLAC · ', ' · M4A · ')
+    return info, [o for o in options if _usable(info, o)]
 
 
 def _usable(info, opt):
@@ -90,8 +201,16 @@ def _usable(info, opt):
     fmts = {f.get('format_id'): f for f in info.get('formats') or []}
     v = fmts.get(opt.streams[0][0]) or {}
     a = fmts.get(opt.streams[1][0]) or {}
-    acodec = (a.get('acodec') or '').lower()
-    return _core.codec_family(v.get('vcodec')) in _MUX_VIDEO and (acodec.startswith('mp4a') or a.get('ext') == 'm4a')
+    if _core.codec_family(v.get('vcodec')) not in _MUX_VIDEO:
+        return False
+    return _is_opus(a) if v.get(_CONTAINER) == 'webm' else _is_aac(a)
+
+
+def _merged_ext(info, opt):
+    """两条流合并后的文件类型"""
+    fmts = {f.get('format_id'): f for f in info.get('formats') or []}
+    v = fmts.get(opt.streams[0][0]) or {}
+    return 'webm' if v.get(_CONTAINER) == 'webm' else 'mp4'
 
 
 def _col_summary(col):
@@ -129,7 +248,7 @@ def parse(url, probe=True):
             return json.dumps({'error': '播放列表是空的'}, ensure_ascii=False)
         return json.dumps({'playlist': col}, ensure_ascii=False)
     info = core.yt().YoutubeDL.sanitize_info(raw_info, True)
-    options = [o for o in core.build_options(info, s.codec_preference) if _usable(info, o)]
+    info, options = _phone_options(info)
     if not options:
         return json.dumps({'error': '这个视频的格式手机版暂时处理不了'}, ensure_ascii=False)
     key = f'{info.get("extractor_key")}:{info.get("id")}'
@@ -224,7 +343,7 @@ def download(key, index, out_dir, callback, want_subs=True):
             first_error = first_error or e
             continue
         subs = _download_subs(info, out_dir, callback) if want_subs and cand.kind == 'video' else []
-        ext = os.path.splitext(files[0])[1].lstrip('.') if len(files) == 1 else 'mp4'
+        ext = os.path.splitext(files[0])[1].lstrip('.') if len(files) == 1 else _merged_ext(info, cand)
         return json.dumps({'files': files, 'subs': subs, 'title': info.get('title') or info.get('id'),
                            'tag': cand.tag, 'index': options.index(cand),
                            'fallback': opt.tag if cand is not opt else '',
