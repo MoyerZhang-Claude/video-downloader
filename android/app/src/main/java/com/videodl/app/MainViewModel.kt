@@ -107,7 +107,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 每次提示 +1（同一句话连着出现也能再弹一次） */
     var toastSeq by mutableIntStateOf(0)
         private set
-    /** 外观：system 跟随系统 / light / dark */
+    /** 外观：system / light / dark (Claude 深灰) / oled (纯黑) */
     var themeMode by mutableStateOf("system")
         private set
     /** 首页问候语里的称呼 */
@@ -154,7 +154,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         wantCover = prefs.getBoolean("want_cover", false)
         wantDanmaku = prefs.getBoolean("want_danmaku", false)
         danmakuFps = prefs.getInt("danmaku_fps", 60).let { if (it == 120) 120 else 60 }
-        themeMode = prefs.getString("theme", "system") ?: "system"
+        themeMode = normalizeThemeMode(prefs.getString("theme", "system"))
         nickname = prefs.getString("nickname", "") ?: ""
         codecPref = prefs.getString("codec_pref", "compat").let { if (it == "quality" || it == "best") it else "compat" }
         autoCoreUpdate = prefs.getBoolean("auto_core_update", true)
@@ -317,8 +317,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------ 外观 / 问候语
 
     fun changeTheme(mode: String) {
-        themeMode = mode
-        prefs.edit().putString("theme", mode).apply()
+        val safeMode = normalizeThemeMode(mode)
+        themeMode = safeMode
+        prefs.edit().putString("theme", safeMode).apply()
     }
 
     fun changeNickname(name: String) {

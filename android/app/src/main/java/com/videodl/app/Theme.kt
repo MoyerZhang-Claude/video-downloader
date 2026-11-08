@@ -15,7 +15,7 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 
 /**
- * 向 Claude 应用看齐的暖色调主题，颜色令牌和电脑版 app/theme.py 一致（见 界面设计/设计说明.md）。
+ * Android 主题：Claude 风格深灰 + 可选 OLED 纯黑。与桌面主题独立维护。
  */
 data class Palette(
     val dark: Boolean,
@@ -44,17 +44,33 @@ val LightPalette = Palette(
 
 val DarkPalette = Palette(
     dark = true,
-    bg = Color(0xFF262624), sidebar = Color(0xFF1F1E1D), surface = Color(0xFF30302E), subtle = Color(0xFF1F1E1D),
-    chip = Color(0xFF2B2B29), hover = Color(0x0FFAF9F5), selected = Color(0xFF383734),
-    border = Color(0x21DEDCD1), borderStrong = Color(0x38DEDCD1),
+    bg = Color(0xFF151515), sidebar = Color(0xFF101010), surface = Color(0xFF242424), subtle = Color(0xFF1C1C1C),
+    chip = Color(0xFF202020), hover = Color(0x0FFAF9F5), selected = Color(0xFF303030),
+    border = Color(0x2BFFFFFF), borderStrong = Color(0x42FFFFFF),
     text = Color(0xFFFAF9F5), text2 = Color(0xFFE5E3DC), text3 = Color(0xFFA6A39A), text4 = Color(0xFF74726B),
     brand = Color(0xFFD97757), accent = Color(0xFFC96442), accentOff = Color(0xFF5E3B2E), onAccent = Color.White,
     tintAccent = Color(0x2ED97757),
     primary = Color(0xFFFAF9F5), onPrimary = Color(0xFF141413), primaryOff = Color(0xFF4A4945),
     ok = Color(0xFF9CBA76), tintOk = Color(0x42788C5D), err = Color(0xFFEC7B66), tintErr = Color(0x38C4553F),
     warn = Color(0xFFDCAA4F), info = Color(0xFF86B1DD), tintInfo = Color(0x386A9BCC),
-    track = Color(0xFF3D3C39), tooltip = Color(0xFFFAF9F5), onTooltip = Color(0xFF141413), scrim = Color(0x7A000000),
+    track = Color(0xFF333333), tooltip = Color(0xFFFAF9F5), onTooltip = Color(0xFF141413), scrim = Color(0x7A000000),
 )
+
+/** 纯黑的底层背景，同时为卡片和输入控件保留必要的层级。 */
+val OledPalette = DarkPalette.copy(
+    bg = Color.Black, sidebar = Color.Black, surface = Color(0xFF141414), subtle = Color(0xFF0B0B0B),
+    chip = Color(0xFF121212), selected = Color(0xFF252525),
+    track = Color(0xFF292929),
+)
+
+/** 兼容旧版 system / light / dark 的持久化主题名称。 */
+fun normalizeThemeMode(mode: String?): String = when (mode) {
+    "light" -> "light"
+    "dark" -> "dark"
+    "oled" -> "oled"
+    else -> "system"
+}
+
 
 val LocalPalette = staticCompositionLocalOf { LightPalette }
 
@@ -87,14 +103,17 @@ val PlatformColors = mapOf(
 
 @Composable
 fun isDarkMode(mode: String) = when (mode) {
-    "dark" -> true
+    "dark", "oled" -> true
     "light" -> false
     else -> isSystemInDarkTheme()
 }
 
 @Composable
 fun VdTheme(mode: String, content: @Composable () -> Unit) {
-    val p = if (isDarkMode(mode)) DarkPalette else LightPalette
+    val p = when (mode) {
+        "oled" -> OledPalette
+        else -> if (isDarkMode(mode)) DarkPalette else LightPalette
+    }
     val base = if (p.dark) darkColorScheme() else lightColorScheme()
     val scheme = base.copy(
         primary = p.accent, onPrimary = p.onAccent, primaryContainer = p.tintAccent, onPrimaryContainer = p.accent,

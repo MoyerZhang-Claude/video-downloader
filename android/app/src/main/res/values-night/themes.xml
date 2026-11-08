@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 系统深色模式：启动瞬间就是暖深灰底 -->
+    <!-- 系统深色模式：默认 Claude 风格深灰；OLED 在启动后恢复纯黑窗口底色 -->
     <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowBackground">@color/bg</item>
     </style>
-    <color name="bg">#262624</color>
+    <color name="bg">#151515</color>
 </resources>

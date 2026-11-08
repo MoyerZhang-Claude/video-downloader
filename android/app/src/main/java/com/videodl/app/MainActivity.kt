@@ -5,7 +5,9 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Color as AColor
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -48,6 +50,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -64,6 +68,13 @@ import java.util.Locale
 
 const val GITHUB_URL = "https://github.com/MoyerZhang-Claude/video-downloader"
 
+/** OLED 模式在非深色系统设置下也始终使用真正纯黑。 */
+private fun themeWindowColor(mode: String, dark: Boolean): Int = when {
+    mode == "oled" -> AColor.BLACK
+    dark -> AColor.rgb(21, 21, 21)
+    else -> AColor.rgb(250, 249, 245)
+}
+
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
 
@@ -73,6 +84,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 在 Compose 首帧前恢复窗口底色，避免旧色闪现。
+        val savedMode = normalizeThemeMode(getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getString("theme", "system"))
+        val systemDark = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        val savedDark = savedMode == "dark" || savedMode == "oled" || (savedMode == "system" && systemDark)
+        window.setBackgroundDrawable(ColorDrawable(themeWindowColor(savedMode, savedDark)))
         handleShare(intent)
         // 安卓 13+ 需要用户允许，才能在通知栏显示下载进度
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -153,10 +171,13 @@ private fun clipboardText(ctx: Context): String {
 @Composable
 fun App(vm: MainViewModel, activity: ComponentActivity) {
     val dark = isDarkMode(vm.themeMode)
-    LaunchedEffect(dark) {
+    val backgroundColor = themeWindowColor(vm.themeMode, dark)
+    LaunchedEffect(dark, backgroundColor) {
         val style = if (dark) SystemBarStyle.dark(AColor.TRANSPARENT)
                     else SystemBarStyle.light(AColor.TRANSPARENT, AColor.TRANSPARENT)
         activity.enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+        // 透明系统栏后面的窗口底色和当前主题保持一致。
+        activity.window.decorView.setBackgroundColor(backgroundColor)
     }
     VdTheme(vm.themeMode) {
         var page by rememberSaveable { mutableStateOf("home") }
@@ -1260,14 +1281,25 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                 BackgroundRows(vm)
             }
             SettingsGroup("外观") {
-                SettingsRow(LineIcons.Monitor, "主题", when (vm.themeMode) { "light" -> "浅色"; "dark" -> "深色"; else -> "跟随系统" },
-                    divider = false) {
+                SettingsRow(LineIcons.Monitor, "主题", when (vm.themeMode) {
+                    "light" -> "浅色"; "dark" -> "Claude 深色"; "oled" -> "OLED 纯黑"; else -> "跟随系统"
+                }, divider = false) {
                     Row(Modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, P.borderStrong, RoundedCornerShape(12.dp)).padding(3.dp)) {
-                        listOf("system" to LineIcons.Monitor, "light" to LineIcons.Sun, "dark" to LineIcons.Moon).forEach { (m, icon) ->
+                        listOf("system" to LineIcons.Monitor, "light" to LineIcons.Sun,
+                            "dark" to LineIcons.Moon, "oled" to LineIcons.CheckCircle).forEach { (m, icon) ->
                             Box(Modifier.size(36.dp).clip(RoundedCornerShape(9.dp))
                                 .background(if (vm.themeMode == m) P.selected else Color.Transparent)
+                                .semantics { contentDescription = when (m) {
+                                    "system" -> "跟随系统"; "light" -> "浅色"
+                                    "dark" -> "Claude 深色"; else -> "OLED 纯黑"
+                                } }
                                 .clickable { vm.changeTheme(m) }, contentAlignment = Alignment.Center) {
-                                LIcon(icon, if (vm.themeMode == m) P.text else P.text3, 19.dp)
+                                if (m == "oled") {
+                                    Box(Modifier.size(19.dp).clip(CircleShape).background(Color.Black)
+                                        .border(1.dp, P.text3, CircleShape))
+                                } else {
+                                    LIcon(icon, if (vm.themeMode == m) P.text else P.text3, 19.dp)
+                                }
                             }
                         }
                     }
