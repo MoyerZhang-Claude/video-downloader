@@ -415,7 +415,11 @@ class HistoryRow(QWidget):
         if in_cloud:
             bits.append('已传到云盘')
         col.addWidget(title)
-        col.addWidget(ElidedLabel('  ·  '.join(b for b in bits if b), 'meta'))
+        meta = ElidedLabel('  ·  '.join(b for b in bits if b), 'meta')
+        col.addWidget(meta)
+        win.cloud_watch_record(h['id'], meta, lambda t, base=[b for b in bits if b and b != '已传到云盘']: meta.set_full_text(
+            '  ·  '.join(base + ([f'云盘 {t}' if t[0].isdigit() else f'云盘{"上传失败" if t == "失败" else "等待上传"}']
+                                 if t else ['已传到云盘'] if win.cloud_uploaded(h['filepath']) else []))))
         lay.addLayout(col, 1)
         self.ops = clear_widget()
         oh = QHBoxLayout(self.ops)
@@ -836,6 +840,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         n.clicked.connect(lambda _=False, rec=h: self._open_recent(rec))
         n.setContextMenuPolicy(Qt.CustomContextMenu)
         n.customContextMenuRequested.connect(lambda pos, rec=h, w=n: self._item_menu(rec, w.mapToGlobal(pos)))
+        self.cloud_watch_record(h['id'], n, n.set_badge)       # 上传到谷歌云盘时显示进度
         return n
 
     def _refresh_sidebar(self):

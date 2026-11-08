@@ -42,6 +42,7 @@ class CloudMixin:
         except (OSError, ValueError):
             pass
         self._cloud_announced = set()
+        self._cloud_rec_views = {}      # 下载记录 ID → [显示进度的函数]（侧边栏、已下载的视频列表）
         self._cloud_activate()
 
     def _cloud_activate(self):
@@ -121,7 +122,46 @@ class CloudMixin:
         folder = gdrive.video_folder(h['platform'], h['ts'])
         title = h.get('title') or os.path.basename(h['filepath'] or '')
         n = self._cloud_add(self._with_sidecars(h['filepath']), lambda p: folder, title, f'rec:{h["id"]}')
-        self.notify(f'开始上传到谷歌云盘：{title}' if n else '这个视频已经在云盘里了')
+        self.notify(f'开始上传到谷歌云盘：{title}（进度显示在这条记录上）' if n else '这个视频已经在云盘里了')
+        self._cloud_refresh_rec(h['id'])
+
+    # ------------------------------------------------------------ 下载记录上的进度
+    def cloud_watch_record(self, rec_id, widget, show):
+        """侧边栏 / 已下载的视频里的一条记录：上传时 show(短文字) 显示进度，传完 show('')。
+        widget 被删掉（侧边栏刷新）后自动不再更新。"""
+        if self.cloud is None:
+            return
+        import shiboken6
+        views = [(w, f) for w, f in self._cloud_rec_views.get(rec_id, []) if shiboken6.isValid(w)]
+        views.append((widget, show))
+        self._cloud_rec_views[rec_id] = views
+        text = self._cloud_rec_text(rec_id)
+        if text:
+            show(text)
+
+    def _cloud_rec_text(self, rec_id):
+        st = self.cloud.group_state(f'rec:{rec_id}') if self.cloud else None
+        if not st or st[0] == gdrive.DONE:
+            return ''
+        state, done, total, ndone, n, err = st
+        if state == gdrive.FAILED:
+            return '失败'
+        if state == gdrive.QUEUED and not done:
+            return '等待'
+        return f'{done * 100 // total if total else 0}%'
+
+    def _cloud_refresh_rec(self, rec_id):
+        text = self._cloud_rec_text(rec_id)
+        import shiboken6
+        alive = []
+        for w, show in self._cloud_rec_views.get(rec_id, []):
+            if shiboken6.isValid(w):        # 控件已经删掉了（侧边栏刷新过）就跳过
+                show(text)
+                alive.append((w, show))
+        if alive:
+            self._cloud_rec_views[rec_id] = alive
+        else:
+            self._cloud_rec_views.pop(rec_id, None)
 
     def cloud_upload_batch(self, b, manual=False):
         paths = b.done_paths(self.pan)
@@ -199,6 +239,8 @@ class CloudMixin:
             self._cloud_refresh_task(int(gid))
         elif kind == 'batch':
             self._cloud_refresh_batch(int(gid))
+        elif kind == 'rec':
+            self._cloud_refresh_rec(int(gid))
         st = self.cloud.group_state(group)
         if not st or st[0] in (gdrive.QUEUED, gdrive.RUNNING) or group in self._cloud_announced:
             return
