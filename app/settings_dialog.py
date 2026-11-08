@@ -69,7 +69,9 @@ class SettingsPanel(ui.Overlay):
         nav.setContentsMargins(16, 6, 8, 16)
         nav.setSpacing(2)
         self.navs = {}
-        for key, name, icon in PAGES:
+        self._page_list = list(PAGES)
+        self._page_list.insert(len(self._page_list) - 1, ('cloud', '谷歌云盘', 'cloud'))
+        for key, name, icon in self._page_list:
             n = NavItem(name, icon, height=36)
             n.clicked.connect(lambda _=False, k=key: self.show_page(k))
             nav.addWidget(n)
@@ -83,7 +85,7 @@ class SettingsPanel(ui.Overlay):
         body.addWidget(self.stack, 1)
         v.addLayout(body, 1)
         self.pages = {}
-        for key, _, _ in PAGES:
+        for key, _, _ in self._page_list:
             col = _clear()
             lay = QVBoxLayout(col)
             lay.setContentsMargins(24, 0, 32, 28)
@@ -575,6 +577,84 @@ class SettingsPanel(ui.Overlay):
             self.core_desc.setText(f'已更新：{old} → {new}，重启软件后生效。')
         else:
             self.core_desc.setText(f'已经是最新版本（{new}）。')
+
+    # ------------------------------------------------------------ 谷歌云盘
+    def _page_cloud(self, lay):
+        self._section(lay, '账号', first=True)
+        self.cloud_key_btn = _btn('', self._cloud_import)
+        self.cloud_key_row = self._row(lay, '密钥文件', ' ', self.cloud_key_btn)
+        self.cloud_btn = _btn('', self._cloud_login_clicked)
+        self.cloud_row = self._row(lay, '谷歌账号', ' ', self.cloud_btn)
+        self._cloud_render()
+        self._section(lay, '上传')
+        self._row(lay, '怎么上传', '打开输入框下方的「云盘」开关，之后的下载完成后会自动上传；\n'
+                  '已经下好的视频、网盘文件，右键选「上传到谷歌云盘」。进度显示在对应的下载任务上。')
+        self._row(lay, '上传后保留本地文件', '关闭后，上传成功的文件会移到回收站（可以从回收站恢复）',
+                  self._toggle('cloud_keep_local'))
+        self._row(lay, '云盘里的位置', '链接解析下载器 / 视频分区 / 平台 / 年-月\n'
+                  '链接解析下载器 / 网盘分区 / 网盘名 / 年-月\n认不出来源平台的网站放在「其他网站」',
+                  self._cloud_open_btn)
+        self._section(lay, '帮助')
+        self._row(lay, '使用教程与常见问题', '第一次用要先在 Google Cloud 创建一个自己的密钥（免费，约 10 分钟，只需做一次）',
+                  _btn('查看教程', self._cloud_help, 'primary'))
+        self._cloud_render()
+
+    def _cloud_help(self):
+        from .cloud_help import show_help
+        show_help(self.win, self.win.notify)
+
+    def _cloud_import(self):
+        path, _ = QFileDialog.getOpenFileName(self.win, '选择在 Google Cloud 下载的密钥文件（client_secret_….json）',
+                                              os.path.expanduser('~/Downloads'), 'JSON (*.json)')
+        if not path:
+            return
+        err = self.win.cloud_import_client(path)
+        if err:
+            QMessageBox.warning(self.win, '谷歌云盘', err)
+            return
+        self._cloud_render()
+        self.win.notify('已导入密钥文件，接下来点「连接」登录谷歌账号', 'ok')
+
+    def _cloud_render(self):
+        from . import gdrive
+        has_key = gdrive.available()
+        self.cloud_key_row.title.setText('密钥文件：已导入' if has_key else '密钥文件：未导入')
+        self.cloud_key_row.setText('想换一个 Google Cloud 项目的密钥，可以重新导入（需要重新连接账号）' if has_key else
+                                   '先按下面的「使用教程」在 Google Cloud 创建「桌面应用」密钥，下载 JSON 文件后在这里导入')
+        self.cloud_key_btn.setText('重新导入…' if has_key else '导入密钥文件…')
+        if not hasattr(self, '_cloud_open_btn'):
+            self._cloud_open_btn = _btn('在浏览器中打开', lambda: self.win.cloud_open_root())
+        auth = self.win.cloud_drive.auth if self.win.cloud_drive else None
+        self._cloud_open_btn.setEnabled(bool(auth and auth.logged_in))
+        if auth and auth.logged_in:
+            self.cloud_row.title.setText(f'已连接：{auth.email or "谷歌账号"}')
+            self.cloud_row.setText('软件只能看到、管理它自己上传的文件，碰不到你云盘里的其它内容')
+            self.cloud_btn.setText('断开')
+        else:
+            self.cloud_row.title.setText('谷歌账号：未连接')
+            self.cloud_row.setText('点「连接」会打开浏览器，登录谷歌账号并允许访问即可' if auth else '导入密钥文件后才能连接')
+            self.cloud_btn.setText('连接')
+        self.cloud_btn.setEnabled(bool(auth))
+
+    def _cloud_login_clicked(self):
+        auth = self.win.cloud_drive.auth
+        if auth.logged_in:
+            if QMessageBox.question(self.win, '谷歌云盘', '断开谷歌账号？\n已经上传的文件不受影响；没传完的会暂停，重新连接后继续。') \
+                    != QMessageBox.Yes:
+                return
+            self.win.cloud_logout()
+            self._cloud_render()
+            return
+        self.cloud_btn.setEnabled(False)
+        self.cloud_btn.setText('等待浏览器授权…')
+
+        def done(email, err):
+            self._cloud_render()
+            if err:
+                QMessageBox.warning(self.win, '谷歌云盘', f'没有连接成功：{err}')
+            else:
+                self.win.notify(f'已连接谷歌云盘：{email}', 'ok')
+        self.win.cloud_login(done)
 
     # ------------------------------------------------------------ 关于
     def _page_about(self, lay):

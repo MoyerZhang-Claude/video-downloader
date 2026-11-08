@@ -25,6 +25,7 @@ from .bili_dialog import BiliLoginDialog
 from .config import DATA, ROOT, Settings, ffmpeg_dir
 from .episode_dialog import EpisodeDialog
 from .folder_dialog import FolderDialog, TextDialog
+from .cloud_ui import CloudMixin, task_cloud_text
 from .pan_ui import PanMixin
 from .search_panel import SearchPanel
 from .history import PAN, VIDEO, History, video_key
@@ -354,6 +355,9 @@ class TaskView(Card):
                 parts.append(fmt_speed(task.speed))
             if task.eta:
                 parts.append(f'剩余 {fmt_duration(task.eta)}')
+        cloud_text, _ = task_cloud_text(self.win, task)
+        if cloud_text:
+            parts.append(cloud_text)
         self.detail.set_full_text('  ·  '.join(parts), task.error_raw or None)
 
         status = core.STATUS_TEXT.get(s, s)
@@ -405,8 +409,11 @@ class HistoryRow(QWidget):
                             ('' if exists else '\n（文件已被移动或删除）'))
         if not exists:
             title.setStyleSheet(f'color: {c("text3").name()};')
+        in_cloud = win.cloud_uploaded(h['filepath'])
         bits = [(h['quality'] or '').replace('] [', ' · '), core.fmt_size(h['size']) if h['size'] else '',
-                fmt_ago(h['ts'])] + ([] if exists else ['文件已不在原位置'])
+                fmt_ago(h['ts'])] + ([] if exists else ['文件已不在原位置' if not in_cloud else '本地已删除'])
+        if in_cloud:
+            bits.append('已传到云盘')
         col.addWidget(title)
         col.addWidget(ElidedLabel('  ·  '.join(b for b in bits if b), 'meta'))
         lay.addLayout(col, 1)
@@ -575,7 +582,7 @@ class AccountButton(ui._HoverButton):
 
 # ---------------------------------------------------------------- 主窗口
 
-class MainWindow(PanMixin, QMainWindow):
+class MainWindow(CloudMixin, PanMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = Settings.load()
@@ -625,6 +632,7 @@ class MainWindow(PanMixin, QMainWindow):
         self.setWindowTitle(f'{APP_NAME} {APP_VERSION}')
         self.setMinimumSize(980, 640)
         self._pan_init()
+        self._cloud_init()
         self._parse_timer = QTimer(self, singleShot=True, interval=400)     # 一次解析很多链接时合并刷新
         self._parse_timer.timeout.connect(self._after_history_change)
         self._build_ui()
@@ -935,6 +943,7 @@ class MainWindow(PanMixin, QMainWindow):
         m.addSeparator()
         m.addAction(ic('refresh'), '重新解析', lambda: self._reparse_url(h['url']))
         m.addAction(ic('copy'), '复制原链接', lambda: QGuiApplication.clipboard().setText(h['url']))
+        self.cloud_menu(m, [h['filepath']], lambda: self.cloud_upload_record(h))
         m.addSeparator()
         m.addAction(ic('trash'), '从历史中删除', lambda: self._delete_history(h['id']))
         m.exec(pos)
@@ -1255,6 +1264,10 @@ class MainWindow(PanMixin, QMainWindow):
             chip.setChecked(getattr(self.settings, key))
             chip.toggled.connect(lambda on, k=key: self._toggle_setting(k, on))
             self.composer.left.addWidget(chip)
+        cloud_chip = self._cloud_chip(Chip)
+        if cloud_chip is not None:
+            self.composer.left.addWidget(cloud_chip)
+            self._cloud_sync_chip()
         bv.addWidget(self.composer)
         under = QHBoxLayout()
         under.setContentsMargins(Composer.SHADOW + 2, 0, Composer.SHADOW + 2, 0)
@@ -2027,6 +2040,7 @@ class MainWindow(PanMixin, QMainWindow):
                 return False
             overwrite = True
         task = core.DownloadTask(row.video, option, self.settings.download_dir, save_cover=self.settings.save_cover)
+        task.cloud = self.cloud_wanted()
         task.overwrite = overwrite
         task.save_subs = self.settings.save_subs
         task.save_danmaku = self.settings.save_danmaku
@@ -2046,6 +2060,7 @@ class MainWindow(PanMixin, QMainWindow):
         if not dlg.exec():
             return
         task = core.DownloadTask(row.video, dlg.option, self.settings.download_dir, save_cover=self.settings.save_cover)
+        task.cloud = self.cloud_wanted()
         task.section, task.precise = dlg.section, dlg.precise
         task.save_subs = False
         task.save_danmaku = self.settings.save_danmaku
@@ -2239,6 +2254,8 @@ class MainWindow(PanMixin, QMainWindow):
                 self._refresh_sidebar()
                 if self.page == 'history':
                     self._refresh_history()
+            if getattr(task, 'cloud', False) and self.cloud_ready:
+                self.cloud_upload_task(task)
             if s == core.DONE:
                 self._batch_done += 1
                 if self.settings.notify_done and not self.isActiveWindow():
@@ -2577,6 +2594,10 @@ class MainWindow(PanMixin, QMainWindow):
         m.addAction(ic('copy'), '复制原链接', lambda: QGuiApplication.clipboard().setText(task.video.url))
         if task.error_raw:
             m.addAction(ic('copy'), '复制错误信息', lambda: QGuiApplication.clipboard().setText(task.error_raw))
+        if task.status in (core.DONE, core.EXISTS):
+            self.cloud_menu(m, [self._task_path(task)], lambda: self.cloud_upload_task(task, manual=True))
+            if self.cloud and (self.cloud.group_state(f'task:{task.id}') or ('',))[0] == 'failed':
+                m.addAction(ic('refresh'), '重试上传到云盘', lambda: self.cloud_retry(f'task:{task.id}'))
         if task.status not in (core.RUNNING, core.MERGING, core.QUEUED, core.PAUSED):
             m.addSeparator()
             m.addAction(ic('trash'), '从列表移除', lambda: self._remove_task(task))
@@ -2622,8 +2643,9 @@ class MainWindow(PanMixin, QMainWindow):
             for row in self.rows.values():
                 if row.state == 'ok':
                     self._render_result(row)
-        elif key in ('save_cover', 'save_danmaku', 'save_subs'):
-            chip = {'save_cover': self.chip_cover, 'save_danmaku': self.chip_dm, 'save_subs': self.chip_sub}[key]
+        elif key in ('save_cover', 'save_danmaku', 'save_subs') or (key == 'cloud_upload' and self.chip_cloud):
+            chip = {'save_cover': self.chip_cover, 'save_danmaku': self.chip_dm, 'save_subs': self.chip_sub,
+                    'cloud_upload': self.chip_cloud}[key]
             chip.blockSignals(True)
             chip.setChecked(getattr(s, key))
             chip.blockSignals(False)

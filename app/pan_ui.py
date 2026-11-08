@@ -770,6 +770,10 @@ class PanBatchView(Card):
             bits = [f'{total} 个文件' if total else '']
             if st['size'] and not st['unknown_size']:
                 bits.append(fmt_bytes(st['size']))
+            cloud_text, _ = self.win.cloud_status(f'batch:{b.id}')
+            if not cloud_text and getattr(self.win, '_cloud_flags', None) and b.id in self.win._cloud_flags:
+                cloud_text = '下完后上传云盘'
+            bits.append(cloud_text)
             self.tag.set_full_text(' · '.join(x for x in bits if x), b.save_dir)
         if not total:
             role, text = 'text3', '等待中' if not eng.alive else '任务已删除'
@@ -1154,6 +1158,8 @@ class PanMixin:
             row['id'] = -len(self.pan_batches) - 1
         b = Batch(row)
         self.pan_batches[b.id] = b
+        if self.cloud_wanted():
+            self.cloud_flag_batch(b.id)
         self._pan_add_view(b)
         if card is not None:
             line = PanBatchView(self, b, compact=True)
@@ -1213,6 +1219,7 @@ class PanMixin:
                 if self.history and b.id > 0:
                     self.history.update_batch(b.id, state='done')
                 self.notify(f'网盘下载完成：{b.title}', 'ok')
+                self.cloud_batch_finished(b)
                 if self.settings.notify_done and not self.isActiveWindow():
                     self._tray_message('网盘下载完成', f'{b.title}（{st["total"]} 个文件）')
                 if self.settings.notify_sound:
@@ -1283,6 +1290,10 @@ class PanMixin:
             m.addAction(ic('refresh'), f'重试失败的 {st["failed"]} 个文件', lambda: self.pan_retry_failed(b))
         m.addAction(ic('copy'), '复制分享链接', lambda: QGuiApplication.clipboard().setText(b.url))
         m.addAction(ic('refresh'), '重新解析这个分享', lambda: self._submit_text(b.url))
+        if st['done']:
+            self.cloud_menu(m, b.done_paths(self.pan), lambda: self.cloud_upload_batch(b, manual=True))
+            if self.cloud and (self.cloud.group_state(f'batch:{b.id}') or ('',))[0] == 'failed':
+                m.addAction(ic('refresh'), '重试上传到云盘', lambda: self.cloud_retry(f'batch:{b.id}'))
         m.addSeparator()
         if st['total'] and not st['active'] and st['done'] == st['total']:
             m.addAction(ic('x'), '从列表移除（不删文件）', lambda: self.pan_clear_batch(b))
