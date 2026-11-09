@@ -70,7 +70,7 @@ class BiliLoginActivity : ComponentActivity() {
                             else SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
                 enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
             }
-            VdTheme(mode) {
+            VdTheme(mode, getSharedPreferences("settings", MODE_PRIVATE).getBoolean("dark_oled", false)) {
                 Column(Modifier.fillMaxSize().background(P.bg).systemBarsPadding()) {
                     TopBar("登录 B站", { finish() })
                     Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp).clip(RoundedCornerShape(14.dp)).background(P.subtle)

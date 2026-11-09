@@ -17,11 +17,11 @@ def _a(hex_rgb, alpha):
     return f'#{round(alpha * 255):02x}{hex_rgb[1:]}'
 
 
-# 颜色参照 Claude 官方应用的新版（v2）配色：浅色是偏中性的暖白，深色背景用纯黑 #000000
-# （官方深色主背景是 #151515；这里按用户要求改成纯黑，OLED 屏上完全不发光），卡片、输入框、菜单用官方的深灰分层。
+# 颜色参照 Claude 官方应用的新版（v2）配色（官方桌面 App 的界面文件里的颜色变量）。
+# panel：设置面板这类浮在页面上的大面板（深色下比页面亮一档，和官方一样）。
 LIGHT = {
     # 页面 #fcfcfb、侧边栏 #fafaf9：和官方桌面 App 一样，侧边栏几乎和页面同色，只靠一条细线分开
-    'bg': '#fcfcfb', 'sidebar': '#fafaf9', 'surface': '#ffffff', 'field': '#ffffff', 'menu': '#ffffff',
+    'bg': '#fcfcfb', 'sidebar': '#fafaf9', 'surface': '#ffffff', 'field': '#ffffff', 'menu': '#ffffff', 'panel': '#ffffff',
     'subtle': '#f3f3f0', 'chip': '#f6f6f4',
     'hover': _a('#1e1e1d', 0.05), 'press': _a('#1e1e1d', 0.09), 'selected': '#efeeea', 'menu_hover': '#f3f3f0',
     'border': _a('#1e1e1d', 0.11), 'border_strong': _a('#1e1e1d', 0.20), 'border_focus': _a('#1e1e1d', 0.38),
@@ -36,20 +36,45 @@ LIGHT = {
     'tooltip': '#131313', 'on_tooltip': '#f9f9f7', 'avatar': '#c6613f',
 }
 
+# 深色：从官方桌面 App 的截图取色——页面 #191919，侧边栏 #1f1f1f（只比页面亮一点点），侧边栏选中项 #404040；
+# 卡片 / 输入框 / 菜单在页面色上逐级变亮
 DARK = {
-    'bg': '#000000', 'sidebar': '#000000', 'surface': '#151515', 'field': '#1a1a19', 'menu': '#1e1e1d',
-    'subtle': '#1a1a19', 'chip': '#151515',
-    'hover': _a('#f9f9f7', 0.07), 'press': _a('#f9f9f7', 0.11), 'selected': '#20201f', 'menu_hover': '#2c2c2a',
-    'border': _a('#e1e0d9', 0.14), 'border_strong': _a('#e1e0d9', 0.24), 'border_focus': _a('#e1e0d9', 0.42),
+    'bg': '#191919', 'sidebar': '#1f1f1f', 'surface': '#1f1f1f', 'field': '#222222', 'menu': '#2a2a2a', 'panel': '#1f1f1f',
+    'subtle': '#242424', 'chip': '#1f1f1f',
+    'hover': _a('#ffffff', 0.06), 'press': _a('#ffffff', 0.10), 'selected': '#404040', 'menu_hover': '#383838',
+    'border': _a('#ffffff', 0.10), 'border_strong': _a('#ffffff', 0.17), 'border_focus': _a('#ffffff', 0.32),
     'text': '#f9f9f7', 'text2': '#c3c2b7', 'text3': '#97958d', 'text4': '#6d6b67',
     'brand': '#d97757', 'accent': '#c6613f', 'accent_hover': '#d9704c', 'accent_press': '#b45636',
     'accent_off': '#5a3628', 'on_accent': '#ffffff', 'tint_accent': _a('#d97757', 0.18),
     'primary': '#f9f9f7', 'primary_hover': '#e1e0d9', 'on_primary': '#131313', 'primary_off': '#454442',
     'ok': '#8cc26a', 'tint_ok': _a('#4f8a3a', 0.28), 'err': '#eb6263', 'tint_err': _a('#d03b3b', 0.24),
     'warn': '#dcaa4f', 'info': '#5598e7', 'tint_info': _a('#2370cd', 0.24),
-    'track': '#2c2c2a', 'scroll': _a('#f9f9f7', 0.16), 'scroll_hover': _a('#f9f9f7', 0.30),
-    'scrim': _a('#000000', 0.60), 'shadow': _a('#000000', 0.50), 'selection': _a('#d97757', 0.38),
+    'track': '#2c2c2c', 'scroll': _a('#ffffff', 0.16), 'scroll_hover': _a('#ffffff', 0.30),
+    'scrim': _a('#000000', 0.55), 'shadow': _a('#000000', 0.45), 'selection': _a('#d97757', 0.38),
     'tooltip': '#f9f9f7', 'on_tooltip': '#131313', 'avatar': '#c6613f',
+}
+
+# 纯黑（OLED）：背景 #000000（OLED 屏上黑色部分不发光、更省电），针对纯黑的几个毛病做了处理：
+# 1. 晕光：纯白字在纯黑底上会「渗」进黑色、看着发虚（散光的人更明显），文字改用不刺眼的暖白 #e2e1dc（对比度约 15:1，
+#    不是 21:1），次要文字也相应调暗；大块的白色按钮（primary）也调暗一档。
+# 2. 拖影：OLED 像素从「全黑熄灭」到「点亮」反应慢，滚动时文字会拖出残影——会滚动的内容都放在 #121212 起步的深灰卡片 / 面板上，
+#    文字底下的像素一直亮着；文字不用纯白也让亮灭落差更小。
+# 3. 没有层次：黑色上看不见阴影，靠逐级变亮的深灰（#121212 → #161616 → #1c1c1c）和更明显一点的细边框来分层。
+# 4. 颜色发颤：高饱和的颜色在纯黑上会「发颤」，成功 / 失败 / 提示色都降低了饱和度。
+OLED = {
+    'bg': '#000000', 'sidebar': '#000000', 'surface': '#121212', 'field': '#161616', 'menu': '#1c1c1c', 'panel': '#121212',
+    'subtle': '#141414', 'chip': '#121212',
+    'hover': _a('#ffffff', 0.06), 'press': _a('#ffffff', 0.10), 'selected': '#1e1e1e', 'menu_hover': '#262626',
+    'border': _a('#ffffff', 0.12), 'border_strong': _a('#ffffff', 0.20), 'border_focus': _a('#ffffff', 0.36),
+    'text': '#e2e1dc', 'text2': '#b5b3ab', 'text3': '#8e8c85', 'text4': '#64625d',
+    'brand': '#d97757', 'accent': '#c6613f', 'accent_hover': '#d26e4c', 'accent_press': '#b45636',
+    'accent_off': '#4d2f24', 'on_accent': '#f4f3ef', 'tint_accent': _a('#d97757', 0.16),
+    'primary': '#d9d8d2', 'primary_hover': '#e6e5e0', 'on_primary': '#121212', 'primary_off': '#3a3936',
+    'ok': '#93b885', 'tint_ok': _a('#4f8a3a', 0.22), 'err': '#e07a72', 'tint_err': _a('#d03b3b', 0.20),
+    'warn': '#d6ad62', 'info': '#86aee0', 'tint_info': _a('#2370cd', 0.20),
+    'track': '#242424', 'scroll': _a('#ffffff', 0.14), 'scroll_hover': _a('#ffffff', 0.26),
+    'scrim': _a('#000000', 0.72), 'shadow': _a('#000000', 0.60), 'selection': _a('#d97757', 0.34),
+    'tooltip': '#e2e1dc', 'on_tooltip': '#121212', 'avatar': '#c6613f',
 }
 
 P = dict(LIGHT)          # 当前主题的颜色
@@ -78,7 +103,7 @@ class _Signals(QObject):
 
 
 signals = _Signals()
-_state = {'mode': 'system', 'dark': False, 'fonts': False}
+_state = {'mode': 'system', 'dark': False, 'oled': False, 'fonts': False}
 
 
 def c(role, alpha=None):
@@ -138,15 +163,22 @@ def ui_families():
     return [LATIN, SANS]
 
 
-def apply(app, new_mode=None):
-    """应用主题（new_mode: system / light / dark）。系统深浅色变化时再调用一次即可。"""
+def is_oled():
+    """现在是不是纯黑（OLED）配色"""
+    return _state['dark'] and _state['oled']
+
+
+def apply(app, new_mode=None, oled=None):
+    """应用主题（new_mode: system / light / dark；oled：深色时用纯黑）。系统深浅色变化时再调用一次即可。"""
     if new_mode:
         _state['mode'] = new_mode if new_mode in MODES else 'system'
+    if oled is not None:
+        _state['oled'] = bool(oled)
     m = _state['mode']
     dark = _system_dark() if m == 'system' else m == 'dark'
     _state['dark'] = dark
     P.clear()
-    P.update(DARK if dark else LIGHT)
+    P.update((OLED if _state['oled'] else DARK) if dark else LIGHT)
     load_fonts()
     app.setPalette(_palette())
     app.setStyleSheet(stylesheet())

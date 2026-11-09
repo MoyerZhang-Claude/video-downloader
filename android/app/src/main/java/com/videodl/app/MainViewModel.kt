@@ -110,6 +110,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 外观：system 跟随系统 / light / dark */
     var themeMode by mutableStateOf("system")
         private set
+    var darkOled by mutableStateOf(false)            // 深色时用纯黑（OLED）
+        private set
     /** 首页问候语里的称呼 */
     var nickname by mutableStateOf("")
         private set
@@ -158,6 +160,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         wantDanmaku = prefs.getBoolean("want_danmaku", false)
         danmakuFps = prefs.getInt("danmaku_fps", 60).let { if (it == 120) 120 else 60 }
         themeMode = prefs.getString("theme", "system") ?: "system"
+        darkOled = prefs.getBoolean("dark_oled", false)
         nickname = prefs.getString("nickname", "") ?: ""
         codecPref = prefs.getString("codec_pref", "compat").let { if (it == "quality" || it == "best") it else "compat" }
         showHdr = prefs.getBoolean("show_hdr", true)
@@ -325,6 +328,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun changeTheme(mode: String) {
         themeMode = mode
         prefs.edit().putString("theme", mode).apply()
+    }
+
+    /** 深色时用纯黑（OLED） */
+    fun changeOled(on: Boolean) {
+        darkOled = on
+        prefs.edit().putBoolean("dark_oled", on).apply()
     }
 
     fun changeNickname(name: String) {

@@ -163,6 +163,7 @@ class Settings:
     skip_app_version: str = ''      # 用户选了「跳过这个版本」的版本号
     save_subs: bool = True        # 字幕（B站 CC / YouTube 等）
     sub_langs: str = 'zh_orig'
+    dark_oled: bool = False       # 深色时用纯黑（OLED）
     theme: str = 'system'         # 外观：system 跟随系统 / light / dark
     nickname: str = ''            # 首页问候语里的称呼
     sidebar_collapsed: bool = False

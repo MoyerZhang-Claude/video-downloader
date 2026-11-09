@@ -535,10 +535,10 @@ private fun Stepper(value: Int, range: IntRange, onChange: (Int) -> Unit) {
 @Composable
 fun PanSettingRows(vm: MainViewModel) {
     val st = PanEngine.settings
-    SettingsRow(LineIcons.Download, "同时下载的网盘文件", "同时下载几个文件") {
+    SettingsRow(LineIcons.Download, "同时下载几个文件", "一批网盘文件里，同时下载的个数") {
         Stepper(st.optInt("maxConcurrent", 3), 1..10) { vm.pan.changeSetting("maxConcurrent", it) }
     }
-    SettingsRow(LineIcons.Link, "每个文件的连接数", "多条连接一起下更快；百度网盘非会员自动只用 1 条") {
+    SettingsRow(LineIcons.Link, "每个文件的连接数", "越多一般越快；百度网盘非会员会自动只用 1 条，防止被限速") {
         Stepper(st.optInt("connsPerTask", 8), 1..16) { vm.pan.changeSetting("connsPerTask", it) }
     }
     var open by remember { mutableStateOf(false) }

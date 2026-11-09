@@ -196,6 +196,9 @@ class SettingsPanel(ui.Overlay):
                         self.s.theme)
         seg.changed.connect(self.win.apply_theme)
         self._row(lay, '主题', '跟随 Windows 的浅色 / 深色设置，或固定一种', seg)
+        self._row(lay, '深色时用纯黑（OLED）', '背景变成纯黑，OLED 屏上黑色部分不发光、更省电。已针对纯黑做了护眼处理：'
+                  '文字不用纯白、滚动的内容放在深灰卡片上减少拖影、用细边框分层。看久了累眼可以关掉，用官方的深灰色',
+                  self._toggle('dark_oled', on_change=self.win.apply_oled))
         self._section(lay, '个人')
         box = QHBoxLayout()
         box.setSpacing(6)
@@ -281,8 +284,8 @@ class SettingsPanel(ui.Overlay):
         self._section(lay, '格式与封面')
         self._row(lay, '编码偏好', '同一清晰度有多种编码时优先选哪种（YouTube、B站常见）',
                   self._combo('codec_preference', CODEC_PREFERENCES.items(), 340))
-        self._row(lay, '解析 HDR / 杜比视界版本', '关闭后 HDR 和杜比视界版本都不显示，只列出普通（SDR）版本'
-                  '（输入框下方的「HDR」开关也能切换）。没有 HDR 屏幕时，HDR 视频颜色会发灰；只有 HDR 版本的视频会提示无法下载',
+        self._row(lay, '显示 HDR / 杜比视界版本', '打开后，清晰度列表里会多出 HDR、杜比视界版本（任何电脑都能下载；在支持 HDR 的'
+                  '屏幕上看颜色更鲜艳，普通屏幕上可能偏灰）。关闭则只列普通版本。输入框下方的「HDR」开关也能切换',
                   self._toggle('show_hdr'))
         self._row(lay, '同时保存封面', '下载视频时另存一张与视频同名的 JPG（也可以在输入框下方的「封面」开关切换）',
                   self._toggle('save_cover'))

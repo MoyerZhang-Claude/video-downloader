@@ -323,10 +323,10 @@ fun CloudRows(vm: MainViewModel) {
         else Text(if (c.loggedIn) "断开" else "连接", fontSize = 13.sp, color = if (c.hasKey) P.accent else P.text3)
     }
     if (c.loggedIn) {
-        SettingsRow(null, "下载后同时上传", "也可以在「下载选项」里开关；已下载的视频长按选「上传到谷歌云盘」") {
+        SettingsRow(null, "下载后自动上传", "也能在「下载选项」里开关。已经下好的视频，长按它选「上传到谷歌云盘」") {
             Switch(c.uploadOnDownload, { c.chooseUploadOnDownload(it) })
         }
-        SettingsRow(null, "上传后保留本地文件", if (c.keepLocal) "开：手机上的文件保留" else "关：上传成功后移到系统回收站（安卓 11 起）") {
+        SettingsRow(null, "上传后保留手机上的文件", if (c.keepLocal) "开：上传后手机里的文件还在" else "关：上传成功后，手机里的文件移到回收站（还能恢复）") {
             Switch(c.keepLocal, { c.chooseKeepLocal(it) })
         }
     }

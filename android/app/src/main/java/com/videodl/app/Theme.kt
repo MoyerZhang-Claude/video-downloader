@@ -44,18 +44,36 @@ val LightPalette = Palette(
     track = Color(0xFFE7E6E1), tooltip = Color(0xFF131313), onTooltip = Color(0xFFF9F9F7), scrim = Color(0x52131313),
 )
 
+// 深色：从官方 App 截图取色——页面 #191919，侧边栏 #1f1f1f，卡片 / 弹窗 #1f1f1f，选中 #404040
 val DarkPalette = Palette(
     dark = true,
-    bg = Color(0xFF000000), sidebar = Color(0xFF000000), surface = Color(0xFF151515), subtle = Color(0xFF1A1A19),
-    chip = Color(0xFF151515), hover = Color(0x12F9F9F7), selected = Color(0xFF20201F),
-    border = Color(0x24E1E0D9), borderStrong = Color(0x3DE1E0D9),
+    bg = Color(0xFF191919), sidebar = Color(0xFF1F1F1F), surface = Color(0xFF1F1F1F), subtle = Color(0xFF242424),
+    chip = Color(0xFF1F1F1F), hover = Color(0x0FFFFFFF), selected = Color(0xFF404040),
+    border = Color(0x1AFFFFFF), borderStrong = Color(0x2BFFFFFF),
     text = Color(0xFFF9F9F7), text2 = Color(0xFFC3C2B7), text3 = Color(0xFF97958D), text4 = Color(0xFF6D6B67),
     brand = Color(0xFFD97757), accent = Color(0xFFC6613F), accentOff = Color(0xFF5A3628), onAccent = Color.White,
     tintAccent = Color(0x2ED97757),
     primary = Color(0xFFF9F9F7), onPrimary = Color(0xFF131313), primaryOff = Color(0xFF454442),
     ok = Color(0xFF8CC26A), tintOk = Color(0x474F8A3A), err = Color(0xFFEB6263), tintErr = Color(0x3DD03B3B),
     warn = Color(0xFFDCAA4F), info = Color(0xFF5598E7), tintInfo = Color(0x3D2370CD),
-    track = Color(0xFF2C2C2A), tooltip = Color(0xFFF9F9F7), onTooltip = Color(0xFF131313), scrim = Color(0x99000000),
+    track = Color(0xFF2C2C2C), tooltip = Color(0xFFF9F9F7), onTooltip = Color(0xFF131313), scrim = Color(0x8C000000),
+)
+
+// 纯黑（OLED）：背景纯黑，并针对纯黑的毛病做了处理（和电脑版 app/theme.py 的 OLED 一致）：
+// 文字用暖白 #E2E1DC 而不是纯白（减轻晕光）；卡片从 #121212 起步、滚动的内容都在卡片上（减轻 OLED 拖影）；
+// 靠逐级变亮的深灰和细边框分层（黑色上看不见阴影）；状态色降低饱和度（避免在纯黑上发颤）；白色大按钮调暗一档。
+val OledPalette = Palette(
+    dark = true,
+    bg = Color(0xFF000000), sidebar = Color(0xFF000000), surface = Color(0xFF121212), subtle = Color(0xFF161616),
+    chip = Color(0xFF121212), hover = Color(0x0FFFFFFF), selected = Color(0xFF1E1E1E),
+    border = Color(0x1FFFFFFF), borderStrong = Color(0x33FFFFFF),
+    text = Color(0xFFE2E1DC), text2 = Color(0xFFB5B3AB), text3 = Color(0xFF8E8C85), text4 = Color(0xFF64625D),
+    brand = Color(0xFFD97757), accent = Color(0xFFC6613F), accentOff = Color(0xFF4D2F24), onAccent = Color(0xFFF4F3EF),
+    tintAccent = Color(0x29D97757),
+    primary = Color(0xFFD9D8D2), onPrimary = Color(0xFF121212), primaryOff = Color(0xFF3A3936),
+    ok = Color(0xFF93B885), tintOk = Color(0x384F8A3A), err = Color(0xFFE07A72), tintErr = Color(0x33D03B3B),
+    warn = Color(0xFFD6AD62), info = Color(0xFF86AEE0), tintInfo = Color(0x332370CD),
+    track = Color(0xFF242424), tooltip = Color(0xFFE2E1DC), onTooltip = Color(0xFF121212), scrim = Color(0xB8000000),
 )
 
 val LocalPalette = staticCompositionLocalOf { LightPalette }
@@ -95,8 +113,8 @@ fun isDarkMode(mode: String) = when (mode) {
 }
 
 @Composable
-fun VdTheme(mode: String, content: @Composable () -> Unit) {
-    val p = if (isDarkMode(mode)) DarkPalette else LightPalette
+fun VdTheme(mode: String, oled: Boolean = false, content: @Composable () -> Unit) {
+    val p = if (isDarkMode(mode)) (if (oled) OledPalette else DarkPalette) else LightPalette
     val base = if (p.dark) darkColorScheme() else lightColorScheme()
     val scheme = base.copy(
         primary = p.accent, onPrimary = p.onAccent, primaryContainer = p.tintAccent, onPrimaryContainer = p.accent,

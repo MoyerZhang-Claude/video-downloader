@@ -1280,7 +1280,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             chip.toggled.connect(lambda on, k=key: self._toggle_setting(k, on))
             self.composer.left.addWidget(chip)
         self.chip_hdr = Chip('HDR', 'sun', checkable=True,
-                             tip='列出 HDR / 杜比视界版本（需要 HDR 屏幕才有效果）；关掉只列出普通（SDR）版本')
+                             tip='打开：清晰度列表里多出 HDR / 杜比视界版本（任何电脑都能下载，在 HDR 屏幕上看效果最好）；关闭：只列普通版本')
         self.chip_hdr.setChecked(self.settings.show_hdr)
         self.chip_hdr.toggled.connect(lambda on: (self._toggle_setting('show_hdr', on), self.setting_changed('show_hdr')))
         self.composer.left.addWidget(self.chip_hdr)
@@ -1573,6 +1573,10 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self.settings.theme = mode
         self._save_settings()
         theme.apply(QApplication.instance(), mode)
+
+    def apply_oled(self, on):
+        self._save_settings()
+        theme.apply(QApplication.instance(), oled=on)
 
     def _on_theme_changed(self):
         ui.style_window(self, 'bg')
@@ -2922,7 +2926,8 @@ def setup_app(argv):
     f.setPixelSize(13)
     f.setHintingPreference(QFont.PreferNoHinting)
     app.setFont(f)
-    theme.apply(app, Settings.load().theme)
+    _s = Settings.load()
+    theme.apply(app, _s.theme, oled=_s.dark_oled)
     app._chrome = ui.ChromeFilter(app)
     app.installEventFilter(app._chrome)
     try:     # 跟随系统深浅色

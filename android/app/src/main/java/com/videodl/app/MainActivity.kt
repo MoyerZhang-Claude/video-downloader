@@ -158,7 +158,7 @@ fun App(vm: MainViewModel, activity: ComponentActivity) {
                     else SystemBarStyle.light(AColor.TRANSPARENT, AColor.TRANSPARENT)
         activity.enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
     }
-    VdTheme(vm.themeMode) {
+    VdTheme(vm.themeMode, vm.darkOled) {
         var page by rememberSaveable { mutableStateOf("home") }
         val drawer = rememberDrawerState(DrawerValue.Closed)
         val scope = rememberCoroutineScope()
@@ -481,34 +481,35 @@ private fun MenuItem(icon: androidx.compose.ui.graphics.vector.ImageVector, text
 @Composable
 private fun DownloadOptionRows(vm: MainViewModel) {
     SettingsRow(LineIcons.Monitor, "编码偏好", when (vm.codecPref) {
-            "quality" -> "体积优先：同一清晰度优先选 AV1 / H.265，同画质文件更小，老设备可能放不了"
-            "best" -> "画质优先：同一清晰度选码率最高的，文件最大"
-            else -> "兼容优先：同一清晰度优先选 H.264，任何播放器都能放"
+            "quality" -> "同一清晰度优先选 AV1 / H.265：画质差不多，文件小一半左右；很老的手机、电视可能放不了"
+            "best" -> "同一清晰度选数据量最大的版本：文件最大，画质最稳妥"
+            else -> "同一清晰度优先选 H.264：文件稍大，但任何手机、电脑、电视都能放"
         }) {
         Choice(listOf("compat" to "兼容", "quality" to "体积", "best" to "画质"), vm.codecPref) { vm.chooseCodecPref(it) }
     }
-    SettingsRow(null, "解析 HDR / 杜比视界版本", if (vm.showHdr) "开：列出 HDR 和杜比视界版本（需要 HDR 屏幕才有效果）"
-                else "关：HDR 和杜比视界都不显示，只列出普通（SDR）版本；只有 HDR 版本的视频会提示无法下载") {
+    SettingsRow(null, "显示 HDR / 杜比视界版本", if (vm.showHdr)
+                "开：清晰度列表里会多出 HDR、杜比视界版本。任何手机都能下载；要在支持 HDR 的屏幕上看，颜色才会更鲜艳"
+                else "关：只列出普通版本。如果视频只有 HDR 版本，会提示到这里打开") {
         Switch(vm.showHdr, { vm.toggleShowHdr(it) })
     }
-    SettingsRow(LineIcons.Subtitles, "同时下载字幕", "有中文 / 原语言字幕时，和视频同名保存在「字幕」文件夹") {
+    SettingsRow(LineIcons.Subtitles, "同时下载字幕", "视频有中文或原语言字幕时一起下载，存在「字幕」文件夹里") {
         Switch(vm.wantSubs, { vm.toggleSubs(it) })
     }
-    SettingsRow(LineIcons.Image, "同时保存封面", "下载视频时把封面原图存到相册") {
+    SettingsRow(LineIcons.Image, "同时保存封面", "把视频封面原图存到相册") {
         Switch(vm.wantCover, { vm.toggleCover(it) })
     }
     if (vm.cloud.loggedIn) {
-        SettingsRow(LineIcons.CloudUp, "同时上传到谷歌云盘", "视频和网盘文件下载完成后上传；已下载的视频长按选「上传到谷歌云盘」") {
+        SettingsRow(LineIcons.CloudUp, "同时上传到谷歌云盘", "下载完成后自动上传。已经下好的视频，长按它选「上传到谷歌云盘」") {
             Switch(vm.cloud.uploadOnDownload, { vm.cloud.chooseUploadOnDownload(it) })
         }
     }
-    SettingsRow(LineIcons.Danmaku, "B站弹幕版", if (vm.wantDanmaku) "开：只下载弹幕版（弹幕画进视频，下载完需等一会儿）"
-                else "关：只下载原视频", divider = vm.wantDanmaku) {
+    SettingsRow(LineIcons.Danmaku, "B站弹幕版", if (vm.wantDanmaku) "开：把弹幕画进视频里，任何播放器都能看到弹幕；下载完要多等一会儿生成"
+                else "关：只下载原视频，不带弹幕", divider = vm.wantDanmaku) {
         Switch(vm.wantDanmaku, { vm.toggleDanmaku(it) })
     }
     if (vm.wantDanmaku) {
-        SettingsRow(null, "弹幕帧率", "画面保持下载时的画质和帧率，只有弹幕按这个帧率刷新" +
-                if (vm.danmakuFps == 120) "；120 帧在高刷屏上更顺滑，文件更大、生成更久" else "", divider = false) {
+        SettingsRow(null, "弹幕流畅度", "只影响弹幕滚动有多顺滑，视频画面不变" +
+                if (vm.danmakuFps == 120) "。120 帧在高刷屏上更顺，文件更大、生成更久" else "", divider = false) {
             FpsChoice(vm.danmakuFps) { vm.chooseDanmakuFps(it) }
         }
     }
@@ -1229,12 +1230,26 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
     var editName by remember { mutableStateOf(false) }
     var avatarMenu by remember { mutableStateOf(false) }
     var credits by remember { mutableStateOf(false) }
+    // 当前打开的分类；null = 设置首页（只列分类）
+    var section by rememberSaveable { mutableStateOf<String?>(null) }
+    BackHandler(enabled = section != null) { section = null }
+    val sections = listOf(
+        Triple("personal", "个人与外观", LineIcons.User) to "头像、称呼、浅色 / 深色",
+        Triple("download", "下载", LineIcons.Download) to "清晰度偏好、HDR、字幕、封面、弹幕版",
+        Triple("pan", "网盘", LineIcons.Folder) to "百度、夸克、123 云盘账号，网盘下载速度",
+        Triple("cloud", "谷歌云盘", LineIcons.CloudUp) to "把下载的文件备份到谷歌云盘",
+        Triple("background", "后台与网站登录", LineIcons.Globe) to "锁屏后继续下载、导入网站登录信息",
+        Triple("core", "解析内核", LineIcons.Refresh) to "网站改版解析不了时，在这里更新",
+        Triple("about", "关于", LineIcons.Info) to "版本、检查更新、GitHub",
+    )
+    val title = sections.firstOrNull { it.first.first == section }?.first?.second ?: "设置"
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-        TopBar("设置", back)
+        TopBar(title, onBack = { if (section != null) section = null else back() })
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)) {
-            // 账号卡片
             val b = vm.bili
+            if (section == null) {
+            // 账号卡片
             Box {
                 Surface(shape = RoundedCornerShape(18.dp), color = P.surface, border = BorderStroke(1.dp, P.border),
                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).clickable {
@@ -1264,9 +1279,21 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                     MenuItem(LineIcons.LogOut, "退出 B站登录", P.err) { accountMenu = false; vm.logoutBili() }
                 }
             }
+            SettingsGroup {
+                sections.forEachIndexed { i, (sec, desc) ->
+                    SettingsRow(sec.third, sec.second, desc, divider = i < sections.lastIndex, onClick = { section = sec.first }) {
+                        LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
+                    }
+                }
+            }
+            Text("这个软件的代码几乎全部由 Claude 编写。图标「星芒落点」和界面风格是向 Claude 应用致敬的原创设计，" +
+                "不是 Anthropic 的官方作品，本项目与 Anthropic 没有任何官方关系。",
+                fontSize = 12.sp, color = P.text3, lineHeight = 18.sp, modifier = Modifier.padding(horizontal = 6.dp))
+            }
+            if (section == "personal") {
             SettingsGroup("个人") {
                 Box {
-                    SettingsRow(LineIcons.User, "头像", if (vm.avatar != null) "点击更换图片或调整位置" else "从相册选一张图片，框选圆形区域",
+                    SettingsRow(LineIcons.User, "头像", if (vm.avatar != null) "点一下更换图片或调整位置" else "从相册选一张图片当头像",
                         onClick = { if (vm.avatar != null) avatarMenu = true else chooseAvatar() }) {
                         Avatar(if (b?.loggedIn == true) b.name else vm.nickname, 36.dp, image = vm.avatar)
                     }
@@ -1276,12 +1303,11 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                         MenuItem(LineIcons.Trash, "移除头像", P.err) { avatarMenu = false; vm.removeAvatar() }
                     }
                 }
-                SettingsRow(LineIcons.Type, "首页该怎么称呼你？", vm.nickname.ifEmpty { "未设置：首页只打招呼，不带名字" }, divider = false,
+                SettingsRow(LineIcons.Type, "首页怎么称呼你", vm.nickname.ifEmpty { "未设置：首页问候语里不带名字" }, divider = false,
                     onClick = { editName = true }) { LIcon(LineIcons.ChevronRight, P.text3, 18.dp) }
             }
             SettingsGroup("外观") {
-                SettingsRow(LineIcons.Monitor, "主题", when (vm.themeMode) { "light" -> "浅色"; "dark" -> "深色"; else -> "跟随系统" },
-                    divider = false) {
+                SettingsRow(LineIcons.Monitor, "主题", when (vm.themeMode) { "light" -> "浅色"; "dark" -> "深色"; else -> "跟随系统" }) {
                     Row(Modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, P.borderStrong, RoundedCornerShape(12.dp)).padding(3.dp)) {
                         listOf("system" to LineIcons.Monitor, "light" to LineIcons.Sun, "dark" to LineIcons.Moon).forEach { (m, icon) ->
                             Box(Modifier.size(36.dp).clip(RoundedCornerShape(9.dp))
@@ -1292,17 +1318,23 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                         }
                     }
                 }
+                SettingsRow(null, "深色时用纯黑背景", if (vm.darkOled)
+                        "开：深色模式下背景是纯黑，OLED 屏更省电。已调柔文字、减少滚动拖影，但长时间看仍比深灰更容易累"
+                    else "关：深色模式用和 Claude 官方一样的深灰色，长时间看更舒服", divider = false) {
+                    Switch(vm.darkOled, { vm.changeOled(it) })
+                }
             }
-            SettingsGroup("下载") { DownloadOptionRows(vm) }
-            LaunchedEffect(Unit) { vm.pan.refreshAccounts() }
-            SettingsGroup("网盘账号") { PanAccountRows(vm) }
-            SettingsGroup("网盘下载") { PanSettingRows(vm) }
-            SettingsGroup("谷歌云盘") { CloudRows(vm) }
-            SettingsGroup("后台与登录") {
-                BackgroundRows(vm)
             }
-            SettingsGroup("解析内核") { CoreRows(vm) }
-            SettingsGroup("关于") {
+            if (section == "download") SettingsGroup { DownloadOptionRows(vm) }
+            if (section == "pan") {
+                LaunchedEffect(Unit) { vm.pan.refreshAccounts() }
+                SettingsGroup("网盘账号") { PanAccountRows(vm) }
+                SettingsGroup("网盘下载") { PanSettingRows(vm) }
+            }
+            if (section == "cloud") SettingsGroup { CloudRows(vm) }
+            if (section == "background") SettingsGroup { BackgroundRows(vm) }
+            if (section == "core") SettingsGroup { CoreRows(vm) }
+            if (section == "about") SettingsGroup {
                 val rel = vm.appRelease
                 SettingsRow(LineIcons.Info, "版本", "链接解析下载器 ${vm.appVersion}" +
                         (if (vm.appCheckStatus.isNotEmpty()) " · ${vm.appCheckStatus}" else "") +
@@ -1312,19 +1344,16 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                     if (vm.appCheckBusy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = P.text3)
                     else LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
                 }
-                SettingsRow(null, "启动时检查新版本", "有新版本时弹窗提示，可以选择跳过某个版本") {
+                SettingsRow(null, "打开 App 时检查新版本", "有新版本会弹窗提醒，也可以选择跳过这个版本") {
                     Switch(vm.checkAppUpdate, { vm.changeCheckAppUpdate(it) })
                 }
-                SettingsRow(LineIcons.Github, "GitHub 项目主页", "源码、更新说明和电脑版下载", onClick = { openWeb(ctx, GITHUB_URL) }) {
+                SettingsRow(LineIcons.Github, "GitHub 项目主页", "更新说明、电脑版下载和源代码", onClick = { openWeb(ctx, GITHUB_URL) }) {
                     LIcon(LineIcons.External, P.text3, 18.dp)
                 }
                 SettingsRow(LineIcons.Heart, "致谢与开源许可", "yt-dlp、PanDL、FFmpeg、界面字体等", divider = false, onClick = { credits = true }) {
                     LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
                 }
             }
-            Text("这个软件的代码几乎全部由 Claude 编写。图标「星芒落点」和界面风格是向 Claude 应用致敬的原创设计，" +
-                "不是 Anthropic 的官方作品，本项目与 Anthropic 没有任何官方关系。",
-                fontSize = 12.sp, color = P.text3, lineHeight = 18.sp, modifier = Modifier.padding(horizontal = 6.dp))
             Spacer(Modifier.height(20.dp))
         }
     }
@@ -1468,11 +1497,11 @@ private fun CoreRows(vm: MainViewModel) {
         }
     }
     val canReset = info != null && info.downloaded.isNotEmpty()
-    SettingsRow(null, "自动更新内核", "连着 Wi-Fi 时每天检查一次，有新版本自动下载，下次打开 App 生效", divider = canReset) {
+    SettingsRow(null, "自动更新内核", "连着 Wi-Fi 时每天检查一次；有新版就自动下载，下次打开 App 时用上", divider = canReset) {
         Switch(vm.autoCoreUpdate, { vm.changeAutoCoreUpdate(it) })
     }
     if (canReset) {
-        SettingsRow(null, "恢复为内置版本", "在线更新后反而出问题时使用（内置 ${info?.bundled}）", divider = false,
+        SettingsRow(null, "恢复为内置版本", "更新后反而解析不了时用，回到 App 自带的 ${info?.bundled}", divider = false,
             onClick = { vm.resetCore() }) {
             Text("恢复", fontSize = 13.sp, color = P.text2)
         }

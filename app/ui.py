@@ -917,7 +917,7 @@ class Overlay(QWidget):
         super().__init__(host)
         self.host = host
         self.pref = (width, height)
-        self.panel = Card(radius=16, fill='bg', border='border_strong', parent=self)
+        self.panel = Card(radius=16, fill='panel', border='border_strong', parent=self)
         self.setFocusPolicy(Qt.StrongFocus)
         host.installEventFilter(self)
         self.hide()
