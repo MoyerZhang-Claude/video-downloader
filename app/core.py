@@ -383,8 +383,22 @@ def _proto_rank(f):
     return 3
 
 
-def build_options(info, codec_pref='compat', merge_audio=None):
-    """merge_audio：限制哪些音轨可以和视频合并（手机版：MP4 只能配 AAC）；所有音轨仍会列在「仅音频」里。"""
+HDR_ONLY_MSG = '这个视频只有 HDR / 杜比视界版本：打开输入框下方的「HDR」开关（或 设置 → 下载 里的「解析 HDR / 杜比视界版本」）后可以下载'
+
+
+def hdr_only(info):
+    """视频只有 HDR 版本（没有普通 SDR 画面）"""
+    vids = [f for f in info.get('formats') or [] if _is_video(f)]
+    return bool(vids) and all((f.get('dynamic_range') or 'SDR').upper() != 'SDR' for f in vids)
+
+
+def _res_name(res):
+    return '8K' if res >= 4320 else '4K' if res >= 2160 else '2K' if res >= 1440 else f'{res}P'
+
+
+def build_options(info, codec_pref='compat', merge_audio=None, hdr=True):
+    """merge_audio：限制哪些音轨可以和视频合并（手机版：MP4 只能配 AAC）；所有音轨仍会列在「仅音频」里。
+    hdr=False：不列 HDR / 杜比视界版本（设置里关掉「解析 HDR 版本」）。"""
     formats = info.get('formats') or ([info] if info.get('url') else [])
     duration = info.get('duration')
     rank = _CODEC_RANK.get(codec_pref, _CODEC_RANK['compat'])
@@ -422,23 +436,36 @@ def build_options(info, codec_pref='compat', merge_audio=None):
         res = short_side(f)
         fps = f.get('fps') or 0
         fps_tag = round(fps) if fps and fps > 32 else 0
-        key = (f.get('quality') or 0, 0) if tiered else (res, fps_tag)
+        # HDR 和普通版本分开列（同分辨率同帧率，不然 HDR 会被合并掉）；B站的 HDR 本来就是单独的档位
+        dr = (f.get('dynamic_range') or 'SDR').upper()
+        if not hdr and dr != 'SDR':
+            continue
+        key = (f.get('quality') or 0, 0, '') if tiered else (res, fps_tag, '' if dr == 'SDR' else dr)
         fam = codec_family(f.get('vcodec'))
         score = (rank.get(fam, 3), _proto_rank(f), -(f.get('tbr') or 0), -_size(f, duration))
         if key not in groups or score < groups[key][0]:
             groups[key] = (score, f)
 
     options = []
-    for (_, fps_tag), (_, f) in sorted(groups.items(), key=lambda kv: kv[0], reverse=True):
+    for (_, fps_tag, dr), (_, f) in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], bool(kv[0][2])),
+                                           reverse=True):
         fam = codec_family(f.get('vcodec'))
         res = short_side(f)
         note = f.get('format_note') if f.get('format_note') in ('原画',) else ''
         note_raw = f.get('format_note') or ''
         res_txt = f'{res}p{fps_tag or ""}' if res else (
             '带水印版' if 'watermark' in note_raw.lower() else (note_raw or f.get('format_id') or '默认'))
+        if dr:
+            res_txt += ' HDR' if dr == 'HDR10' else f' {dr}'      # HDR10 / HLG / DV（杜比视界）
         tag = f'原画 {res_txt}' if note else res_txt
         if tiered:
+            # B站的档位名：「杜比视界」「HDR 真彩」看不出分辨率，补上；高帧率也标出来（如「4K 超高清 120帧」）
             tag = f['format']
+            if not any(ch.isdigit() for ch in tag) and res:
+                tag += f' {_res_name(res)}'
+            fps = f.get('fps') or 0
+            if fps > 32 and '帧' not in tag:
+                tag += f' {round(fps)}帧'
         fid = f.get('format_id')
         streams = [(fid, _size(f, duration))]
         rate = _rate(f)
@@ -613,6 +640,9 @@ class Parser:
                 on_error(url, '无法展开播放列表', '')
             return
         video = self._make(url, yt().YoutubeDL.sanitize_info(info, True), settings, logger.locked_formats)
+        if not settings.show_hdr and not any(o.kind == 'video' for o in video.options) and hdr_only(video.info):
+            on_error(url, HDR_ONLY_MSG, '')
+            return
         if probe:      # 从选集里加入的视频不用再查一遍所属合集
             video.collection = collection.probe(info, url, lambda u: self._flat(u, settings))
         on_result(url, video)
@@ -632,7 +662,7 @@ class Parser:
             platform=platform_name(info),
             duration=info.get('duration') or 0,
             uploader=info.get('uploader') or info.get('channel') or '',
-            options=build_options(info, settings.codec_preference),
+            options=build_options(info, settings.codec_preference, hdr=settings.show_hdr),
             locked=locked,
         )
 

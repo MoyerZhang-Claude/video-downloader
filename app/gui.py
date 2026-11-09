@@ -33,6 +33,7 @@ from .hotkey import GlobalHotkey
 from .section_dialog import SectionDialog
 from .settings_dialog import SettingsPanel
 from .theme import c
+from .titlebar import TITLE_H, Frameless
 from .ui import Card, Chip, Combo, Composer, HLine, IconButton, NavItem, PlatformTag, ProgressLine, SelectButton, Spark
 from .widgets import CoverDialog, CoverView, ElidedLabel, ThumbLoader, cover_url, save_cover_bytes
 
@@ -44,7 +45,9 @@ GITHUB_URL = 'https://github.com/MoyerZhang-Claude/video-downloader'
 PRESETS = [('pick', '逐个选择', None, '每个视频默认最高画质，可在卡片里单独改'),
            ('best', '全部最高画质', 'best', ''), ('1080', '全部 1080p', 1080, '没有时取更低一档'),
            ('720', '全部 720p', 720, ''), ('480', '全部 480p', 480, ''), ('360', '全部 360p', 360, ''),
-           ('mp3', '全部仅音频 MP3', 'mp3', '')]
+           ('audio', '全部仅音频', 'audio', '只列出音频：无损、杜比全景声、Opus、AAC…，默认选音质最好的'),
+           ('mp3', '全部转为 MP3', 'mp3', '只列出音频，默认选转为 MP3')]
+AUDIO_PRESETS = ('audio', 'mp3')
 PRESET_BY_KEY = {k: (name, val, tip) for k, name, val, tip in PRESETS}
 
 PROGRESS_STATE = {core.DONE: 'done', core.EXISTS: 'done', core.FAILED: 'failed', core.PAUSED: 'paused',
@@ -633,7 +636,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self.bridge.core_update.connect(self._on_core_update)
         self.bridge.app_update.connect(self._on_app_update)
 
-        self.setWindowTitle(f'{APP_NAME} {APP_VERSION}')
+        self.setWindowTitle(APP_NAME)          # 只显示在任务栏；窗口顶部没有系统标题栏（见 titlebar.py）
         self.setMinimumSize(980, 640)
         self._pan_init()
         self._cloud_init()
@@ -683,14 +686,21 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(self._build_sidebar())
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(0)
+        # 顶部留一点空：右上角是最小化 / 最大化 / 关闭按钮（titlebar.py），页面标题栏右边的按钮不要和它们挤在一起
+        right.addSpacing(TITLE_H - 22)
         self.stack = QStackedWidget()
-        root.addWidget(self.stack, 1)
+        right.addWidget(self.stack, 1)
+        root.addLayout(right, 1)
         self.pages = {'parse': self._build_parse_page(), 'tasks': self._build_tasks_page(),
                       'history': self._build_history_page(), 'log': self._build_log_page()}
         for w in self.pages.values():
             self.stack.addWidget(w)
         self.setCentralWidget(central)
         self.toast = ui.Toast(central)
+        self.frameless = Frameless(self)          # 去掉系统标题栏，右上角自己画窗口按钮
         QShortcut(QKeySequence('Ctrl+,'), self, activated=self._open_settings)
         QShortcut(QKeySequence('Ctrl+L'), self, activated=self._new_parse)
         QShortcut(QKeySequence('Ctrl+K'), self, activated=self._open_search)
@@ -1269,6 +1279,11 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             chip.setChecked(getattr(self.settings, key))
             chip.toggled.connect(lambda on, k=key: self._toggle_setting(k, on))
             self.composer.left.addWidget(chip)
+        self.chip_hdr = Chip('HDR', 'sun', checkable=True,
+                             tip='列出 HDR / 杜比视界版本（需要 HDR 屏幕才有效果）；关掉只列出普通（SDR）版本')
+        self.chip_hdr.setChecked(self.settings.show_hdr)
+        self.chip_hdr.toggled.connect(lambda on: (self._toggle_setting('show_hdr', on), self.setting_changed('show_hdr')))
+        self.composer.left.addWidget(self.chip_hdr)
         cloud_chip = self._cloud_chip(Chip)
         if cloud_chip is not None:
             self.composer.left.addWidget(cloud_chip)
@@ -1377,10 +1392,16 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         m.exec(self.preset_btn.mapToGlobal(QPoint(0, self.preset_btn.height() + 4)))
 
     def _set_preset(self, key):
+        audio_changed = (key in AUDIO_PRESETS) != (self.settings.preset in AUDIO_PRESETS)
         self.settings.preset = key
         self._save_settings()
         self._update_preset_btn()
-        self._apply_preset_all()
+        if audio_changed:           # 下拉框里要不要列视频变了：重画解析结果
+            for row in self.rows.values():
+                if row.state == 'ok':
+                    self._render_result(row)
+        else:
+            self._apply_preset_all()
 
     def _folder_menu(self):
         m = ui.popup_menu(self)
@@ -1537,9 +1558,16 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         if not getattr(self, '_shown_once', False):
             self._shown_once = True
             ui.style_window(self, 'bg')
+            self.frameless.apply()
             self.composer.edit.setFocus()
             # 窗口出来后再在后台加载解析内核，第一次解析时就已经准备好了
             QTimer.singleShot(30, lambda: threading.Thread(target=core.preload, daemon=True).start())
+
+    def nativeEvent(self, event_type, message):
+        r = self.frameless.native_event(event_type, message) if getattr(self, 'frameless', None) else None
+        if r is not None:
+            return True, r
+        return super().nativeEvent(event_type, message)
 
     def apply_theme(self, mode):
         self.settings.theme = mode
@@ -1822,7 +1850,10 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             act = QHBoxLayout()
             act.setSpacing(4)
             combo = Combo()
-            for opt in v.options:
+            shown = v.options
+            if self.settings.preset in AUDIO_PRESETS:      # 「全部仅音频」：列表里只放音频
+                shown = [o for o in v.options if o.kind == 'audio'] or v.options
+            for opt in shown:
                 combo.addItem(opt.label, opt)
             if v.locked:
                 need = '需要大会员账号' if bilibili.is_logged_in() else '左下角头像菜单里扫码登录 B站'
@@ -1994,6 +2025,13 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         idx = 0
         if preset == 'mp3':
             idx = next((i for i, o in enumerate(opts) if o.convert == 'mp3'), 0)
+        elif preset == 'audio':
+            # 音质最好的：无损 > 合并视频用的那条主音轨（音质最好的普通音轨）> 第一条音频
+            idx = next((i for i, o in enumerate(opts) if o.kind == 'audio' and o.convert == 'flac'), None)
+            if idx is None:
+                idx = next((i for i, o in enumerate(opts) if o.kind == 'audio' and o.tag == '音频'), None)
+            if idx is None:
+                idx = next((i for i, o in enumerate(opts) if o.kind == 'audio'), 0)
         elif isinstance(preset, int):
             videos = [(i, o) for i, o in enumerate(opts) if o.kind == 'video']
             fit = [(i, o) for i, o in videos if o.res and o.res <= preset]
@@ -2639,10 +2677,15 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
     def setting_changed(self, key, old=None):
         """设置面板里改了某一项（立即生效）。"""
         s = self.settings
-        if key == 'codec_preference':
+        if key == 'show_hdr' and self.chip_hdr.isChecked() != s.show_hdr:      # 设置里改的：同步输入框下的开关
+            self.chip_hdr.blockSignals(True)
+            self.chip_hdr.setChecked(s.show_hdr)
+            self.chip_hdr.blockSignals(False)
+            self.chip_hdr.update()
+        if key in ('codec_preference', 'show_hdr'):
             for row in self.rows.values():
                 if row.state == 'ok':
-                    row.video.options = core.build_options(row.video.info, s.codec_preference)
+                    row.video.options = core.build_options(row.video.info, s.codec_preference, hdr=s.show_hdr)
                     self._render_result(row)
         elif key == 'sub_langs':
             for row in self.rows.values():

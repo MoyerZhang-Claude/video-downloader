@@ -97,6 +97,7 @@ object PyBridge {
     fun appCheck(current: String): JSONObject = JSONObject(module.callAttr("app_check", current).toString())
 
     fun setCodecPref(pref: String) { module.callAttr("set_codec_pref", pref) }
+    fun setShowHdr(on: Boolean) { module.callAttr("set_show_hdr", on) }
 
     fun extractUrls(text: String): List<String> {
         val arr = JSONArray(module.callAttr("extract_urls", text).toString())

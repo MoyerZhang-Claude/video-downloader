@@ -17,36 +17,39 @@ def _a(hex_rgb, alpha):
     return f'#{round(alpha * 255):02x}{hex_rgb[1:]}'
 
 
+# 颜色参照 Claude 官方应用的新版（v2）配色：浅色是偏中性的暖白，深色背景用纯黑 #000000
+# （官方深色主背景是 #151515；这里按用户要求改成纯黑，OLED 屏上完全不发光），卡片、输入框、菜单用官方的深灰分层。
 LIGHT = {
-    'bg': '#faf9f5', 'sidebar': '#f3f1ea', 'surface': '#ffffff', 'field': '#ffffff', 'menu': '#ffffff',
-    'subtle': '#f0eee6', 'chip': '#f5f4ef',
-    'hover': _a('#1f1e1d', 0.05), 'press': _a('#1f1e1d', 0.09), 'selected': '#e8e5da', 'menu_hover': '#f0eee6',
-    'border': _a('#1f1e1d', 0.11), 'border_strong': _a('#1f1e1d', 0.20), 'border_focus': _a('#1f1e1d', 0.38),
-    'text': '#141413', 'text2': '#3d3d3a', 'text3': '#73726c', 'text4': '#a5a39a',
-    'brand': '#d97757', 'accent': '#c96442', 'accent_hover': '#b65838', 'accent_press': '#a14d31',
-    'accent_off': '#e7b9a7', 'on_accent': '#ffffff', 'tint_accent': _a('#d97757', 0.13),
-    'primary': '#141413', 'primary_hover': '#33322f', 'on_primary': '#faf9f5', 'primary_off': '#c9c7bf',
-    'ok': '#55733a', 'tint_ok': _a('#788c5d', 0.16), 'err': '#b3452f', 'tint_err': _a('#c4553f', 0.12),
-    'warn': '#9a6a12', 'info': '#3c6a9c', 'tint_info': _a('#6a9bcc', 0.16),
-    'track': '#ebe8de', 'scroll': _a('#1f1e1d', 0.18), 'scroll_hover': _a('#1f1e1d', 0.32),
-    'scrim': _a('#141413', 0.32), 'shadow': _a('#3d2c20', 0.10), 'selection': _a('#d97757', 0.28),
-    'tooltip': '#141413', 'on_tooltip': '#faf9f5', 'avatar': '#c96442',
+    # 页面 #fcfcfb、侧边栏 #fafaf9：和官方桌面 App 一样，侧边栏几乎和页面同色，只靠一条细线分开
+    'bg': '#fcfcfb', 'sidebar': '#fafaf9', 'surface': '#ffffff', 'field': '#ffffff', 'menu': '#ffffff',
+    'subtle': '#f3f3f0', 'chip': '#f6f6f4',
+    'hover': _a('#1e1e1d', 0.05), 'press': _a('#1e1e1d', 0.09), 'selected': '#efeeea', 'menu_hover': '#f3f3f0',
+    'border': _a('#1e1e1d', 0.11), 'border_strong': _a('#1e1e1d', 0.20), 'border_focus': _a('#1e1e1d', 0.38),
+    'text': '#131313', 'text2': '#383835', 'text3': '#7b7974', 'text4': '#a5a49a',
+    'brand': '#d97757', 'accent': '#c6613f', 'accent_hover': '#b45636', 'accent_press': '#9f4b2f',
+    'accent_off': '#e9b9a7', 'on_accent': '#ffffff', 'tint_accent': _a('#d97757', 0.13),
+    'primary': '#131313', 'primary_hover': '#2c2c2a', 'on_primary': '#f9f9f7', 'primary_off': '#d2d1c7',
+    'ok': '#3f7a2e', 'tint_ok': _a('#4f8a3a', 0.14), 'err': '#c0392f', 'tint_err': _a('#d03b3b', 0.11),
+    'warn': '#9a6a12', 'info': '#256abf', 'tint_info': _a('#2370cd', 0.12),
+    'track': '#e7e6e1', 'scroll': _a('#1e1e1d', 0.18), 'scroll_hover': _a('#1e1e1d', 0.32),
+    'scrim': _a('#131313', 0.32), 'shadow': _a('#20201f', 0.10), 'selection': _a('#d97757', 0.28),
+    'tooltip': '#131313', 'on_tooltip': '#f9f9f7', 'avatar': '#c6613f',
 }
 
 DARK = {
-    'bg': '#262624', 'sidebar': '#1f1e1d', 'surface': '#30302e', 'field': '#30302e', 'menu': '#30302e',
-    'subtle': '#141413', 'chip': '#2b2b29',
-    'hover': _a('#faf9f5', 0.06), 'press': _a('#faf9f5', 0.10), 'selected': '#383734', 'menu_hover': '#3d3c39',
-    'border': _a('#dedcd1', 0.13), 'border_strong': _a('#dedcd1', 0.22), 'border_focus': _a('#dedcd1', 0.40),
-    'text': '#faf9f5', 'text2': '#e5e3dc', 'text3': '#a6a39a', 'text4': '#74726b',
-    'brand': '#d97757', 'accent': '#c96442', 'accent_hover': '#d6714f', 'accent_press': '#b65838',
-    'accent_off': '#5e3b2e', 'on_accent': '#ffffff', 'tint_accent': _a('#d97757', 0.18),
-    'primary': '#faf9f5', 'primary_hover': '#e3e1d8', 'on_primary': '#141413', 'primary_off': '#4a4945',
-    'ok': '#9cba76', 'tint_ok': _a('#788c5d', 0.26), 'err': '#ec7b66', 'tint_err': _a('#c4553f', 0.22),
-    'warn': '#dcaa4f', 'info': '#86b1dd', 'tint_info': _a('#6a9bcc', 0.22),
-    'track': '#3d3c39', 'scroll': _a('#faf9f5', 0.16), 'scroll_hover': _a('#faf9f5', 0.30),
-    'scrim': _a('#000000', 0.48), 'shadow': _a('#000000', 0.30), 'selection': _a('#d97757', 0.38),
-    'tooltip': '#faf9f5', 'on_tooltip': '#141413', 'avatar': '#c96442',
+    'bg': '#000000', 'sidebar': '#000000', 'surface': '#151515', 'field': '#1a1a19', 'menu': '#1e1e1d',
+    'subtle': '#1a1a19', 'chip': '#151515',
+    'hover': _a('#f9f9f7', 0.07), 'press': _a('#f9f9f7', 0.11), 'selected': '#20201f', 'menu_hover': '#2c2c2a',
+    'border': _a('#e1e0d9', 0.14), 'border_strong': _a('#e1e0d9', 0.24), 'border_focus': _a('#e1e0d9', 0.42),
+    'text': '#f9f9f7', 'text2': '#c3c2b7', 'text3': '#97958d', 'text4': '#6d6b67',
+    'brand': '#d97757', 'accent': '#c6613f', 'accent_hover': '#d9704c', 'accent_press': '#b45636',
+    'accent_off': '#5a3628', 'on_accent': '#ffffff', 'tint_accent': _a('#d97757', 0.18),
+    'primary': '#f9f9f7', 'primary_hover': '#e1e0d9', 'on_primary': '#131313', 'primary_off': '#454442',
+    'ok': '#8cc26a', 'tint_ok': _a('#4f8a3a', 0.28), 'err': '#eb6263', 'tint_err': _a('#d03b3b', 0.24),
+    'warn': '#dcaa4f', 'info': '#5598e7', 'tint_info': _a('#2370cd', 0.24),
+    'track': '#2c2c2a', 'scroll': _a('#f9f9f7', 0.16), 'scroll_hover': _a('#f9f9f7', 0.30),
+    'scrim': _a('#000000', 0.60), 'shadow': _a('#000000', 0.50), 'selection': _a('#d97757', 0.38),
+    'tooltip': '#f9f9f7', 'on_tooltip': '#131313', 'avatar': '#c6613f',
 }
 
 P = dict(LIGHT)          # 当前主题的颜色

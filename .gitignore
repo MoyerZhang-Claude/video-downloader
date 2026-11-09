@@ -44,6 +44,7 @@ local.properties
 /android/build/
 /android/app/build/
 /test.txt
+/test_*.txt
 # 测试头像（第三方图片）、平台 logo 的原始网页和图标：只在本地用，不提交
 /图标设计/软件头像/
 /图标设计/平台logo/原始文件/

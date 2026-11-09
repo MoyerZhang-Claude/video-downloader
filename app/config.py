@@ -156,6 +156,7 @@ class Settings:
     tray_hint_shown: bool = False
     hotkey: str = 'Ctrl+Alt+D'    # 全局快捷键：解析剪贴板里的链接
     check_core_update: bool = True
+    show_hdr: bool = True           # 解析结果里列出 HDR / 杜比视界版本
     cloud_upload: bool = False      # 输入框下的「云盘」开关：下载完同时上传到谷歌云盘
     cloud_keep_local: bool = True   # 上传完保留本地文件（关掉则移到回收站）
     check_app_update: bool = True   # 启动时检查软件新版本（GitHub 发布页）

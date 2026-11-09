@@ -487,6 +487,10 @@ private fun DownloadOptionRows(vm: MainViewModel) {
         }) {
         Choice(listOf("compat" to "兼容", "quality" to "体积", "best" to "画质"), vm.codecPref) { vm.chooseCodecPref(it) }
     }
+    SettingsRow(null, "解析 HDR / 杜比视界版本", if (vm.showHdr) "开：列出 HDR 和杜比视界版本（需要 HDR 屏幕才有效果）"
+                else "关：HDR 和杜比视界都不显示，只列出普通（SDR）版本；只有 HDR 版本的视频会提示无法下载") {
+        Switch(vm.showHdr, { vm.toggleShowHdr(it) })
+    }
     SettingsRow(LineIcons.Subtitles, "同时下载字幕", "有中文 / 原语言字幕时，和视频同名保存在「字幕」文件夹") {
         Switch(vm.wantSubs, { vm.toggleSubs(it) })
     }
@@ -1275,14 +1279,6 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                 SettingsRow(LineIcons.Type, "首页该怎么称呼你？", vm.nickname.ifEmpty { "未设置：首页只打招呼，不带名字" }, divider = false,
                     onClick = { editName = true }) { LIcon(LineIcons.ChevronRight, P.text3, 18.dp) }
             }
-            SettingsGroup("下载") { DownloadOptionRows(vm) }
-            LaunchedEffect(Unit) { vm.pan.refreshAccounts() }
-            SettingsGroup("网盘账号") { PanAccountRows(vm) }
-            SettingsGroup("网盘下载") { PanSettingRows(vm) }
-            SettingsGroup("谷歌云盘") { CloudRows(vm) }
-            SettingsGroup("后台与登录") {
-                BackgroundRows(vm)
-            }
             SettingsGroup("外观") {
                 SettingsRow(LineIcons.Monitor, "主题", when (vm.themeMode) { "light" -> "浅色"; "dark" -> "深色"; else -> "跟随系统" },
                     divider = false) {
@@ -1296,6 +1292,14 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                         }
                     }
                 }
+            }
+            SettingsGroup("下载") { DownloadOptionRows(vm) }
+            LaunchedEffect(Unit) { vm.pan.refreshAccounts() }
+            SettingsGroup("网盘账号") { PanAccountRows(vm) }
+            SettingsGroup("网盘下载") { PanSettingRows(vm) }
+            SettingsGroup("谷歌云盘") { CloudRows(vm) }
+            SettingsGroup("后台与登录") {
+                BackgroundRows(vm)
             }
             SettingsGroup("解析内核") { CoreRows(vm) }
             SettingsGroup("关于") {

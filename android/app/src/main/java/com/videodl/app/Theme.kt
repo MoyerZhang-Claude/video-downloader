@@ -28,32 +28,34 @@ data class Palette(
     val track: Color, val tooltip: Color, val onTooltip: Color, val scrim: Color,
 )
 
+// 颜色参照 Claude 官方应用的新版（v2）配色，和电脑版 app/theme.py 一致：
+// 浅色是偏中性的暖白；深色背景用纯黑（官方是 #151515，按用户要求改纯黑，OLED 屏上不发光），卡片、输入框用官方深灰分层。
 val LightPalette = Palette(
     dark = false,
-    bg = Color(0xFFFAF9F5), sidebar = Color(0xFFF3F1EA), surface = Color.White, subtle = Color(0xFFF0EEE6),
-    chip = Color(0xFFF5F4EF), hover = Color(0x0D1F1E1D), selected = Color(0xFFE8E5DA),
-    border = Color(0x1C1F1E1D), borderStrong = Color(0x331F1E1D),
-    text = Color(0xFF141413), text2 = Color(0xFF3D3D3A), text3 = Color(0xFF73726C), text4 = Color(0xFFA5A39A),
-    brand = Color(0xFFD97757), accent = Color(0xFFC96442), accentOff = Color(0xFFE7B9A7), onAccent = Color.White,
+    bg = Color(0xFFF9F9F7), sidebar = Color(0xFFF3F3F0), surface = Color.White, subtle = Color(0xFFF0EFEC),
+    chip = Color(0xFFF6F6F4), hover = Color(0x0D1E1E1D), selected = Color(0xFFE7E6E1),
+    border = Color(0x1C1E1E1D), borderStrong = Color(0x331E1E1D),
+    text = Color(0xFF131313), text2 = Color(0xFF383835), text3 = Color(0xFF7B7974), text4 = Color(0xFFA5A49A),
+    brand = Color(0xFFD97757), accent = Color(0xFFC6613F), accentOff = Color(0xFFE9B9A7), onAccent = Color.White,
     tintAccent = Color(0x21D97757),
-    primary = Color(0xFF141413), onPrimary = Color(0xFFFAF9F5), primaryOff = Color(0xFFC9C7BF),
-    ok = Color(0xFF55733A), tintOk = Color(0x29788C5D), err = Color(0xFFB3452F), tintErr = Color(0x1FC4553F),
-    warn = Color(0xFF9A6A12), info = Color(0xFF3C6A9C), tintInfo = Color(0x296A9BCC),
-    track = Color(0xFFEBE8DE), tooltip = Color(0xFF141413), onTooltip = Color(0xFFFAF9F5), scrim = Color(0x52141413),
+    primary = Color(0xFF131313), onPrimary = Color(0xFFF9F9F7), primaryOff = Color(0xFFD2D1C7),
+    ok = Color(0xFF3F7A2E), tintOk = Color(0x244F8A3A), err = Color(0xFFC0392F), tintErr = Color(0x1CD03B3B),
+    warn = Color(0xFF9A6A12), info = Color(0xFF256ABF), tintInfo = Color(0x1F2370CD),
+    track = Color(0xFFE7E6E1), tooltip = Color(0xFF131313), onTooltip = Color(0xFFF9F9F7), scrim = Color(0x52131313),
 )
 
 val DarkPalette = Palette(
     dark = true,
-    bg = Color(0xFF262624), sidebar = Color(0xFF1F1E1D), surface = Color(0xFF30302E), subtle = Color(0xFF1F1E1D),
-    chip = Color(0xFF2B2B29), hover = Color(0x0FFAF9F5), selected = Color(0xFF383734),
-    border = Color(0x21DEDCD1), borderStrong = Color(0x38DEDCD1),
-    text = Color(0xFFFAF9F5), text2 = Color(0xFFE5E3DC), text3 = Color(0xFFA6A39A), text4 = Color(0xFF74726B),
-    brand = Color(0xFFD97757), accent = Color(0xFFC96442), accentOff = Color(0xFF5E3B2E), onAccent = Color.White,
+    bg = Color(0xFF000000), sidebar = Color(0xFF000000), surface = Color(0xFF151515), subtle = Color(0xFF1A1A19),
+    chip = Color(0xFF151515), hover = Color(0x12F9F9F7), selected = Color(0xFF20201F),
+    border = Color(0x24E1E0D9), borderStrong = Color(0x3DE1E0D9),
+    text = Color(0xFFF9F9F7), text2 = Color(0xFFC3C2B7), text3 = Color(0xFF97958D), text4 = Color(0xFF6D6B67),
+    brand = Color(0xFFD97757), accent = Color(0xFFC6613F), accentOff = Color(0xFF5A3628), onAccent = Color.White,
     tintAccent = Color(0x2ED97757),
-    primary = Color(0xFFFAF9F5), onPrimary = Color(0xFF141413), primaryOff = Color(0xFF4A4945),
-    ok = Color(0xFF9CBA76), tintOk = Color(0x42788C5D), err = Color(0xFFEC7B66), tintErr = Color(0x38C4553F),
-    warn = Color(0xFFDCAA4F), info = Color(0xFF86B1DD), tintInfo = Color(0x386A9BCC),
-    track = Color(0xFF3D3C39), tooltip = Color(0xFFFAF9F5), onTooltip = Color(0xFF141413), scrim = Color(0x7A000000),
+    primary = Color(0xFFF9F9F7), onPrimary = Color(0xFF131313), primaryOff = Color(0xFF454442),
+    ok = Color(0xFF8CC26A), tintOk = Color(0x474F8A3A), err = Color(0xFFEB6263), tintErr = Color(0x3DD03B3B),
+    warn = Color(0xFFDCAA4F), info = Color(0xFF5598E7), tintInfo = Color(0x3D2370CD),
+    track = Color(0xFF2C2C2A), tooltip = Color(0xFFF9F9F7), onTooltip = Color(0xFF131313), scrim = Color(0x99000000),
 )
 
 val LocalPalette = staticCompositionLocalOf { LightPalette }

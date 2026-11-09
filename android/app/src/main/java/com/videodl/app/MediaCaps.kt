@@ -1,6 +1,7 @@
 package com.videodl.app
 
 import android.content.Context
+import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.media.MediaMuxer
@@ -45,13 +46,22 @@ object MediaCaps {
         }
     }
 
-    /** 有没有解码器能播放这个分辨率和帧率（横竖都试，竖屏视频的宽高是反的） */
-    fun canDecode(mime: String, w: Int, h: Int, fps: Double): Boolean {
+    /** 有没有解码器能播放这个分辨率和帧率（横竖都试，竖屏视频的宽高是反的）；hdr：还要支持 10 位 HDR 规格 */
+    fun canDecode(mime: String, w: Int, h: Int, fps: Double, hdr: Boolean = false): Boolean {
         val rate = if (fps > 1) fps else 30.0
+        val hdrProfiles = when (mime) {
+            VP9 -> setOf(MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR, MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR10Plus,
+                MediaCodecInfo.CodecProfileLevel.VP9Profile2)
+            AV1 -> setOf(MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10,
+                MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10Plus, MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10)
+            else -> emptySet()
+        }
         return decoders.any { info ->
             info.supportedTypes.any { it.equals(mime, true) } && runCatching {
-                val vc = info.getCapabilitiesForType(mime).videoCapabilities!!
-                vc.areSizeAndRateSupported(w, h, rate) || vc.areSizeAndRateSupported(h, w, rate)
+                val caps = info.getCapabilitiesForType(mime)
+                val vc = caps.videoCapabilities!!
+                (vc.areSizeAndRateSupported(w, h, rate) || vc.areSizeAndRateSupported(h, w, rate)) &&
+                    (!hdr || caps.profileLevels.any { it.profile in hdrProfiles })
             }.getOrDefault(false)
         }
     }
@@ -61,9 +71,9 @@ object MediaCaps {
      * w、h 未知（0）时只看能不能合并。
      */
     @Suppress("FunctionName")
-    fun container_for(codec: String, w: Int, h: Int, fps: Double): String {
+    fun container_for(codec: String, w: Int, h: Int, fps: Double, hdr: Boolean): String {
         val mime = when (codec) { "av1" -> AV1; "vp9" -> VP9; else -> return "" }
-        if (w > 0 && h > 0 && !canDecode(mime, w, h, fps)) return ""
+        if (w > 0 && h > 0 && !canDecode(mime, w, h, fps, hdr)) return ""
         return when {
             canMux(mime, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4) -> "mp4"
             canMux(mime, MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM) -> "webm"

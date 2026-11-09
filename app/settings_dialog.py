@@ -281,6 +281,9 @@ class SettingsPanel(ui.Overlay):
         self._section(lay, '格式与封面')
         self._row(lay, '编码偏好', '同一清晰度有多种编码时优先选哪种（YouTube、B站常见）',
                   self._combo('codec_preference', CODEC_PREFERENCES.items(), 340))
+        self._row(lay, '解析 HDR / 杜比视界版本', '关闭后 HDR 和杜比视界版本都不显示，只列出普通（SDR）版本'
+                  '（输入框下方的「HDR」开关也能切换）。没有 HDR 屏幕时，HDR 视频颜色会发灰；只有 HDR 版本的视频会提示无法下载',
+                  self._toggle('show_hdr'))
         self._row(lay, '同时保存封面', '下载视频时另存一张与视频同名的 JPG（也可以在输入框下方的「封面」开关切换）',
                   self._toggle('save_cover'))
         self._row(lay, '把封面写进视频文件', '资源管理器缩略图、播放器里直接显示封面', self._toggle('embed_cover'))

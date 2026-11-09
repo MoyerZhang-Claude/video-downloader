@@ -144,6 +144,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var showAppUpdate by mutableStateOf(false)                 // 新版本弹窗
     var codecPref by mutableStateOf("compat")                  // 编码偏好：compat 兼容优先 / quality 体积优先
         private set
+    var showHdr by mutableStateOf(true)                        // 列出 HDR / 杜比视界版本
+        private set
 
     private val prefs = app.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private val ids = AtomicLong(1)
@@ -158,6 +160,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         themeMode = prefs.getString("theme", "system") ?: "system"
         nickname = prefs.getString("nickname", "") ?: ""
         codecPref = prefs.getString("codec_pref", "compat").let { if (it == "quality" || it == "best") it else "compat" }
+        showHdr = prefs.getBoolean("show_hdr", true)
         autoCoreUpdate = prefs.getBoolean("auto_core_update", true)
         checkAppUpdate = prefs.getBoolean("check_app_update", true)
         newGreeting()
@@ -176,6 +179,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             PyBridge.init(getApplication())      // 第一次启动要解压 Python 运行环境，稍慢
             runCatching { PyBridge.setCodecPref(codecPref) }
+            runCatching { PyBridge.setShowHdr(showHdr) }
             cloud.start()
             withContext(Dispatchers.Main) { ready = true }
             refreshBili()
@@ -390,6 +394,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         wantCover = on
         DownloadRepo.wantCover = on
         prefs.edit().putBoolean("want_cover", on).apply()
+    }
+
+    fun toggleShowHdr(on: Boolean) {
+        showHdr = on
+        prefs.edit().putBoolean("show_hdr", on).apply()
+        viewModelScope.launch(Dispatchers.IO) { awaitReady(); runCatching { PyBridge.setShowHdr(on) } }
+        toast(if (on) "之后解析的视频会列出 HDR / 杜比视界版本" else "之后解析的视频只列出普通（SDR）版本")
     }
 
     fun chooseCodecPref(pref: String) {
