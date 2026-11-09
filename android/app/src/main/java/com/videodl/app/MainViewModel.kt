@@ -147,6 +147,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = app.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private val ids = AtomicLong(1)
+    val cloud = CloudModel(this, app)              // 谷歌云盘备份
     private val parseSlots = Semaphore(3)
 
     init {
@@ -175,6 +176,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             PyBridge.init(getApplication())      // 第一次启动要解压 Python 运行环境，稍慢
             runCatching { PyBridge.setCodecPref(codecPref) }
+            cloud.start()
             withContext(Dispatchers.Main) { ready = true }
             refreshBili()
             refreshCookies()
@@ -789,6 +791,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun onDownloaded(task: DownloadTask) {
         val uri = task.savedUri?.toString() ?: return
+        if (task.cloud) cloud.uploadTask(task)
         val q = task.savedTag + if (task.burned) DownloadTask.DANMAKU_SUFFIX else ""
         task.item.history = listOf(HistoryHit(q, uri, System.currentTimeMillis() / 1000.0)) +
             task.item.history.filter { it.quality != q }

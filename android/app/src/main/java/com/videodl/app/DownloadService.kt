@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.IBinder
@@ -58,7 +59,7 @@ class DownloadService : Service() {
             while (true) {
                 delay(1000)
                 val active = DownloadRepo.activeTasks
-                if (active.isEmpty() && PanEngine.activeCount == 0) {
+                if (active.isEmpty() && PanEngine.activeCount == 0 && !CloudKeepAlive.active) {
                     if (++idle >= 2) break            // 连续 2 秒没有任务才停，避免刚加入的任务还没登记
                     continue
                 }
@@ -105,6 +106,7 @@ object Notifier {
         val done = active.sumOf { if (it.status in setOf("merging", "converting", "burning", "saving")) it.total else it.done } +
             pan.sumOf { maxOf(0L, it.downloaded) }
         val speed = running.sumOf { it.speed } + PanEngine.totalSpeed
+        if (active.isEmpty() && pan.isEmpty() && CloudKeepAlive.active) return cloudProgress(ctx)
         val title = when {
             active.isEmpty() && pan.isEmpty() -> "准备下载…"
             pan.isEmpty() && active.size == 1 -> active[0].title
@@ -158,6 +160,47 @@ object Notifier {
             .setContentTitle("下载失败")
             .setContentText("${task.title}：${task.error}")
             .setContentIntent(openApp(ctx))
+            .setAutoCancel(true))
+    }
+
+    /** 只在上传到谷歌云盘时的进度通知 */
+    private fun cloudProgress(ctx: Context): Notification {
+        val k = CloudKeepAlive
+        val titles = k.titles
+        val title = when {
+            k.busy && titles.isEmpty() -> "正在连接谷歌云盘…"
+            titles.size == 1 -> "上传到谷歌云盘 · ${titles[0]}"
+            titles.isNotEmpty() -> "正在上传 ${titles.size} 项到谷歌云盘"
+            else -> "正在上传到谷歌云盘…"
+        }
+        val text = listOfNotNull(
+            if (k.total > 0) "${fmtSize(k.done)} / ${fmtSize(k.total)}" else null,
+            if (k.speed > 0) "${fmtSize(k.speed)}/s" else null,
+        ).joinToString("  ·  ").ifEmpty { if (k.busy) "在浏览器里完成授权后回到 App" else "准备上传…" }
+        val pct = if (k.total > 0) (k.done * 100 / k.total).toInt().coerceIn(0, 100) else 0
+        return NotificationCompat.Builder(ctx, CH_PROGRESS)
+            .setSmallIcon(R.drawable.ic_stat_download)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setProgress(100, pct, k.total <= 0)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setContentIntent(openApp(ctx))
+            .build()
+    }
+
+    /** 一项（一个视频连同字幕，或一批网盘文件）上传完 / 失败 */
+    fun cloudDone(ctx: Context, g: CloudGroup) {
+        val ok = g.state == "done"
+        val view = if (ok) Intent(Intent.ACTION_VIEW, Uri.parse("https://drive.google.com/drive/my-drive"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) else Intent(ctx, MainActivity::class.java)
+        val pi = PendingIntent.getActivity(ctx, g.title.hashCode(), view, PendingIntent.FLAG_IMMUTABLE)
+        notify(ctx, 7000 + (g.title.hashCode() and 0xfff), NotificationCompat.Builder(ctx, CH_RESULT)
+            .setSmallIcon(R.drawable.ic_stat_download)
+            .setContentTitle(if (ok) "已上传到谷歌云盘" + if (g.n > 1) " · ${g.n} 个文件" else "" else "上传到谷歌云盘失败")
+            .setContentText(if (ok) g.title else "${g.title}：${g.error}")
+            .setContentIntent(pi)
             .setAutoCancel(true))
     }
 

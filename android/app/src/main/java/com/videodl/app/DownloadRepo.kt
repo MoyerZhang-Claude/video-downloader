@@ -36,6 +36,7 @@ class DownloadTask(val id: Long, val item: VideoItem, val optIndex: Int, val bur
     var mime = "video/mp4"
     var subCount by mutableStateOf(0)
     var coverSaved by mutableStateOf(false)
+    var cloud = false                               // 下完同时上传到谷歌云盘（加入下载时的开关）
     var burned by mutableStateOf(false)
     var callback: DownloadCallback? = null
     val active get() = status in ACTIVE
@@ -58,6 +59,7 @@ object DownloadRepo {
     /** 界面上的开关（加入下载时读取） */
     @Volatile var wantSubs = true
     @Volatile var wantCover = false
+    @Volatile var wantCloud = false          // 下载完同时上传到谷歌云盘
     @Volatile var wantDanmaku = false
     @Volatile var danmakuFps = 60            // 弹幕版里弹幕的帧率：60 / 120（画面保持原来的帧率）
 
@@ -76,6 +78,7 @@ object DownloadRepo {
 
     fun enqueue(item: VideoItem, index: Int) {
         val task = DownloadTask(ids.getAndIncrement(), item, index, willBurn(item, index), wantCover)
+        task.cloud = wantCloud
         tasks.add(0, task)
         start(task)
     }

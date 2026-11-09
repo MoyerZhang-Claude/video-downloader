@@ -334,6 +334,7 @@ class PanModel(private val vm: MainViewModel, private val app: Application) {
             val ids = List(added.length()) { added.getJSONObject(it).optString("id") }
             for (i in 0 until added.length()) PanTask.from(added.getJSONObject(i)).let { PanEngine.tasks.putIfAbsent(it.id, it) }
             val b = PanBatch(System.currentTimeMillis(), s.provider, title, s.shareUrl(), dir.path, ids, System.currentTimeMillis(), "active")
+            if (vm.cloud.wanted) vm.cloud.flagBatch(b.id)        // 开着「同时上传」：下完传到谷歌云盘
             batches.add(b)
             s.batchIds.add(b.id)
             saveBatches()
@@ -369,6 +370,7 @@ class PanModel(private val vm: MainViewModel, private val app: Application) {
                 changed = true
                 vm.toast("✓ 网盘下载完成：${b.title}")
                 Notifier.panDone(app, b.title, st.total, b.saveDir)
+                vm.cloud.batchFinished(b)
             } else if (st.failed > 0 && warned[b.id] != st.failed) {
                 warned[b.id] = st.failed
                 vm.toast("${b.title}：${st.failed} 个文件下载失败，可以在「下载」页重试")

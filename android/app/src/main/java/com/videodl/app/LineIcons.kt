@@ -12,6 +12,7 @@ import androidx.compose.ui.unit.dp
 
 /** 24×24 圆头细线图标（和电脑版同一套），用 Icon(LineIcons.Download, null, tint = …) 着色。 */
 object LineIcons {
+    val CloudUp by lazy { build("cloud_up", listOf("M7.2 18.5h9.9a4.1 4.1 0 0 0 .7-8.15 5.9 5.9 0 0 0-11.3 1.4A3.4 3.4 0 0 0 7.2 18.5z", "M12 16v-5.2M9.8 12.8 12 10.6l2.2 2.2"), listOf()) }
     val Plus by lazy { build("plus", listOf("M12 5v14M5 12h14"), listOf()) }
     val Menu by lazy { build("menu", listOf("M4 7h16M4 12h16M4 17h10"), listOf()) }
     val ArrowLeft by lazy { build("arrow_left", listOf("M19 12H5.5M11.5 5.8 5.3 12l6.2 6.2"), listOf()) }

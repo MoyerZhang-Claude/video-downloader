@@ -20,6 +20,14 @@ object Storage {
             .replace(Regex("[\\\\/*\"<>\\r\\n\\t]+"), " ").replace(Regex("\\s{2,}"), " ")
             .trim().trim('.').take(limit).ifBlank { "video" }
 
+    /** content:// 地址对应的真实文件路径（App 自己保存的文件可以按路径读，上传谷歌云盘用）；找不到返回 null */
+    fun pathOf(ctx: Context, uri: Uri): String? = runCatching {
+        if (uri.scheme == "file") return uri.path
+        ctx.contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use {
+            if (it.moveToFirst()) it.getString(0) else null
+        }
+    }.getOrNull()?.takeIf { java.io.File(it).isFile }
+
     /** subfolder：在「下载/链接解析下载器」下再建一层（如「弹幕数据」）。 */
     fun saveToDownloads(ctx: Context, src: File, displayName: String, mime: String, subfolder: String = ""): Uri {
         val dir = "${Environment.DIRECTORY_DOWNLOADS}/$FOLDER" + if (subfolder.isNotEmpty()) "/$subfolder" else ""

@@ -304,10 +304,15 @@ private fun RecentRow(h: HistoryRecord, vm: MainViewModel, goHome: () -> Unit) {
     val ctx = LocalContext.current
     var menu by remember { mutableStateOf(false) }
     Box {
-        Text(h.title, fontSize = 15.sp, color = if (h.exists) P.text else P.text3, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
                 .combinedClickable(onClick = { openRecord(ctx, h, vm) }, onLongClick = { menu = true })
-                .padding(horizontal = 10.dp, vertical = 11.dp))
+                .padding(horizontal = 10.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(h.title, fontSize = 15.sp, color = if (h.exists) P.text else P.text3, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
+            vm.cloud.status("rec:${h.id}")?.takeIf { it.first != "已传到云盘" }?.let { (t, col) ->
+                Text("  " + t.removePrefix("云盘 "), fontSize = 12.sp, color = col, maxLines = 1)
+            }
+        }
         RecordMenu(h, vm, menu, { menu = false }, goHome)
     }
 }
@@ -326,6 +331,15 @@ private fun RecordMenu(h: HistoryRecord, vm: MainViewModel, expanded: Boolean, o
         MenuItem(LineIcons.Edit, "重命名") { onDismiss(); vm.renaming = h }
         MenuItem(LineIcons.FolderMove, "移至分区") { onDismiss(); vm.moving = h }
         if (h.url.isNotEmpty()) MenuItem(LineIcons.Refresh, "重新解析") { onDismiss(); vm.submitUrls(listOf(h.url)); goHome() }
+        if (expanded && vm.cloud.loggedIn) {
+            val fileId = remember(h.id) { vm.cloud.uploadedId(h.uri) }
+            if (fileId.isNotEmpty()) MenuItem(LineIcons.CloudUp, "在谷歌云盘中查看") {
+                onDismiss(); openWeb(ctx, "https://drive.google.com/file/d/$fileId/view")
+            } else if (h.exists) MenuItem(LineIcons.CloudUp, "上传到谷歌云盘") { onDismiss(); vm.cloud.uploadRecord(h) }
+            if (vm.cloud.groups["rec:${h.id}"]?.state == "failed") MenuItem(LineIcons.Refresh, "重试上传到云盘") {
+                onDismiss(); vm.cloud.retry("rec:${h.id}")
+            }
+        }
         MenuItem(LineIcons.Trash, "删除记录", P.err) { onDismiss(); vm.deleteHistory(h) }
     }
 }
@@ -478,6 +492,11 @@ private fun DownloadOptionRows(vm: MainViewModel) {
     }
     SettingsRow(LineIcons.Image, "同时保存封面", "下载视频时把封面原图存到相册") {
         Switch(vm.wantCover, { vm.toggleCover(it) })
+    }
+    if (vm.cloud.loggedIn) {
+        SettingsRow(LineIcons.CloudUp, "同时上传到谷歌云盘", "视频和网盘文件下载完成后上传；已下载的视频长按选「上传到谷歌云盘」") {
+            Switch(vm.cloud.uploadOnDownload, { vm.cloud.chooseUploadOnDownload(it) })
+        }
     }
     SettingsRow(LineIcons.Danmaku, "B站弹幕版", if (vm.wantDanmaku) "开：只下载弹幕版（弹幕画进视频，下载完需等一会儿）"
                 else "关：只下载原视频", divider = vm.wantDanmaku) {
@@ -773,6 +792,9 @@ private fun TaskCard(task: DownloadTask, vm: MainViewModel) {
                     color = color, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 val detail = taskDetail(task)
                 if (detail.isNotEmpty() && task.status != "done") Text(detail, color = P.text3, fontSize = 12.sp)
+                val cloud = vm.cloud.status("task:${task.id}")
+                    ?: if (task.cloud && task.active) "下完后上传云盘" to P.text3 else null
+                cloud?.let { (t, col) -> Text(t, color = col, fontSize = 12.sp) }
             }
             when {
                 task.active -> OutlineButton("取消") { vm.cancel(task) }
@@ -932,9 +954,10 @@ private fun HistoryRow(h: HistoryRecord, vm: MainViewModel, goHome: () -> Unit) 
             Spacer(Modifier.height(5.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 PlatformTag(h.platform)
+                val cloudText = vm.cloud.status("rec:${h.id}")?.first
                 Text("  " + listOf(h.quality, fmtSize(h.size), fmtAgo(h.ts)).filter { it.isNotEmpty() }.joinToString(" · ") +
-                    if (!h.exists) " · 文件已删除" else "", fontSize = 12.sp, color = P.text3, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis)
+                    (if (!h.exists) " · 文件已删除" else "") + (cloudText?.let { " · $it" } ?: ""),
+                    fontSize = 12.sp, color = P.text3, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
         Box {
@@ -1256,6 +1279,7 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
             LaunchedEffect(Unit) { vm.pan.refreshAccounts() }
             SettingsGroup("网盘账号") { PanAccountRows(vm) }
             SettingsGroup("网盘下载") { PanSettingRows(vm) }
+            SettingsGroup("谷歌云盘") { CloudRows(vm) }
             SettingsGroup("后台与登录") {
                 BackgroundRows(vm)
             }

@@ -328,7 +328,14 @@ fun PanBatchCard(b: PanBatch, vm: MainViewModel) {
                 val detail = if (st.active == 0 && st.failed == 0 && st.paused == 0 && st.total > 0)
                     "已保存到「下载/${b.saveDir.substringAfter("/Download/")}」" else batchDetail(st)
                 if (detail.isNotEmpty()) Text(detail, color = P.text3, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                val cloud = vm.cloud.status("batch:${b.id}")
+                    ?: if (vm.cloud.isFlagged(b.id) && st.active > 0) "下完后上传云盘" to P.text3 else null
+                cloud?.let { (t, col) -> Text(t, color = col, fontSize = 12.sp) }
             }
+            if (vm.cloud.loggedIn && st.total > 0 && st.active == 0 && st.done > 0 && vm.cloud.groups["batch:${b.id}"] == null)
+                TextButton(onClick = { vm.cloud.uploadBatch(b) }) { Text("传到云盘", color = P.accent) }
+            if (vm.cloud.groups["batch:${b.id}"]?.state == "failed")
+                TextButton(onClick = { vm.cloud.retry("batch:${b.id}") }) { Text("重传云盘", color = P.err) }
             TextButton(onClick = { confirm = true }) { Text(if (st.active > 0) "删除" else "移除", color = P.text3) }
             when {
                 st.active > 0 -> OutlineButton("暂停") { vm.pan.pause(b) }
