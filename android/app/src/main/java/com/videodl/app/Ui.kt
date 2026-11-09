@@ -1,5 +1,7 @@
 package com.videodl.app
 
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.layout.Layout
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -263,11 +265,33 @@ fun SettingsRow(icon: ImageVector?, title: String, subtitle: String? = null, sub
         Row(Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 16.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
             if (icon != null) { LIcon(icon, P.text, 22.dp); Spacer(Modifier.width(14.dp)) }
-            Column(Modifier.weight(1f)) {
-                Text(title, fontSize = 16.sp, color = P.text)
-                if (!subtitle.isNullOrEmpty()) Text(subtitle, fontSize = 12.sp, color = subtitleColor ?: P.text3, lineHeight = 16.sp)
+            // 右边的控件太宽（如「兼容 / 体积 / 画质」），或者手机屏幕窄、系统字体调大时，文字会被挤成一列竖字：
+            // 文字区不到整行的 55% 时，把控件放到文字下面
+            Layout(modifier = Modifier.weight(1f), content = {
+                Column {
+                    Text(title, fontSize = 16.sp, color = P.text)
+                    if (!subtitle.isNullOrEmpty()) Text(subtitle, fontSize = 12.sp, color = subtitleColor ?: P.text3, lineHeight = 16.sp)
+                }
+                Box { trailing?.invoke() }
+            }) { ms, c ->
+                val gap = 10.dp.roundToPx()
+                val tr = ms[1].measure(Constraints(maxWidth = c.maxWidth))
+                val side = c.maxWidth - (if (tr.width > 0) tr.width + gap else 0)
+                if (tr.width == 0 || side >= c.maxWidth * 0.55f) {
+                    val tx = ms[0].measure(Constraints(maxWidth = side.coerceAtLeast(0)))
+                    val h = maxOf(tx.height, tr.height)
+                    layout(c.maxWidth, h) {
+                        tx.place(0, (h - tx.height) / 2)
+                        tr.place(c.maxWidth - tr.width, (h - tr.height) / 2)
+                    }
+                } else {
+                    val tx = ms[0].measure(Constraints(maxWidth = c.maxWidth))
+                    layout(c.maxWidth, tx.height + gap + tr.height) {
+                        tx.place(0, 0)
+                        tr.place(0, tx.height + gap)
+                    }
+                }
             }
-            if (trailing != null) { Spacer(Modifier.width(10.dp)); trailing() }
         }
         if (divider) Box(Modifier.padding(start = if (icon != null) 52.dp else 16.dp).fillMaxWidth().height(1.dp).background(P.border))
     }
