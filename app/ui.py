@@ -55,6 +55,49 @@ def px_metrics(size, weight=None):
     return fm
 
 
+def sync_layout(lay, desired):
+    """增量更新一个纵向列表，只增删改变化的条目（不是整个删掉重建，所以不闪、滚动位置不动）。
+    desired：[(键, 签名, 创建函数() -> 控件, 更新函数(控件) 或 None)]，按显示顺序。
+    键相同、签名也相同的控件原样保留；签名变了的调用更新函数（没有就重新创建）。"""
+    items = getattr(lay, '_vd_items', None)
+    if items is None:
+        items = lay._vd_items = {}
+    keys = {d[0] for d in desired}
+
+    def drop(w):
+        lay.removeWidget(w)
+        w.hide()               # 立刻从界面上拿掉（deleteLater 要等事件循环，期间会和新内容叠在一起）
+        w.setParent(None)
+        w.deleteLater()
+
+    for key in [k for k in items if k not in keys]:
+        drop(items.pop(key)[0])
+    for i, (key, sig, make, update) in enumerate(desired):
+        cur = items.get(key)
+        if cur is None:
+            w = make()
+            lay.insertWidget(i, w)
+        else:
+            w, old = cur
+            if old != sig and (update is None or update(w) is False):
+                drop(w)
+                w = make()
+                lay.insertWidget(i, w)
+            elif lay.indexOf(w) != i:
+                lay.removeWidget(w)
+                lay.insertWidget(i, w)
+        items[key] = (w, sig)
+
+
+# ---------------------------------------------------------------- 「显示功能说明」开关（设置 → 常规）
+_tips = {'on': True}
+
+
+def tips_on():
+    """解释功能的小字要不要显示（关掉后界面更干净；状态、错误、警告不受影响）。"""
+    return _tips['on']
+
+
 # ---------------------------------------------------------------- 动画时钟（所有动画共用一个定时器）
 
 class _Clock(QObject):

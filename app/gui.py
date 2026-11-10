@@ -39,7 +39,10 @@ from .section_dialog import SectionDialog
 from .settings_dialog import SettingsPanel
 from .theme import c
 from .titlebar import TITLE_H, Frameless
-from .ui import Card, Chip, Combo, Composer, HLine, IconButton, NavItem, PlatformTag, ProgressLine, SelectButton, Spark
+from .sniff_ui import SniffMixin
+from .ui import (
+    Card, Chip, Combo, Composer, HLine, IconButton, NavItem, PlatformTag, ProgressLine, SelectButton, Spark, sync_layout,
+)
 from .widgets import CoverDialog, CoverView, ElidedLabel, ThumbLoader, cover_url, save_cover_bytes
 
 log = logging.getLogger('app')
@@ -187,40 +190,6 @@ def scroll_area(content):
     return sa
 
 
-def sync_layout(lay, desired):
-    """增量更新一个纵向列表，只增删改变化的条目（不是整个删掉重建，所以不闪、滚动位置不动）。
-    desired：[(键, 签名, 创建函数() -> 控件, 更新函数(控件) 或 None)]，按显示顺序。
-    键相同、签名也相同的控件原样保留；签名变了的调用更新函数（没有就重新创建）。"""
-    items = getattr(lay, '_vd_items', None)
-    if items is None:
-        items = lay._vd_items = {}
-    keys = {d[0] for d in desired}
-
-    def drop(w):
-        lay.removeWidget(w)
-        w.hide()               # 立刻从界面上拿掉（deleteLater 要等事件循环，期间会和新内容叠在一起）
-        w.setParent(None)
-        w.deleteLater()
-
-    for key in [k for k in items if k not in keys]:
-        drop(items.pop(key)[0])
-    for i, (key, sig, make, update) in enumerate(desired):
-        cur = items.get(key)
-        if cur is None:
-            w = make()
-            lay.insertWidget(i, w)
-        else:
-            w, old = cur
-            if old != sig and (update is None or update(w) is False):
-                drop(w)
-                w = make()
-                lay.insertWidget(i, w)
-            elif lay.indexOf(w) != i:
-                lay.removeWidget(w)
-                lay.insertWidget(i, w)
-        items[key] = (w, sig)
-
-
 class Bridge(QObject):
     """后台线程 → 界面线程。"""
     parsed = Signal(int, object)
@@ -256,6 +225,7 @@ class ResultRow:
         self.status_label = None
         self.outdated = False        # 报错像是解析内核过期了
         self.login = False           # 报错是「要登录才能看」一类：卡片上给「去登录」按钮
+        self.extra = None            # 网页嗅探到的资源：解析时要带上的请求头、Cookie、标题（见 sniff_ui.py）
         self.hist = []               # 这个视频下载过的记录（后台查好的，「已下载」标记和「全部下载」用）
         self.pending_render = True   # 卡片内容还在排队等着画（一次加入很多链接时分批画）
         self.auto_download = False   # 从选集加入：解析完自动下载
@@ -667,7 +637,7 @@ class AccountButton(ui._HoverButton):
 
 # ---------------------------------------------------------------- 主窗口
 
-class MainWindow(CloudMixin, PanMixin, QMainWindow):
+class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
     def __init__(self, instance=None):
         super().__init__()
         self.instance = instance         # 「只能开一个」的锁：重启软件时要先放开
@@ -735,6 +705,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self.setMinimumSize(980, 640)
         self._pan_init()
         self._cloud_init()
+        self._sniff_init()
         self._parse_timer = QTimer(self, singleShot=True, interval=400)     # 一次解析很多链接时合并刷新
         self._parse_timer.timeout.connect(self._after_history_change)
         self._side_timer = QTimer(self, singleShot=True)                    # 侧边栏刷新：短时间内的多次合并成一次
@@ -933,7 +904,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
     def _new_parse(self):
         """像 Claude 的「新建」：回到首页（问候语 + 居中输入框）。
         之前的解析结果先留着（首页有「回到刚才的解析结果」），在首页解析新链接时才清掉；下载不受影响。"""
-        if (self.rows or self.pan_cards) and not self.fresh:
+        if (self.rows or self.pan_cards or self.sniff_card is not None) and not self.fresh:
             self.fresh = True
             self._update_parse_mode()
         self._go('parse')
@@ -1507,7 +1478,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         return wrap
 
     def _update_parse_mode(self):
-        n = len(self.rows) + len(self.pan_cards)
+        n = len(self.rows) + len(self.pan_cards) + (1 if self.sniff_card is not None else 0)
         if not n:
             self.fresh = False
         has = bool(n) and not self.fresh       # 有结果、且没点「解析新链接」时显示结果列表
@@ -1598,6 +1569,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         m = ui.popup_menu(self)
         m.addAction(icons.icon('clipboard', c('text2')), '粘贴剪贴板里的链接并解析', self._paste_and_parse)
         m.addAction(icons.icon('file_text', c('text2')), '从文本文件导入链接…', self._import_links)
+        m.addAction(icons.icon('globe', c('text2')), '打开网页嗅探视频…', lambda: self.sniff_prompt())
         m.addSeparator()
         m.addAction(icons.icon('settings', c('text2')), '下载选项…', lambda: self._open_settings('download'))
         m.addAction(icons.icon('user', c('text2')), '网盘账号…', lambda: self._open_settings('network'))
@@ -1921,6 +1893,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             lambda url, col, t=token: self.bridge.expanded.emit(t, col),
             probe=not row.from_collection,
             on_status=lambda url, text, t=token: self.bridge.parse_status.emit(t, text),
+            extra=row.extra,
         )
 
     def _on_parse_status(self, token, text):
@@ -2062,6 +2035,12 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
                 t = label('字幕 ' + '/'.join(names), 'tagInfo')
                 t.setToolTip(f'将下载：{"、".join(names)}\n该视频共有 {len(all_langs)} 种人工字幕')
                 line.addWidget(t)
+            if v.platform == '网页' and row.extra is None and os.name == 'nt':
+                sb = Chip('用浏览器打开并嗅探', 'globe', height=24, font_px=12,
+                          tip='这个网站没有专门的解析器，这里是从网页里直接找到的视频，可能不全。\n'
+                              '可以在内置浏览器里打开网页并播放，让软件把播放时请求的视频地址抓出来')
+                sb.clicked.connect(lambda: self.sniff_start(row.url))
+                line.addWidget(sb)
             colinfo = v.collection
             if colinfo and colinfo.get('entries') is None:
                 cb = Chip('频道视频 · 选集', 'list', height=24, font_px=12,
@@ -2156,6 +2135,9 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
                 act.addStretch(1)
                 act.addWidget(button('移除', lambda: self._remove_result(token), 'ghost'))
                 act.addWidget(button('重试', lambda: self._start_parse(token), icon='refresh'))
+                if row.error.startswith('暂不支持') and os.name == 'nt':
+                    act.addWidget(button('用浏览器打开并嗅探', lambda: self.sniff_start(row.url), 'primary',
+                                         '在内置浏览器里打开这个网页并播放视频，软件把视频地址抓出来', 'globe'))
                 if row.login:
                     bili = 'bilibili.com' in row.url or 'b23.tv' in row.url
                     again = row.error.startswith(core.LOGIN_EXPIRED)
@@ -2224,6 +2206,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             self._remove_result(token)
         self._render_queue.clear()
         self._pan_clear_cards()
+        self.sniff_remove(update=False)
         # 不再显示的封面缩略图马上释放（下载页里的任务还在用的留着）
         self.thumbs.release(tv.cover_url for tv in self.task_views.values() if shiboken6.isValid(tv))
         self._update_res_label()
@@ -2239,6 +2222,8 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         busy = sum(1 for r in self.rows.values() if r.state == 'parsing')
         busy += sum(1 for card in self.pan_cards.values() if shiboken6.isValid(card) and card.state == 'opening')
         bits = [f'{ok} / {total} 个视频' if total else '', f'{len(self.pan_cards)} 个网盘分享' if self.pan_cards else '']
+        if self.sniff_card is not None:
+            bits.append('网页嗅探')
         txt = ' · '.join(b for b in bits if b)
         if busy:
             txt += f' · 正在解析 {busy} 个'
@@ -3089,6 +3074,8 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         m.addAction(ic('refresh'), '重新解析', lambda: self._start_parse(token))
         m.addAction(ic('copy'), '复制链接', lambda: QGuiApplication.clipboard().setText(row.url))
         m.addAction(ic('external'), '在浏览器中打开', lambda: QDesktopServices.openUrl(QUrl(row.url)))
+        if row.extra is None and os.name == 'nt':
+            m.addAction(ic('globe'), '用浏览器打开并嗅探', lambda: self.sniff_start(row.url))
         if row.state == 'error':
             m.addAction(ic('copy'), '复制错误信息', lambda: QGuiApplication.clipboard().setText(row.error_raw or row.error))
         m.addSeparator()

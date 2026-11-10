@@ -756,22 +756,28 @@ class Parser:
         self.log = log
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='parse')
 
-    def submit(self, url, on_result, on_error, on_expand=None, probe=True, on_status=None):
-        """on_status(url, 文字)：解析前要等一会儿的准备工作（如第一次解析 YouTube 时下载组件）显示在卡片上。"""
-        self.pool.submit(self._run, url, on_result, on_error, on_expand, probe, on_status)
+    def submit(self, url, on_result, on_error, on_expand=None, probe=True, on_status=None, extra=None):
+        """on_status(url, 文字)：解析前要等一会儿的准备工作（如第一次解析 YouTube 时下载组件）显示在卡片上。
+        extra：网页嗅探到的资源地址，解析 / 下载时要带上浏览器里那个页面的东西：
+               {'headers': 请求头, 'cookies': [Cookie], 'title': 页面标题, 'page': 页面地址, 'id': 稳定的 ID}"""
+        self.pool.submit(self._run, url, on_result, on_error, on_expand, probe, on_status, extra)
 
-    def _run(self, url, on_result, on_error, on_expand, probe=True, on_status=None):
+    def _run(self, url, on_result, on_error, on_expand, probe=True, on_status=None, extra=None):
         settings = self.get_settings()
         logger = _Logger(self.log)
+        extra = extra or {}
         ensure_js_runtime(url, settings, (lambda text: on_status(url, text)) if on_status else None, self.log)
         site_cookies_fresh(url, self.log)       # 用内置浏览器登录过这个网站：Cookie 有一阵没读了就先刷新
         opts = base_options(settings, logger)
         opts['extract_flat'] = 'in_playlist'
         opts['writesubtitles'] = True      # 只取字幕/弹幕列表，不会下载
+        if extra.get('headers'):
+            # 防盗链的网站要看 Referer / Origin：这些请求头会被 yt-dlp 记进每个格式里，下载时也带着
+            opts['http_headers'] = dict(extra['headers'])
         refreshed = False
         for attempt in (1, 2, 3):
             try:
-                with new_ydl(dict(opts)) as ydl:
+                with new_ydl(dict(opts), extra.get('cookies') or ()) as ydl:
                     info = ydl.sanitize_info(ydl.extract_info(url, download=False))
                 break
             except Exception as e:  # noqa: BLE001 - 任何异常都要回到界面
@@ -809,6 +815,10 @@ class Parser:
             elif not refs and not any(e.get('formats') for e in entries):
                 on_error(url, '无法展开播放列表', '')
             return
+        if extra:
+            # 直接给地址解析出来的标题是文件名（index、master…），ID 也容易撞：换成页面标题和按地址算的稳定 ID
+            info = dict(info, **{k: v for k, v in (('title', extra.get('title')), ('id', extra.get('id')),
+                                                 ('webpage_url', extra.get('page'))) if v})
         video = self._make(url, yt().YoutubeDL.sanitize_info(info, True), settings, logger.locked_formats)
         if not settings.show_hdr and not any(o.kind == 'video' for o in video.options) and hdr_only(video.info):
             on_error(url, HDR_ONLY_MSG, '')
