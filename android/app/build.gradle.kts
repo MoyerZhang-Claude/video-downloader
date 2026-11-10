@@ -89,7 +89,7 @@ val buildPanEngine = tasks.register<Exec>("buildPanEngine") {
 tasks.named("preBuild") { dependsOn(buildPanEngine) }
 
 // 内置的解析内核版本：和电脑版一致；yt-dlp-ejs（YouTube 验证脚本）必须和 yt-dlp 配套，升级时两个一起改
-val ytDlpVersion = "2026.10.21"
+val ytDlpVersion = "2026.10.26"
 val ytDlpEjsVersion = "0.8.0"
 
 // 解析核心直接复用电脑版源码：构建前把需要的文件同步进来（电脑版改了，手机版重新编译就会带上）
