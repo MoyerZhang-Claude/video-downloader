@@ -23,8 +23,7 @@ def selftest(out_path, urls):
     settings = Settings.load()
     from app import core_update
     core.preload()
-    lines = [f'ffmpeg: {ffmpeg_dir()}', f'js runtimes: {core._js_runtimes()}',
-             f'yt-dlp: {core_update.current_version()}']
+    lines = [f'ffmpeg: {ffmpeg_dir()}', f'yt-dlp: {core_update.current_version()}']
     lock = threading.Lock()
     done = threading.Semaphore(0)
 
@@ -42,7 +41,9 @@ def selftest(out_path, urls):
     for u in urls:
         parser.submit(u, ok, err, lambda url, subs: (lines.append(f'EXPAND {url} -> {len(subs)}'), done.release()))
     for _ in urls:
-        done.acquire(timeout=120)
+        done.acquire(timeout=300)
+    # 解析 YouTube 时如果电脑上没有 JS 运行时，会先把 Deno 下载到数据目录：放在解析之后再看
+    lines.insert(1, f'js runtimes: {core._js_runtimes()}')
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines) + '\n')
 

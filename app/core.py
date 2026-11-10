@@ -11,12 +11,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 
-from . import bilibili, collection, danmaku
+from . import bilibili, collection, core_update, danmaku, runtime_update, secure_store
 from .config import DATA, FILENAME_TEMPLATES, ROOT, ffmpeg_dir
 
 # yt-dlp 首次导入较慢（冷启动可达数秒），延迟到第一次使用或后台预加载时再导入，让窗口先显示出来
 _yt = None
 _yt_lock = threading.Lock()
+startup_log = []        # 界面还没接上日志时产生的消息：[(级别, 文字)]，界面启动后取走
 
 
 def yt():
@@ -24,6 +25,8 @@ def yt():
     if _yt is None:
         with _yt_lock:
             if _yt is None:
+                # 在线更新过的内核：导入前先核对文件（坏了就自动回到内置版本）
+                core_update.verify_override(lambda level, msg: startup_log.append((level, msg)))
                 import yt_dlp
                 from yt_dlp.utils import DownloadCancelled, DownloadError
 
@@ -138,15 +141,66 @@ class _Logger:
         self._emit('error', msg)
 
 
-def _js_runtimes():
+def _find_js_runtimes(verify=True):
+    """电脑上能用的 JS 运行时（YouTube 的验证要用）。优先级：数据目录里按需下载的 Deno > 程序目录 > 系统 PATH。
+    verify=False：只看有没有，不核对 deno.exe 的哈希（界面线程里显示状态用，核对要读 100 多 MB）。"""
     runtimes = {}
+    deno = None
+    if runtime_update.supported():
+        deno = runtime_update.deno_path() if verify else (os.path.isfile(runtime_update.DENO) and runtime_update.DENO)
+    if deno:
+        runtimes['deno'] = {'path': deno}
     for name in ('deno', 'node', 'bun'):
+        if name in runtimes:
+            continue
         bundled = os.path.join(ROOT, 'runtime', f'{name}.exe')
         if os.path.isfile(bundled):
             runtimes[name] = {'path': bundled}
         elif shutil.which(name):
             runtimes[name] = {}
-    return runtimes or {'deno': {}}
+    return runtimes
+
+
+def _js_runtimes():
+    return _find_js_runtimes() or {'deno': {}}
+
+
+_NEEDS_JS_RE = re.compile(r'https?://(?:[\w-]+\.)*(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/', re.I)
+JS_RUNTIME_TEXT = '正在准备 YouTube 组件（约 40MB，只需一次）'
+
+
+def ensure_js_runtime(url, settings, status=None, log=None):
+    """解析 YouTube 之前：电脑上没有任何 JS 运行时就先下载 Deno（只有第一次需要）。
+    下载失败不拦着解析（只是可能少清晰度），原因写进日志。"""
+    if not _NEEDS_JS_RE.match(url or '') or not runtime_update.supported() or _find_js_runtimes():
+        return
+    if status:
+        status(JS_RUNTIME_TEXT)
+    last = [0.0]
+
+    def progress(p):
+        now = time.monotonic()
+        if status and (now - last[0] >= 0.3 or p >= 1):
+            last[0] = now
+            status(f'{JS_RUNTIME_TEXT} {p * 100:.0f}%')
+    try:
+        runtime_update.ensure(progress, (settings.proxy or '').strip())
+    except Exception as e:  # noqa: BLE001
+        if log:
+            log('warning', f'YouTube 组件（Deno）下载失败：{e}。这次先不用它解析，YouTube 可能缺清晰度或失败；'
+                           '可以检查网络 / 代理后重新解析')
+    if status:
+        status('')
+
+
+# 这些报错多半是网站改版、解析内核跟不上了（YouTube 最常见）：更新内核通常就能好
+_OUTDATED_RE = re.compile(
+    r'nsig|n-sig|signature|Requested format is not available|Unable to extract|No video formats found|'
+    r'Failed to (?:parse|extract)|please report this issue|challenge solving failed|player response', re.I)
+
+
+def looks_outdated(raw):
+    return bool(raw) and bool(_OUTDATED_RE.search(raw)) and not re.search(r'not a bot|Sign in to confirm', raw, re.I)
 
 
 def base_options(settings, logger):
@@ -181,45 +235,86 @@ def base_options(settings, logger):
 
 
 COOKIE_DIR = os.path.join(DATA, 'cookies')
-_cookie_cache = {}      # 路径 -> (修改时间, cookies 列表)
+imported_plain = []     # 刚刚自动加密的明文 cookies 文件名（界面取走后提示用户一次）
+_not_cookies = {}       # 路径 -> 修改时间：放在 cookies 文件夹里、但不是 cookies 的 .txt，不反复去读
 
 
-def folder_cookies():
-    """cookies 文件夹里所有 Netscape 格式的 .txt（B站扫码登录、浏览器扩展导出的 TikTok 等）都自动生效。"""
-    import http.cookiejar
-    cookies = []
+def _encrypt_plain_cookies():
+    """用户手动放进 cookies 文件夹的 .txt（浏览器扩展导出的）：加密存成同名 .bin，再删掉明文文件。
+    登录信息在磁盘上不留明文（数据文件夹被别的程序读走、或发给别人排查问题时不会把账号交出去）。"""
     try:
-        names = sorted(n for n in os.listdir(COOKIE_DIR)
-                       if n.lower().endswith('.txt') and n.lower() != 'bilibili.txt')
+        names = [n for n in os.listdir(COOKIE_DIR) if n.lower().endswith('.txt')]
     except OSError:
-        names = []
-    cookies.extend(bilibili.load_cookies())     # B站扫码登录（保存在用户数据目录）
-    if not names:
-        return cookies
+        return
     for name in names:
         path = os.path.join(COOKIE_DIR, name)
+        if name.lower() == 'bilibili.txt':       # 很早的版本把 B站登录放在这里：交给 bilibili.py 处理
+            bilibili.adopt_plain(path)
+            continue
         try:
             mtime = os.path.getmtime(path)
         except OSError:
             continue
-        cached = _cookie_cache.get(path)
-        if not cached or cached[0] != mtime:
-            jar = http.cookiejar.MozillaCookieJar(path)
-            try:
-                jar.load(ignore_discard=True, ignore_expires=True)
-                cached = (mtime, list(jar))
-            except (OSError, http.cookiejar.LoadError):
-                cached = (mtime, [])
-            _cookie_cache[path] = cached
-        cookies.extend(cached[1])
+        if _not_cookies.get(path) == mtime:
+            continue
+        try:
+            n = secure_store.import_plain_cookies(path, os.path.splitext(path)[0] + '.bin')
+        except OSError:
+            n = -1
+        if n > 0:
+            imported_plain.append(name)
+        else:
+            _not_cookies[path] = mtime
+
+
+def folder_cookies():
+    """cookies 文件夹里保存的网站登录信息（加密的 .bin：内置浏览器登录的、导入的 cookies.txt）和 B站扫码登录都自动生效。
+    只解密到内存里。浏览器登录得到的（文件名就是网站域名）比手动导入的新，后加载、同名时以它为准。"""
+    cookies = list(bilibili.load_cookies())     # B站扫码登录（保存在用户数据目录）
+    _encrypt_plain_cookies()
+    for name in cookie_file_names():
+        cookies.extend(secure_store.load_cookies(os.path.join(COOKIE_DIR, name + '.bin')))
     return cookies
 
 
 def cookie_file_names():
+    """已保存登录信息的名字（不带扩展名）。手动导入的在前，内置浏览器登录的（site_ 开头）在后。"""
     try:
-        return sorted(n for n in os.listdir(COOKIE_DIR) if n.lower().endswith('.txt') and n.lower() != 'bilibili.txt')
+        names = [n[:-4] for n in os.listdir(COOKIE_DIR) if n.lower().endswith('.bin')]
     except OSError:
         return []
+    return sorted(names, key=lambda n: (n.startswith(SITE_PREFIX), n.lower()))
+
+
+SITE_PREFIX = 'site_'       # 内置浏览器登录的网站：cookies\site_youtube.com.bin
+
+
+def adopt_stray_cookie_files(folder=DATA):
+    """直接放在数据文件夹里（没放进 cookies 子文件夹）的 cookies.txt：挪进 cookies 文件夹，下次读取时会自动加密。
+    只认文件开头写着「Netscape HTTP Cookie File」的，别的 .txt 不动。返回挪了哪些。"""
+    moved = []
+    try:
+        names = [n for n in os.listdir(folder) if n.lower().endswith('.txt')]
+    except OSError:
+        return moved
+    for name in names:
+        path = os.path.join(folder, name)
+        if name.lower() == 'bilibili.txt' or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, 'rb') as f:
+                head = f.read(200)
+        except OSError:
+            continue
+        if b'HTTP Cookie File' not in head:
+            continue
+        try:
+            os.makedirs(COOKIE_DIR, exist_ok=True)
+            os.replace(path, os.path.join(COOKIE_DIR, name))
+            moved.append(name)
+        except OSError:
+            pass
+    return moved
 
 
 def ydl_opener(ydl):
@@ -598,12 +693,14 @@ class Parser:
         self.log = log
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='parse')
 
-    def submit(self, url, on_result, on_error, on_expand=None, probe=True):
-        self.pool.submit(self._run, url, on_result, on_error, on_expand, probe)
+    def submit(self, url, on_result, on_error, on_expand=None, probe=True, on_status=None):
+        """on_status(url, 文字)：解析前要等一会儿的准备工作（如第一次解析 YouTube 时下载组件）显示在卡片上。"""
+        self.pool.submit(self._run, url, on_result, on_error, on_expand, probe, on_status)
 
-    def _run(self, url, on_result, on_error, on_expand, probe=True):
+    def _run(self, url, on_result, on_error, on_expand, probe=True, on_status=None):
         settings = self.get_settings()
         logger = _Logger(self.log)
+        ensure_js_runtime(url, settings, (lambda text: on_status(url, text)) if on_status else None, self.log)
         opts = base_options(settings, logger)
         opts['extract_flat'] = 'in_playlist'
         opts['writesubtitles'] = True      # 只取字幕/弹幕列表，不会下载
@@ -896,6 +993,7 @@ class DownloadManager:
                     and re.search(r'HTTP Error 40[34]|expired|Requested format', str(error)):
                 self.log('warning', f'[任务{task.id}] 下载地址可能已过期，重新解析后重试')
                 try:
+                    ensure_js_runtime(info['webpage_url'], self.get_settings(), None, self.log)
                     with new_ydl(base_options(self.get_settings(), logger)) as ydl:
                         info = y.YoutubeDL.sanitize_info(
                             ydl.extract_info(info['webpage_url'], download=False), True)

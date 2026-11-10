@@ -1,22 +1,26 @@
 """B站扫码登录 + 登录自动续期。
 
 登录信息保存在用户数据目录（%APPDATA%\\VideoDownloader），源码版和打包版共用一份，也不会随程序文件夹被拷走。
+Cookie 和续期令牌都加密保存（bilibili.bin / bilibili_meta.bin，见 secure_store.py）；2.5 之前的明文文件
+第一次读取时自动加密并删除。
 B站网页登录的 SESSDATA 有效期较短，网页版靠 refresh_token 定期换新；这里按同样的流程自动续期。
 """
 import http.cookiejar
 import json
 import os
 import re
-import shutil
 import threading
 import time
 
+from . import secure_store
 from .config import ROOT
 
 DATA_DIR = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'VideoDownloader')
-COOKIE_PATH = os.path.join(DATA_DIR, 'bilibili.txt')
-META_PATH = os.path.join(DATA_DIR, 'bilibili_meta.json')
-_OLD_PATHS = [os.path.join(ROOT, 'cookies', 'bilibili.txt')]
+COOKIE_PATH = os.path.join(DATA_DIR, 'bilibili.bin')
+META_PATH = os.path.join(DATA_DIR, 'bilibili_meta.bin')
+# 2.5 之前的明文文件（更早的版本还放在程序目录的 cookies 文件夹里）
+_OLD_PATHS = [os.path.join(DATA_DIR, 'bilibili.txt'), os.path.join(ROOT, 'cookies', 'bilibili.txt')]
+_OLD_META = os.path.join(DATA_DIR, 'bilibili_meta.json')
 
 _UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
        '(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36')
@@ -35,34 +39,57 @@ WAITING, SCANNED, EXPIRED, SUCCESS, ERROR = 'waiting', 'scanned', 'expired', 'su
 _POLL_CODES = {86101: WAITING, 86090: SCANNED, 86038: EXPIRED, 0: SUCCESS}
 
 _lock = threading.RLock()
+_migrated = False
 
 
 def _migrate_old():
-    """旧版本把登录信息放在程序目录 cookies 文件夹里，挪到用户数据目录。"""
-    if os.path.isfile(COOKIE_PATH):
+    """旧版本的明文登录信息：加密保存后删掉原文件（只在还没有加密文件时导入，之后见到明文就直接删）。"""
+    global _migrated
+    if _migrated:
         return
+    _migrated = True
     for old in _OLD_PATHS:
-        if os.path.isfile(old):
-            try:
-                os.makedirs(DATA_DIR, exist_ok=True)
-                shutil.move(old, COOKIE_PATH)
-            except OSError:
-                pass
-            return
+        if not os.path.isfile(old):
+            continue
+        try:
+            if os.path.isfile(COOKIE_PATH):
+                os.remove(old)
+            else:
+                secure_store.import_plain_cookies(old, COOKIE_PATH)
+        except OSError:
+            pass
+    if os.path.isfile(_OLD_META):
+        try:
+            if not os.path.isfile(META_PATH):
+                with open(_OLD_META, encoding='utf-8') as f:
+                    secure_store.write_json(META_PATH, json.load(f))
+            os.remove(_OLD_META)
+        except (OSError, ValueError):
+            pass
+
+
+def adopt_plain(path):
+    """别处找到的明文 B站登录文件（很早的版本放在 cookies 文件夹里）：还没有加密的登录信息就导入，然后删掉明文。"""
+    with _lock:
+        try:
+            if os.path.isfile(COOKIE_PATH):
+                os.remove(path)
+            else:
+                secure_store.import_plain_cookies(path, COOKIE_PATH)
+        except OSError:
+            pass
 
 
 def load_cookies():
     """读取已保存的 B站 cookies，没有登录时返回空列表。"""
-    _migrate_old()
-    if not os.path.isfile(COOKIE_PATH):
-        return []
-    jar = http.cookiejar.MozillaCookieJar(COOKIE_PATH)
-    try:
-        with _lock:
-            jar.load(ignore_discard=True, ignore_expires=True)
-    except (OSError, http.cookiejar.LoadError):
-        return []
-    return list(jar)
+    with _lock:
+        _migrate_old()
+        return secure_store.load_cookies(COOKIE_PATH)
+
+
+def save_cookies(cookies):
+    with _lock:
+        secure_store.save_cookies(COOKIE_PATH, list(cookies))
 
 
 def _cookie(name):
@@ -78,28 +105,18 @@ def sessdata_expires():
 
 
 def _load_meta():
-    try:
-        with open(META_PATH, encoding='utf-8') as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+    with _lock:
+        _migrate_old()
+    return secure_store.read_json(META_PATH, {}) or {}
 
 
 def _save_meta(meta):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(META_PATH, 'w', encoding='utf-8') as f:
-        json.dump(meta, f)
+    secure_store.write_json(META_PATH, meta)
 
 
 def _save_session_cookies(session):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    jar = http.cookiejar.MozillaCookieJar(COOKIE_PATH)
     cookies = getattr(session.cookies, 'jar', session.cookies)     # curl_cffi 的 Cookies 包着一个标准 CookieJar
-    for c in cookies:
-        if 'bilibili' in c.domain or 'biligame' in c.domain:
-            jar.set_cookie(c)
-    with _lock:
-        jar.save(ignore_discard=True, ignore_expires=True)
+    save_cookies(c for c in cookies if 'bilibili' in c.domain or 'biligame' in c.domain)
 
 
 def _session_with_cookies():
@@ -300,15 +317,12 @@ class TvQrLogin:
             if not any(c.get('name') == 'SESSDATA' for c in cookies):
                 return ERROR, 'B站没有返回网页登录信息'
             with _lock:
-                os.makedirs(DATA_DIR, exist_ok=True)
-                jar = http.cookiejar.MozillaCookieJar(COOKIE_PATH)
-                for c in cookies:
-                    jar.set_cookie(_make_cookie(c['name'], c.get('value', ''), c.get('expires')))
+                jar = [_make_cookie(c['name'], c.get('value', ''), c.get('expires')) for c in cookies]
                 # 网页接口还需要 buvid3 一类的设备标识，沿用旧登录里的或新取一个
                 for c in load_cookies():
                     if c.name in ('buvid3', 'buvid4', 'b_nut') and not any(x.name == c.name for x in jar):
-                        jar.set_cookie(c)
-                jar.save(ignore_discard=True, ignore_expires=True)
+                        jar.append(c)
+                save_cookies(jar)
                 _save_meta({'login_type': 'tv', 'login_time': time.time(), 'last_refresh': time.time(),
                             'tv_refresh_token': data.get('refresh_token'),
                             'tv_expires_at': time.time() + int(data.get('expires_in') or 0)})
@@ -325,8 +339,6 @@ def logout():
         except Exception:  # noqa: BLE001 - 注销失败也要删本地信息
             pass
     with _lock:
-        for p in (COOKIE_PATH, META_PATH):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+        for path in (COOKIE_PATH, META_PATH, _OLD_META, *_OLD_PATHS):
+            secure_store.remove(path)
+        secure_store.forget(COOKIE_PATH)

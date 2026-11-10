@@ -156,6 +156,8 @@ class Settings:
     tray_hint_shown: bool = False
     hotkey: str = 'Ctrl+Alt+D'    # 全局快捷键：解析剪贴板里的链接
     check_core_update: bool = True
+    auto_core_update: bool = True   # 有新内核时在后台直接下载，重启后生效
+    core_channel: str = 'stable'    # 内核更新通道：stable 稳定版 / nightly 预览版
     show_hdr: bool = True           # 解析结果里列出 HDR / 杜比视界版本
     cloud_upload: bool = False      # 输入框下的「云盘」开关：下载完同时上传到谷歌云盘
     cloud_keep_local: bool = True   # 上传完保留本地文件（关掉则移到回收站）
@@ -191,6 +193,8 @@ class Settings:
             s.subfolder = 'none'
         if s.cookie_mode not in COOKIE_MODES:
             s.cookie_mode = 'none'
+        if s.core_channel not in ('stable', 'nightly'):
+            s.core_channel = 'stable'
         if s.theme not in ('system', 'light', 'dark'):
             s.theme = 'system'
         s.max_concurrent = min(max(int(s.max_concurrent or 3), 1), 10)

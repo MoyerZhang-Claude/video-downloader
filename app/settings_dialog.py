@@ -99,6 +99,8 @@ class SettingsPanel(ui.Overlay):
         self._sig.progress.connect(lambda p: self.update_btn.setText(f'下载中 {p * 100:.0f}%'))
         self._sig.done.connect(self._frozen_update_done)
         self._sig.app_done.connect(self._app_check_done)
+        self._sig.deno_progress.connect(lambda p: self.deno_btn.setText(f'下载中 {p * 100:.0f}%'))
+        self._sig.deno_done.connect(self._deno_done)
         self._refresh_core_version()
         self.show_page('general')
 
@@ -528,28 +530,56 @@ class SettingsPanel(ui.Overlay):
         self.update_btn = _btn('检查并更新', self._update_core, 'primary')
         self.core_desc = self._row(lay, '当前版本', '网站改版导致解析失败时，更新内核通常就能恢复。更新后重启软件生效。',
                                    self.update_btn)
-        self._row(lay, '启动时检查新版本', '有新版本时在窗口底部提示', self._toggle('check_core_update'))
-        if frozen and os.path.isdir(core_update.OVERRIDE_DIR):
-            self._row(lay, '恢复为内置版本', '在线更新后反而出问题时使用，重启后生效', _btn('恢复', self._reset_core))
+        self._row(lay, '更新通道', '预览版每天更新，网站改版后修得最快，偶尔会有新问题；一般用稳定版就够了',
+                  self._combo('core_channel', [('stable', '稳定版'), ('nightly', '预览版')], 220))
+        self._row(lay, '启动时检查新版本', '解析失败、看起来像是内核过期时也会马上检查一次', self._toggle('check_core_update'))
+        if frozen:
+            self._row(lay, '自动下载新内核', '检查到新版本就在后台下载好，窗口底部提示「重启后生效」；关闭则只提示有新版本',
+                      self._toggle('auto_core_update'))
+            self.core_reset_row = self._row(lay, '恢复为内置版本', '在线更新后反而出问题时使用，重启后生效',
+                                            _btn('恢复', self._reset_core))
+        self._section(lay, 'YouTube 组件（Deno）')
+        self.deno_btn = _btn('', self._deno_clicked)
+        self.deno_desc = self._row(lay, 'YouTube 组件', ' ', self.deno_btn)
+        self._refresh_deno()
 
     def _refresh_core_version(self):
         ver = core_update.current_version(block=False)
-        updated = getattr(sys, 'frozen', False) and os.path.isdir(core_update.OVERRIDE_DIR)
-        self.core_desc.title.setText(f'当前版本 {ver}' + ('（已在线更新）' if updated else ''))
+        frozen = getattr(sys, 'frozen', False)
+        pending = core_update.pending_version() if frozen else None
+        self.core_desc.title.setText(f'当前版本 {ver}' + ('（已在线更新）' if frozen and core_update.override_active() else ''))
+        if pending:
+            self.core_desc.setText(f'新版本 {pending} 已下载，重启软件后生效。')
+            self.update_btn.setText('立即重启')
         self.about_ver.setText(f'版本 {APP_VERSION} · 解析内核 yt-dlp {ver}')
+        self._refresh_deno()
+
+    def core_downloaded(self, new):
+        """后台自动下载好了新内核（主窗口通知过来）。"""
+        self.update_btn.setEnabled(True)
+        self._refresh_core_version()
 
     def _reset_core(self):
         core_update.reset_frozen()
-        QMessageBox.information(self, '解析内核', '已恢复为内置版本，重启软件后生效。')
+        self.update_btn.setText('检查并更新')
+        self.core_desc.setText('已恢复为内置版本，重启软件后生效。')
+        self.win._core_pending, self.win._core_new = False, ''
+        self.win.notice.show_notice('解析内核已恢复为内置版本，重启后生效', '立即重启', self.win._restart)
+        self.win._place_toast()
 
     def _update_core(self):
+        frozen = getattr(sys, 'frozen', False)
+        if frozen and core_update.pending_version():        # 已经下载好了：按钮是「立即重启」
+            self.win._restart()
+            return
         self.update_btn.setEnabled(False)
-        if getattr(sys, 'frozen', False):
+        if frozen:
             self.update_btn.setText('检查中…')
+            channel = self.s.core_channel
 
             def work():
                 try:
-                    old, new, updated = core_update.update_frozen(self._sig.progress.emit)
+                    old, new, updated = core_update.update_frozen(self._sig.progress.emit, channel)
                     self._sig.done.emit(True, old, new, updated, '')
                 except Exception as e:  # noqa: BLE001
                     self._sig.done.emit(False, '', '', False, str(e))
@@ -560,7 +590,8 @@ class SettingsPanel(ui.Overlay):
         self._proc.setProcessChannelMode(QProcess.MergedChannels)
         self._proc.finished.connect(self._update_done)
         self._proc.start(sys.executable.replace('pythonw.exe', 'python.exe'),
-                         ['-m', 'pip', 'install', '-U', '--disable-pip-version-check', 'yt-dlp[default,curl-cffi]'])
+                         ['-m', 'pip', 'install', '-U', '--disable-pip-version-check',
+                          *(['--pre'] if self.s.core_channel == 'nightly' else []), 'yt-dlp[default,curl-cffi]'])
 
     def _update_done(self, code, _status):
         out = bytes(self._proc.readAll()).decode('utf-8', 'replace')
@@ -571,18 +602,69 @@ class SettingsPanel(ui.Overlay):
                         if 'Successfully installed' in line and 'yt-dlp-' in line), None)
             msg = f'已更新到 yt-dlp {ver}，重启软件后生效。' if ver else '内核已是最新版本。'
             self.core_desc.setText(msg)
+            if ver:
+                self.win.notice.show_notice(f'解析内核已更新到 {ver}，重启后生效', '立即重启', self.win._restart)
+                self.win._place_toast()
         else:
-            QMessageBox.warning(self, '更新内核', '更新失败：\n' + out[-800:])
+            self.core_desc.setText('更新失败：' + (out.strip().splitlines() or ['未知错误'])[-1][:200])
 
     def _frozen_update_done(self, ok, old, new, updated, error):
         self.update_btn.setEnabled(True)
         self.update_btn.setText('检查并更新')
         if not ok:
-            QMessageBox.warning(self, '解析内核', f'更新失败：{error}\n（请检查网络或代理设置）')
+            self.core_desc.setText(f'更新失败：{error}' + ('' if '新版软件' in error else '（请检查网络或代理设置）'))
         elif updated:
-            self.core_desc.setText(f'已更新：{old} → {new}，重启软件后生效。')
+            self.win._on_core_ready(new)        # 窗口底部出现「重启后生效 · 立即重启」
         else:
             self.core_desc.setText(f'已经是最新版本（{new}）。')
+
+    # YouTube 组件 ----------------------------------------------------
+    def _refresh_deno(self):
+        from . import core, runtime_update
+        if not hasattr(self, 'deno_desc'):
+            return
+        ver = runtime_update.installed_version()
+        others = [n for n in core._find_js_runtimes(verify=False) if not (n == 'deno' and ver)]
+        if ver:
+            self.deno_desc.title.setText(f'YouTube 组件：Deno {ver}')
+            self.deno_desc.setText('YouTube 的验证脚本要靠它运行。每周自动检查一次新版本')
+            self.deno_btn.setText('检查更新')
+        elif others:
+            self.deno_desc.title.setText(f'YouTube 组件：使用电脑上已有的 {" / ".join(others)}')
+            self.deno_desc.setText('电脑上已经装了 JS 运行时，不需要另外下载')
+            self.deno_btn.setText('下载 Deno')
+        else:
+            self.deno_desc.title.setText('YouTube 组件：还没有下载')
+            self.deno_desc.setText('第一次解析 YouTube 链接时会自动下载（约 40MB，只需一次）；也可以现在就下载')
+            self.deno_btn.setText('现在下载')
+        self.deno_desc.show()
+
+    def _deno_clicked(self):
+        from . import runtime_update
+        self.deno_btn.setEnabled(False)
+        self.deno_btn.setText('请稍候…')
+        proxy = (self.s.proxy or '').strip()
+        have = bool(runtime_update.installed_version())
+
+        def work():
+            try:
+                if have:
+                    ver = runtime_update.check_update(proxy, force=True)
+                    self._sig.deno_done.emit(f'已更新到 Deno {ver}' if ver else '已经是最新版本', '')
+                else:
+                    ver = runtime_update.install(lambda p: self._sig.deno_progress.emit(p), proxy)
+                    self._sig.deno_done.emit(f'Deno {ver} 已下载', '')
+            except Exception as e:  # noqa: BLE001
+                self._sig.deno_done.emit('', str(e) or type(e).__name__)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _deno_done(self, msg, error):
+        self.deno_btn.setEnabled(True)
+        self._refresh_deno()
+        if error:
+            self.deno_desc.setText(f'下载失败：{error[:160]}（请检查网络或代理设置）')
+        else:
+            self.win.notify(msg, 'ok')
 
     # ------------------------------------------------------------ 谷歌云盘
     def _page_cloud(self, lay):
@@ -778,3 +860,5 @@ class _UpdateSignals(QObject):
     progress = Signal(float)
     done = Signal(bool, str, str, bool, str)
     app_done = Signal(object, str)         # 软件新版本检查：(新版本信息或 None, 错误)
+    deno_progress = Signal(float)
+    deno_done = Signal(str, str)           # YouTube 组件：(结果, 错误)

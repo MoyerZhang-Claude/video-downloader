@@ -20,8 +20,9 @@ _core = None
 _history = None
 
 
-def init(files_dir, cache_dir):
-    """App 启动时调用：把登录信息、下载历史等放到 App 私有目录。"""
+def init(files_dir, cache_dir, crypto=None):
+    """App 启动时调用：把登录信息、下载历史等放到 App 私有目录。
+    crypto：Kotlin 端的 SecureStore（encrypt / decrypt，收发都是 base64 字符串），密钥在 Android Keystore 里。"""
     global _ready, _core, _history
     if _ready:
         return
@@ -36,6 +37,13 @@ def init(files_dir, cache_dir):
     except Exception as e:  # noqa: BLE001 - 更新包坏了也要能用内置版本启动
         _core_override = False
         _core_override_error[0] = str(e)
+    if crypto is not None:
+        # 登录信息（B站、导入的网站 cookies）加密保存：必须在第一次读取之前装上
+        import base64
+        from app import secure_store
+        secure_store.set_backend(
+            lambda data: base64.b64decode(str(crypto.encrypt(base64.b64encode(data).decode('ascii')))),
+            lambda blob: base64.b64decode(str(crypto.decrypt(base64.b64encode(blob).decode('ascii')))))
     from app import core
     from app.history import History
     _core = core
@@ -717,17 +725,12 @@ def extract_urls(text):
 
 def save_bilibili_cookies(cookie_header):
     """cookie_header：WebView 里 CookieManager.getCookie() 得到的 'a=1; b=2' 字符串。返回 bili_status()。"""
-    import http.cookiejar
     from app import bilibili
     pairs = [p.split('=', 1) for p in cookie_header.split(';') if '=' in p]
     if not any(k.strip() == 'SESSDATA' for k, _ in pairs):
         return json.dumps({'logged_in': False, 'error': '没有拿到登录信息，请确认已经登录成功'}, ensure_ascii=False)
-    os.makedirs(bilibili.DATA_DIR, exist_ok=True)
-    jar = http.cookiejar.MozillaCookieJar(bilibili.COOKIE_PATH)
     expires = int(time.time()) + 180 * 86400       # WebView 不提供过期时间：按半年记，真正失效时会提示重新登录
-    for k, v in pairs:
-        jar.set_cookie(bilibili._make_cookie(k.strip(), v.strip(), expires))
-    jar.save(ignore_discard=True, ignore_expires=True)
+    bilibili.save_cookies([bilibili._make_cookie(k.strip(), v.strip(), expires) for k, v in pairs])
     bilibili._save_meta({'login_type': 'webview', 'login_time': time.time()})
     return bili_status()
 
@@ -813,42 +816,28 @@ def _site_label(site):
 
 
 def _cookie_files():
-    try:
-        return sorted(n for n in os.listdir(_core.COOKIE_DIR) if n.lower().endswith('.txt'))
-    except OSError:
-        return []
+    """已保存登录信息的网站（cookies/<网站>.bin，加密保存）。旧版本留下的明文 .txt 在这里顺便加密掉。"""
+    _core._encrypt_plain_cookies()
+    return _core.cookie_file_names()
+
+
+def _cookie_path(name):
+    return os.path.join(_core.COOKIE_DIR, name + '.bin')
 
 
 def _yt_cookie_count():
     """有没有导入过 YouTube 登录信息（报错提示用）"""
-    return 1 if 'youtube.com.txt' in _cookie_files() or 'youtube.txt' in _cookie_files() else 0
-
-
-def _load_cookie_text(path):
-    """读取 Netscape 格式 cookies.txt：兼容没有文件头、Windows 换行、UTF-8 BOM。"""
-    import http.cookiejar
-    import tempfile
-    with open(path, 'rb') as fp:
-        text = fp.read().decode('utf-8-sig', 'replace').replace('\r\n', '\n').replace('\r', '\n')
-    if not text.lstrip().startswith(('# Netscape HTTP Cookie File', '# HTTP Cookie File')):
-        text = '# Netscape HTTP Cookie File\n' + text
-    fd, tmp = tempfile.mkstemp(suffix='.txt')
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as fp:
-            fp.write(text)
-        jar = http.cookiejar.MozillaCookieJar()
-        jar.load(tmp, ignore_discard=True, ignore_expires=True)
-        return jar
-    finally:
-        os.remove(tmp)
+    names = _cookie_files()
+    return 1 if 'youtube.com' in names or 'youtube' in names else 0
 
 
 def cookies_import(src_path):
     """导入用户选的 cookies 文件（任意网站）。返回 cookies_status()（含 imported：这次导入的网站）或 {error}"""
     import collections
-    import http.cookiejar
+    from app import secure_store
     try:
-        cookies = list(_load_cookie_text(src_path))
+        with open(src_path, 'rb') as fp:
+            cookies = secure_store.parse_cookies(fp.read().decode('utf-8-sig', 'replace'))
     except Exception:  # noqa: BLE001
         return json.dumps({'error': '这不是有效的 cookies 文件：请用浏览器扩展「Get cookies.txt LOCALLY」导出'},
                           ensure_ascii=False)
@@ -866,18 +855,11 @@ def cookies_import(src_path):
             return json.dumps({'error': '文件里的 YouTube cookies 不含登录状态：请先在浏览器里登录 YouTube 再导出'},
                               ensure_ascii=False)
         by_site.pop('youtube.com')
-    os.makedirs(_core.COOKIE_DIR, exist_ok=True)
     for site, items in by_site.items():
-        path = os.path.join(_core.COOKIE_DIR, f'{site}.txt')
-        out = http.cookiejar.MozillaCookieJar(path)
-        for c in items:
-            out.set_cookie(c)
-        out.save(ignore_discard=True, ignore_expires=True)
-        _core._cookie_cache.pop(path, None)
-    old = os.path.join(_core.COOKIE_DIR, 'youtube.txt')       # 旧版本只存 YouTube 的文件名
-    if 'youtube.com' in by_site and os.path.exists(old):
-        os.remove(old)
-        _core._cookie_cache.pop(old, None)
+        secure_store.save_cookies(_cookie_path(site), items)       # 加密保存，手机上不留明文
+    if 'youtube.com' in by_site:                                   # 旧版本只存 YouTube 的文件名
+        secure_store.remove(_cookie_path('youtube'))
+        secure_store.forget(_cookie_path('youtube'))
     res = json.loads(cookies_status())
     res['imported'] = [_site_label(s) for s in sorted(by_site, key=lambda x: -len(by_site[x]))]
     return json.dumps(res, ensure_ascii=False)
@@ -885,34 +867,32 @@ def cookies_import(src_path):
 
 def cookies_status():
     """{sites: [{site, name, count, age_days, expires}]}；expires：最早过期的 cookie（秒，0 表示未知）"""
+    from app import secure_store
     sites = []
     for name in _cookie_files():
-        path = os.path.join(_core.COOKIE_DIR, name)
-        site = name[:-4]
-        if site == 'youtube':
-            site = 'youtube.com'
-        try:
-            jar = list(_load_cookie_text(path))
-        except Exception:  # noqa: BLE001
+        path = _cookie_path(name)
+        site = 'youtube.com' if name == 'youtube' else name
+        jar = secure_store.load_cookies(path)
+        if not jar:
             continue
         login = [c for c in jar if c.expires and (site != 'youtube.com' or c.name in _YT_LOGIN_NAMES)]
-        sites.append({'site': name[:-4], 'name': _site_label(site), 'count': len(jar),
-                      'age_days': int((time.time() - os.path.getmtime(path)) // 86400),
+        try:
+            age = int((time.time() - os.path.getmtime(path)) // 86400)
+        except OSError:
+            age = 0
+        sites.append({'site': name, 'name': _site_label(site), 'count': len(jar), 'age_days': age,
                       'expires': min((c.expires for c in login), default=0)})
     return json.dumps({'sites': sites}, ensure_ascii=False)
 
 
 def cookies_clear(site=''):
     """清除某个网站的登录信息（site 为空：全部清除）"""
+    from app import secure_store
     for name in _cookie_files():
-        if site and name[:-4] != site:
+        if site and name != site:
             continue
-        path = os.path.join(_core.COOKIE_DIR, name)
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        _core._cookie_cache.pop(path, None)
+        secure_store.remove(_cookie_path(name))
+        secure_store.forget(_cookie_path(name))
     return cookies_status()
 
 

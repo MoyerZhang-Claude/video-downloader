@@ -1,11 +1,33 @@
 """Windows 单实例锁及唤醒通知；进程退出后由系统自动释放。"""
 import ctypes
+import hashlib
+import os
 import sys
 from ctypes import wintypes
 
 
+def default_name():
+    """锁的名字跟着数据目录走：同一份数据只能开一个软件。
+    数据目录是系统默认的 %APPDATA%/VideoDownloader 时用固定的名字（和旧版本互相认得出）；
+    用环境变量把 APPDATA 指到别处（便携使用、测试）时是另一份数据，可以和正常那份同时开。"""
+    from .config import DATA
+    base = 'VideoDownloader.App'
+    if sys.platform != 'win32':
+        return base
+    try:
+        buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+        ctypes.windll.shell32.SHGetFolderPathW(None, 0x001a, None, 0, buf)       # CSIDL_APPDATA
+        standard = os.path.join(buf.value, 'VideoDownloader')
+    except Exception:  # noqa: BLE001
+        return base
+    if not buf.value or os.path.normcase(os.path.abspath(DATA)) == os.path.normcase(os.path.abspath(standard)):
+        return base
+    return base + '.' + hashlib.sha1(os.path.normcase(os.path.abspath(DATA)).encode('utf-8')).hexdigest()[:12]
+
+
 class SingleInstance:
-    def __init__(self, name='VideoDownloader.App'):
+    def __init__(self, name=None):
+        name = name or default_name()
         self._mutex = self._event = None
         self.primary = True
         if sys.platform != 'win32':

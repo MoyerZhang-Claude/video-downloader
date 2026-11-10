@@ -18,8 +18,8 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QMainWindow,
-    QMenu, QPlainTextEdit, QSizePolicy, QStyledItemDelegate, QToolTip, QVBoxLayout, QWidget,
+    QAbstractButton, QApplication, QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
+    QMenu, QPlainTextEdit, QPushButton, QSizePolicy, QStyledItemDelegate, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import icons, theme
@@ -905,6 +905,52 @@ class Toast(QWidget):
         p.setFont(self.font())
         p.drawText(QRectF(42, 0, self.width() - 56, self.height()), int(Qt.AlignVCenter | Qt.AlignLeft),
                    getattr(self, '_shown', self._text))
+
+
+class NoticeBar(Card):
+    """窗口底部的常驻提示条：一句话 + 一个操作按钮 + 关闭。不像 Toast 会自己消失（如「内核已更新，重启后生效」）。"""
+
+    def __init__(self, parent):
+        super().__init__(radius=14, fill='menu', border='border_strong', parent=parent)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(14, 8, 8, 8)
+        h.setSpacing(10)
+        h.addWidget(Spark(18, self))
+        self.label = QLabel()
+        self.label.setObjectName('rowLabel')
+        self.label.setStyleSheet('font-size: 13px;')
+        h.addWidget(self.label)
+        h.addSpacing(6)
+        self.btn = QPushButton()
+        self.btn.setObjectName('accent')
+        self.btn.setCursor(Qt.PointingHandCursor)
+        self.btn.clicked.connect(self._clicked)
+        h.addWidget(self.btn)
+        x = IconButton('x', '关闭', size=28, icon_size=15)
+        x.clicked.connect(self.hide)
+        h.addWidget(x)
+        self.bottom = 96
+        self._on_click = None
+        self.hide()
+
+    def show_notice(self, text, button='', on_click=None):
+        self.label.setText(text)
+        self.btn.setText(button)
+        self.btn.setVisible(bool(button))
+        self._on_click = on_click
+        self.show()
+        self.raise_()
+        self.place()
+
+    def _clicked(self):
+        if self._on_click:
+            self._on_click()
+
+    def place(self):
+        parent = self.parentWidget()
+        if parent and self.isVisible():
+            self.adjustSize()
+            self.move((parent.width() - self.width()) // 2, parent.height() - self.height() - self.bottom)
 
 
 # ---------------------------------------------------------------- 窗口内的模态面板（设置）

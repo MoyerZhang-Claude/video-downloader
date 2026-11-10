@@ -25,6 +25,7 @@ import urllib.parse
 import webbrowser
 
 from .config import DATA
+from .secure_store import dpapi as _dpapi      # 只有当前 Windows 用户能解开
 
 DIR = os.path.join(DATA, 'gdrive')
 CLIENT_PATH = os.path.join(DIR, 'client.json')        # Google Cloud 下载的 OAuth 客户端（桌面应用）
@@ -62,26 +63,6 @@ def _save_json(path, data):
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False)
     os.replace(tmp, path)
-
-
-# ---------------------------------------------------------------- DPAPI（只有当前 Windows 用户能解开）
-class _Blob(ctypes.Structure):
-    _fields_ = [('cbData', ctypes.c_uint32), ('pbData', ctypes.POINTER(ctypes.c_char))]
-
-
-def _dpapi(data, protect):
-    if os.name != 'nt':
-        return data
-    crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
-    buf = ctypes.create_string_buffer(data, len(data))
-    src, out = _Blob(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))), _Blob()
-    fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
-    if not fn(ctypes.byref(src), None, None, None, None, 0x1, ctypes.byref(out)):    # CRYPTPROTECT_UI_FORBIDDEN
-        raise OSError('登录信息加密 / 解密失败')
-    try:
-        return ctypes.string_at(out.pbData, out.cbData)
-    finally:
-        kernel32.LocalFree(out.pbData)
 
 
 # ---------------------------------------------------------------- 文件夹规则

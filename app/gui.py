@@ -1,4 +1,5 @@
 import datetime
+import json
 import logging
 import os
 import subprocess
@@ -20,7 +21,10 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
-from . import APP_NAME, APP_VERSION, avatar, bilibili, core, greetings, icons, pan, task_store, theme, ui
+from . import (
+    APP_NAME, APP_VERSION, avatar, bilibili, core, core_update, greetings, icons, pan, proc_job, runtime_update,
+    task_store, theme, ui,
+)
 from .bili_dialog import BiliLoginDialog
 from .config import DATA, ROOT, Settings, ffmpeg_dir
 from .episode_dialog import EpisodeDialog
@@ -40,6 +44,7 @@ from .widgets import CoverDialog, CoverView, ElidedLabel, ThumbLoader, cover_url
 log = logging.getLogger('app')
 
 GITHUB_URL = 'https://github.com/MoyerZhang-Claude/video-downloader'
+RETRY_PATH = os.path.join(DATA, 'retry_urls.json')     # 更新内核后重启：要自动重新解析的链接
 
 # 输入框下方的清晰度预设：(键, 名称, 取值, 说明)
 PRESETS = [('pick', '逐个选择', None, '每个视频默认最高画质，可在卡片里单独改'),
@@ -189,7 +194,10 @@ class Bridge(QObject):
     log = Signal(str, str)
     bili_status = Signal(object)
     collection_loaded = Signal(int, object, str)
-    core_update = Signal(str, str)
+    core_update = Signal(str, str)       # 有新内核（还没下载）：(新版本, 当前版本)
+    core_ready = Signal(str)             # 新内核已经下载好，重启后生效
+    core_retry = Signal(str)             # 「更新内核后重试」下载完成（参数是错误信息，空 = 成功）
+    parse_status = Signal(int, str)      # 解析前的准备工作（如下载 YouTube 组件）显示在卡片上
     app_update = Signal(object)
 
 
@@ -207,6 +215,9 @@ class ResultRow:
         self.badge = None
         self.dl_btn = None
         self.spark = None
+        self.status_text = ''        # 解析前的准备工作（如「正在准备 YouTube 组件」）
+        self.status_label = None
+        self.outdated = False        # 报错像是解析内核过期了
         self.auto_download = False   # 从选集加入：解析完自动下载
         self.from_collection = False
 
@@ -590,8 +601,14 @@ class AccountButton(ui._HoverButton):
 # ---------------------------------------------------------------- 主窗口
 
 class MainWindow(CloudMixin, PanMixin, QMainWindow):
-    def __init__(self):
+    def __init__(self, instance=None):
         super().__init__()
+        self.instance = instance         # 「只能开一个」的锁：重启软件时要先放开
+        self._core_new = ''              # 查到的新内核版本
+        self._core_pending = False       # 新内核已经下载好，等重启
+        self._core_checked_on_failure = False
+        self._core_updating = False
+        self._restart_pending = False
         self.settings = Settings.load()
         self.bridge = Bridge()
         self.parser = core.Parser(lambda: self.settings, self.bridge.log.emit)
@@ -634,6 +651,10 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self.bridge.bili_status.connect(self._on_bili_status)
         self.bridge.collection_loaded.connect(self._on_collection_loaded)
         self.bridge.core_update.connect(self._on_core_update)
+        self.bridge.core_ready.connect(self._on_core_ready)
+        self.bridge.core_retry.connect(self._on_core_retry)
+        self.bridge.parse_status.connect(self._on_parse_status)
+        runtime_update.log = self.bridge.log.emit
         self.bridge.app_update.connect(self._on_app_update)
 
         self.setWindowTitle(APP_NAME)          # 只显示在任务栏；窗口顶部没有系统标题栏（见 titlebar.py）
@@ -672,8 +693,10 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self._tasks_save_timer = QTimer(self)
         self._tasks_save_timer.setSingleShot(True)
         self._tasks_save_timer.setInterval(1500)
-        self._tasks_save_timer.timeout.connect(self._save_tasks)
+        self._tasks_save_timer.timeout.connect(lambda: self._save_tasks(wait=False))
         QTimer.singleShot(0, self._restore_tasks)
+        QTimer.singleShot(700, self._resume_retry)
+        QTimer.singleShot(1500, self._secure_cookies)
         if not ffmpeg_dir():
             QTimer.singleShot(300, lambda: QMessageBox.warning(
                 self, APP_NAME, '没有找到 ffmpeg（程序目录下的 ffmpeg 文件夹），YouTube/B站等需要合并音视频的高清格式将无法下载。'))
@@ -700,6 +723,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             self.stack.addWidget(w)
         self.setCentralWidget(central)
         self.toast = ui.Toast(central)
+        self.notice = ui.NoticeBar(central)
         self.frameless = Frameless(self)          # 去掉系统标题栏，右上角自己画窗口按钮
         QShortcut(QKeySequence('Ctrl+,'), self, activated=self._open_settings)
         QShortcut(QKeySequence('Ctrl+L'), self, activated=self._new_parse)
@@ -1366,6 +1390,8 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             self.toast.bottom = 40
         if self.toast.isVisible():
             self.toast.place()
+        self.notice.bottom = self.toast.bottom + 50
+        self.notice.place()
 
     def _update_folder_btn(self):
         d = self.settings.download_dir
@@ -1699,7 +1725,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
 
     def _start_parse(self, token):
         row = self.rows[token]
-        row.state, row.error = 'parsing', ''
+        row.state, row.error, row.status_text, row.outdated = 'parsing', '', '', False
         self._render_result(row)
         self._update_res_label()
         self.parser.submit(
@@ -1708,7 +1734,16 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             lambda url, msg, raw, t=token: self.bridge.parse_failed.emit(t, msg, raw),
             lambda url, col, t=token: self.bridge.expanded.emit(t, col),
             probe=not row.from_collection,
+            on_status=lambda url, text, t=token: self.bridge.parse_status.emit(t, text),
         )
+
+    def _on_parse_status(self, token, text):
+        row = self.rows.get(token)
+        if row is None or row.state != 'parsing':
+            return
+        row.status_text = text
+        if row.status_label is not None and shiboken6.isValid(row.status_label):
+            row.status_label.setText(text or '正在解析…')
 
     def _on_parsed(self, token, video):
         row = self.rows.get(token)
@@ -1736,9 +1771,14 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         if row is None:
             return
         row.state, row.error, row.error_raw = 'error', msg, raw
+        row.outdated = core.looks_outdated(raw)
         self._render_result(row)
         self._update_res_label()
         self._append_log('error', f'解析失败 {row.url}\n    {raw}')
+        if row.outdated and not self._core_new and not self._core_checked_on_failure:
+            # 报错像是解析内核过期了：马上查一次有没有新内核（每次启动最多一次）
+            self._core_checked_on_failure = True
+            self._check_core_update()
 
     def _on_expanded(self, token, col):
         """粘贴的是播放列表 / 收藏夹等：先让用户勾选要哪些视频。"""
@@ -1798,6 +1838,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         cover = CoverView(176, 99, radius=10)
         cover.clicked.connect(lambda: self._preview_cover(token))
         row.cover, row.combo, row.badge, row.dl_btn, row.spark = cover, None, None, None, None
+        row.status_label = None
         h.addWidget(cover, 0, Qt.AlignTop)
         col = QVBoxLayout()
         col.setSpacing(7)
@@ -1901,7 +1942,8 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
                 spark.move((cover.width() - 36) // 2, (cover.height() - 36) // 2)
                 spark.set_busy(True)
                 row.spark = spark
-                status.addWidget(label('正在解析…', 'meta'))
+                row.status_label = label(row.status_text or '正在解析…', 'meta')
+                status.addWidget(row.status_label)
                 status.addStretch(1)
                 col.addLayout(status)
                 col.addStretch(1)
@@ -1923,6 +1965,9 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
                 act.addStretch(1)
                 act.addWidget(button('移除', lambda: self._remove_result(token), 'ghost'))
                 act.addWidget(button('重试', lambda: self._start_parse(token), icon='refresh'))
+                if row.outdated and self._core_new:
+                    act.addWidget(button('更新内核后重试', self._update_core_and_retry, 'primary',
+                                         f'解析内核有新版本 {self._core_new}：更新后自动重启软件，并重新解析这个链接', 'refresh'))
             col.addLayout(act)
         row.card.set_body(body)
         self._update_badge(row)
@@ -2197,9 +2242,10 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         else:
             self.manager.cancel(task)
 
-    def _save_tasks(self):
+    def _save_tasks(self, wait=True):
+        """wait=False：只在界面线程里收集内容，写文件放到后台（任务状态变化时）；退出时用 wait=True 等它写完。"""
         try:
-            task_store.save(self.manager.tasks)
+            (task_store.save if wait else task_store.save_async)(self.manager.tasks)
         except Exception as e:  # noqa: BLE001
             log.warning('保存未完成任务失败: %s', e)
 
@@ -2208,6 +2254,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         for t in tasks:
             self.manager.restore(t)
         if tasks:
+            self._save_tasks(wait=False)       # 旧版本留下的 tasks.json 里可能有明文 Cookie：马上按新格式重写
             self.notify(f'已恢复上次未完成的 {len(tasks)} 个任务（已暂停），在「下载」页点「全部继续」')
 
     def _toggle_setting(self, name, value):
@@ -2550,22 +2597,151 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             else:
                 QTimer.singleShot(1500, lambda: self.notify(msg, 'error'))
 
+    # ------------------------------------------------------------ 解析内核更新
     def _check_core_update(self):
-        from . import core_update
+        """后台看解析内核（yt-dlp）有没有新版本。打包版默认直接下载好（重启后生效），源码版只提示。
+        启动后查一次；解析失败、报错像是内核过期时再马上查一次。顺便每周检查一次 YouTube 组件（Deno）。"""
+        s = self.settings
+        auto = s.auto_core_update and getattr(sys, 'frozen', False)
+        channel, proxy = s.core_channel, (s.proxy or '').strip()
 
         def work():
             try:
                 cur = core_update.current_version()
-                new, _ = core_update.latest_version()
-                if cur != '未知' and core_update._norm(new) > core_update._norm(cur):
-                    self.bridge.log.emit('info', f'解析内核有新版本 {new}（当前 {cur}）')
-                    self.bridge.core_update.emit(new, cur)
-            except Exception:  # noqa: BLE001 - 检查失败不打扰
-                pass
+                if auto:
+                    _old, new, updated = core_update.update_frozen(channel=channel)
+                    if updated:
+                        self.bridge.log.emit('info', f'解析内核新版本 {new} 已下载（当前 {cur}），重启软件后生效')
+                        self.bridge.core_ready.emit(new)
+                else:
+                    new, _ = core_update.latest_version(channel=channel)
+                    if cur != '未知' and core_update._norm(new) > core_update._norm(cur):
+                        self.bridge.log.emit('info', f'解析内核有新版本 {new}（当前 {cur}）')
+                        self.bridge.core_update.emit(new, cur)
+            except core_update.NeedsNewApp as e:
+                self.bridge.log.emit('warning', str(e))
+            except Exception as e:  # noqa: BLE001 - 检查失败不打扰，只记日志
+                self.bridge.log.emit('info', f'检查解析内核更新失败：{e}')
+            try:
+                ver = runtime_update.check_update(proxy)
+                if ver:
+                    self.bridge.log.emit('info', f'YouTube 组件已更新到 Deno {ver}')
+            except Exception as e:  # noqa: BLE001
+                self.bridge.log.emit('info', f'检查 YouTube 组件更新失败：{e}')
         threading.Thread(target=work, daemon=True).start()
 
     def _on_core_update(self, new, cur):
-        self.notify(f'解析内核有新版本 {new}（当前 {cur}），可在 设置 → 解析内核 里一键更新')
+        """有新内核，还没下载（源码版 / 关掉了自动更新）。"""
+        self._core_new = new
+        if not self._rerender_outdated():
+            self.notify(f'解析内核有新版本 {new}（当前 {cur}），可在 设置 → 解析内核 里一键更新')
+
+    def _on_core_ready(self, new):
+        """新内核已经在后台下载好。"""
+        self._core_new, self._core_pending = new, True
+        retry = bool(self._rerender_outdated())
+        self.notice.show_notice(f'解析内核已更新到 {new}，重启后生效', '立即重启',
+                                lambda: self._update_core_and_retry() if retry else self._restart())
+        self._place_toast()
+        if self.settings_panel is not None:
+            self.settings_panel.core_downloaded(new)
+
+    def _rerender_outdated(self):
+        """报错像是内核过期的失败卡片：重画一下，换上「更新内核后重试」按钮。返回有几张。"""
+        rows = [r for r in self.rows.values() if r.state == 'error' and r.outdated]
+        for r in rows:
+            self._render_result(r)
+        return len(rows)
+
+    def _update_core_and_retry(self):
+        """失败卡片上的「更新内核后重试」：下载新内核 → 记下要重试的链接 → 重启 → 自动重新解析。"""
+        if self._core_pending:
+            self._restart(retry=True)
+            return
+        if self._core_updating:
+            return
+        self._core_updating = True
+        self.notify('正在下载新的解析内核，完成后会自动重启并重新解析…')
+        channel = self.settings.core_channel
+
+        def work():
+            try:
+                if getattr(sys, 'frozen', False):
+                    core_update.update_frozen(channel=channel)
+                else:
+                    cmd = [sys.executable.replace('pythonw.exe', 'python.exe'), '-m', 'pip', 'install', '-U',
+                           '--disable-pip-version-check', *(['--pre'] if channel == 'nightly' else []),
+                           'yt-dlp[default,curl-cffi]']
+                    r = subprocess.run(cmd, capture_output=True, text=True, errors='replace', timeout=600,
+                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                    if r.returncode != 0:
+                        raise RuntimeError((r.stdout + r.stderr)[-400:])
+                self.bridge.core_retry.emit('')
+            except Exception as e:  # noqa: BLE001
+                self.bridge.core_retry.emit(str(e) or type(e).__name__)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_core_retry(self, error):
+        self._core_updating = False
+        if error:
+            self._append_log('warning', f'更新解析内核失败：{error}')
+            self.notify(f'更新解析内核失败：{error[:120]}', 'error')
+            return
+        self._core_pending = True
+        self._restart(retry=True)
+
+    def _restart(self, retry=False):
+        """重启软件（新内核生效）。retry：重启后自动重新解析那些报错像是内核过期的链接。"""
+        urls = [r.url for r in self.rows.values() if r.state == 'error' and r.outdated] if retry else []
+        try:
+            if urls:
+                with open(RETRY_PATH, 'w', encoding='utf-8') as f:
+                    json.dump(list(dict.fromkeys(urls)), f)
+        except OSError:
+            pass
+        self._restart_pending = True
+        self._really_quit = True
+        self.close()
+        if self._restart_pending:           # 还有任务没下完、用户选了先不退出
+            self._restart_pending = False
+            try:
+                os.remove(RETRY_PATH)
+            except OSError:
+                pass
+
+    def _spawn_self(self):
+        """启动一个新的自己（紧接着本进程退出）。"""
+        if self.instance is not None:
+            self.instance.close()       # 先放开「只能开一个」的锁，不然新进程会以为自己是第二个实例，直接退出
+        args = [sys.executable, *sys.argv[1:]] if getattr(sys, 'frozen', False) else [sys.executable, *sys.argv]
+        try:
+            with proc_job.detached():   # 不跟着本进程一起被结束
+                subprocess.Popen(args, cwd=os.getcwd(), close_fds=True)
+        except OSError as e:
+            log.warning('重启失败: %s', e)
+
+    def _resume_retry(self):
+        """更新内核后重启：自动重新解析重启前失败的链接。"""
+        try:
+            with open(RETRY_PATH, encoding='utf-8') as f:
+                urls = json.load(f)
+            os.remove(RETRY_PATH)
+        except (OSError, ValueError):
+            return
+        urls = [u for u in urls if isinstance(u, str)][:200] if isinstance(urls, list) else []
+        if urls and self._submit_urls(urls):
+            self.notify(f'解析内核已更新到 {core_update.current_version(block=False)}，正在重新解析刚才失败的 {len(urls)} 个链接',
+                        'ok')
+
+    def _secure_cookies(self):
+        """把数据文件夹里的明文登录信息加密保存（旧版本留下的、用户手动放进 cookies 文件夹的）。"""
+        def work():
+            try:
+                core.adopt_stray_cookie_files()
+                core.folder_cookies()
+            except Exception as e:  # noqa: BLE001
+                log.warning('加密登录信息失败: %s', e)
+        threading.Thread(target=work, daemon=True).start()
 
     def _check_app_update(self):
         """启动时在后台看一下 GitHub 上有没有软件新版本；失败不打扰。"""
@@ -2836,6 +3012,14 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         getattr(log, 'error' if level == 'error' else 'warning' if level == 'warning' else 'info')(msg)
 
     def _refresh_status(self):
+        if core.startup_log:            # 界面接上日志之前产生的消息（如内核自检）
+            msgs, core.startup_log[:] = list(core.startup_log), []
+            for level, msg in msgs:
+                self._append_log(level, msg)
+        if core.imported_plain:
+            names, core.imported_plain[:] = list(core.imported_plain), []
+            self._append_log('info', '这些 cookies 文件已加密保存，明文文件已删除：' + '、'.join(names))
+            self.notify(f'已把 {len(names)} 个 cookies 文件加密保存，明文文件已删除', 'ok')
         tasks = self.manager.tasks
         running = [t for t in tasks if t.status in (core.RUNNING, core.MERGING)]
         queued = sum(1 for t in tasks if t.status == core.QUEUED)
@@ -2885,7 +3069,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         n_pan = pc['running'] + pc['queued']
         if active or n_pan:
             ret = QMessageBox.question(
-                self, APP_NAME, f'还有 {len(active) + n_pan} 个任务未完成，确定退出吗？\n'
+                self, APP_NAME, f'还有 {len(active) + n_pan} 个任务未完成，确定{"重启" if self._restart_pending else "退出"}吗？\n'
                                 '（已下载的部分会保留：视频下次下载同一清晰度时自动续传，网盘文件下次打开软件自动继续）')
             if ret != QMessageBox.Yes:
                 event.ignore()
@@ -2900,6 +3084,9 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         if self.tray:
             self.tray.hide()
         event.accept()
+        if self._restart_pending:
+            self._restart_pending = False
+            self._spawn_self()
         QApplication.instance().quit()
 
 
@@ -2957,7 +3144,8 @@ def run(instance=None):
     sys.excepthook = excepthook
 
     app.setQuitOnLastWindowClosed(False)    # 关窗口只是缩小到托盘，由「退出」来真正退出
-    win = MainWindow()
+    proc_job.install()                      # 之后启动的 ffmpeg、网盘引擎等子进程跟着软件一起退出
+    win = MainWindow(instance)
     win.show()
     if instance is not None:
         activation_timer = QTimer(win)

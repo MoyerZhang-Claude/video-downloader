@@ -14,7 +14,8 @@ object PyBridge {
         if (initialized) return
         synchronized(this) {
             if (!initialized) {
-                module.callAttr("init", ctx.filesDir.absolutePath, ctx.cacheDir.absolutePath)
+                // SecureStore：登录信息（B站、网站 cookies）用 Android Keystore 里的密钥加密保存
+                module.callAttr("init", ctx.filesDir.absolutePath, ctx.cacheDir.absolutePath, SecureStore)
                 JsEngine.attach(ctx)
                 MediaCaps.attach(ctx)
                 module.callAttr("set_media_caps", MediaCaps)    // 这台手机能合并 / 播放哪些编码（YouTube 2K、4K）
