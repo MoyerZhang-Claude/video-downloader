@@ -69,9 +69,9 @@ def _use_android_error_hints():
                        '（「设置 → 网站登录信息」），或换一个 VPN 节点')
             else:
                 msg = ('YouTube 暂时拦截了当前网络（多半是 VPN 节点被风控）：换一个节点后重试，'
-                       '或在「设置 → 网站登录信息」里导入 YouTube 的 cookies')
+                       '或在「设置 → 后台与网站登录 → 网站登录信息」里导入 YouTube 的登录信息')
         elif msg.startswith('该内容需要登录'):
-            msg = '该内容需要登录：在「设置 → 网站登录信息」导入这个网站的 cookies（B站 在设置页顶部扫码登录）'
+            msg = '该内容需要登录：在「设置 → 后台与网站登录 → 网站登录信息」里登录这个网站（B站 在设置页顶部扫码登录）'
         return msg, raw
 
     friendly._android = True
@@ -254,7 +254,9 @@ def parse(url, probe=True):
             raw_info = ydl.sanitize_info(ydl.extract_info(url, download=False))
     except Exception as e:  # noqa: BLE001
         msg, raw = core.friendly_error(e)
-        return json.dumps({'error': msg, 'raw': raw[:500]}, ensure_ascii=False)
+        # outdated：报错像是解析内核过期了（界面据此马上查一次新内核）；login：要登录才能看
+        return json.dumps({'error': msg, 'raw': raw[:500], 'outdated': core.looks_outdated(raw),
+                           'login': core.needs_login(raw)}, ensure_ascii=False)
     if raw_info.get('_type') == 'playlist':
         # 注意：sanitize_info(…, True) 会删掉 entries，所以播放列表要在清理前处理
         from app import collection
@@ -865,6 +867,29 @@ def cookies_import(src_path):
     return json.dumps(res, ensure_ascii=False)
 
 
+def site_cookies_save(site, cookies_json):
+    """App 里网页登录后保存这个网站的 Cookie。site：主域名（如 tiktok.com）；
+    cookies_json：{域名: {名字: 值}}（WebView 的 CookieManager 只给名字和值）。返回 cookies_status() 或 {error}。"""
+    import http.cookiejar
+    from app import secure_store
+    try:
+        by_domain = json.loads(cookies_json)
+    except ValueError:
+        return json.dumps({'error': '登录信息格式不对'}, ensure_ascii=False)
+    expires = int(time.time()) + 180 * 86400        # 不知道真正的过期时间：按半年记，失效时解析会提示重新登录
+    cookies = []
+    for domain, pairs in by_domain.items():
+        d = '.' + domain.lstrip('.')
+        for name, value in (pairs or {}).items():
+            cookies.append(http.cookiejar.Cookie(0, name, value, None, False, d, True, True, '/', True, True, expires,
+                                                 False, None, None, {}))
+    if not cookies:
+        return json.dumps({'error': '没有拿到登录信息，请确认已经登录成功'}, ensure_ascii=False)
+    site = re.sub(r'[^\w.-]+', '_', site)[:80] or 'site'
+    secure_store.save_cookies(_cookie_path(site), cookies)        # 加密保存，和导入的 cookies.txt 同一个位置
+    return cookies_status()
+
+
 def cookies_status():
     """{sites: [{site, name, count, age_days, expires}]}；expires：最早过期的 cookie（秒，0 表示未知）"""
     from app import secure_store
@@ -976,29 +1001,25 @@ def core_info():
     })
 
 
-def core_latest():
-    """只查 PyPI 上的最新版本号，不下载。"""
+def core_latest(channel='stable'):
+    """只查 PyPI 上的最新版本号，不下载。channel：stable 稳定版 / nightly 预览版。"""
     from app import core_update as cu
     try:
-        new, _ = cu.latest_version()
+        new, _ = cu.latest_version(channel=channel)
     except Exception as e:  # noqa: BLE001
         return json.dumps({'ok': False, 'error': _net_error(e)})
-    have = cu.override_version() or cu.current_version(block=False)
+    have = cu.pending_version() or cu.current_version(block=False)
     newer = have not in ('未知', '（加载中）') and cu._norm(new) > cu._norm(have)
     return json.dumps({'ok': True, 'latest': new, 'newer': newer})
 
 
-def core_update(callback):
-    """下载最新内核。callback.on_progress(0~1)。返回 {ok, old, new, updated, error}。"""
+def core_update(callback, channel='stable'):
+    """下载最新内核（重启 App 后生效）。callback.on_progress(0~1)。返回 {ok, old, new, updated, pending, error}。"""
     from app import core_update as cu
-    have = cu.override_version()        # 已经下载过但还没重启：和它比，不要重复下载
     try:
-        if have:
-            new, _ = cu.latest_version()
-            if cu._norm(new) <= cu._norm(have):
-                return json.dumps({'ok': True, 'old': cu.current_version(block=False), 'new': have, 'updated': True,
-                                   'pending': not _core_override})
-        old, new, updated = cu.update_frozen(lambda p: callback.on_progress(float(p)))
+        old, new, updated = cu.update_frozen(lambda p: callback.on_progress(float(p)), channel)
+    except cu.NeedsNewApp as e:
+        return json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False)
     except Exception as e:  # noqa: BLE001
         return json.dumps({'ok': False, 'error': _net_error(e)})
     return json.dumps({'ok': True, 'old': old, 'new': new, 'updated': updated, 'pending': updated})
@@ -1011,7 +1032,8 @@ def core_reset():
 
 
 def app_check(current):
-    """GitHub 上有没有比 current 新的安卓版。返回 {ok, version, page, download, notes}；没有新版时 version 为空。"""
+    """GitHub 上有没有比 current 新的安卓版。返回 {ok, version, page, download, notes, sections, published, size…}
+    （见 app_update.parse_release）；没有新版时 version 为空。"""
     from app import app_update
     try:
         rel = app_update.check('android', current)

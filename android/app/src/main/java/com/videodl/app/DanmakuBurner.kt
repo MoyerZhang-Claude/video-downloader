@@ -94,35 +94,61 @@ object DanmakuBurner {
         return (src * 16 / 10).coerceIn(floor.toLong(), 60_000_000L).toInt()
     }
 
+    /** 生成结果：[fps] 实际的弹幕帧率（0 = 用了原帧率方案）；[note] 和设置不一样时的原因（给用户看）；[diag] 诊断信息 */
+    class Result(val fps: Int, val note: String, val diag: String, val hevc: Boolean = false)
+
     /**
-     * 把 [layout] 的弹幕画进 [input]，输出 H.264 MP4 到 [output]。
-     * 弹幕按 [fps]（60 / 120）帧刷新，画面保持原来的帧率（[DanmakuGl]）；
-     * 手机不支持这个帧率、HDR 视频或中途出错时，改用原帧率方案（弹幕跟着画面帧率走）。
-     * [onProgress] 0~100；[isCancelled] 返回 true 时中止（抛 CancellationException）。
-     * 返回实际的弹幕帧率；0 = 用了原帧率方案。
+     * 把 [layout] 的弹幕画进 [input]，输出 MP4 到 [output]。
+     * 弹幕按 [fps]（60 / 120）帧刷新，画面保持原来的帧率（[DanmakuGl]）。手机的编码器跑不了这个分辨率的 120 帧时，
+     * 按 [allowHevc]（允许换 H.265）和 [preferFps]（宁可降分辨率也要 120 帧）定方案，见 [DanmakuGl.plan]。
+     * HDR 视频、没有合适的编码器或中途出错时，改用原帧率方案（弹幕跟着画面帧率走）。
+     * [onPlan] 定下（或换了）方案时调用；[onProgress] 0~100；[isCancelled] 返回 true 时中止（抛 CancellationException）。
      */
     suspend fun burn(ctx: Context, input: File, output: File, layout: Layout, sourceVideoBytes: Long, fps: Int,
-                     onProgress: (Int) -> Unit, isCancelled: () -> Boolean): Int {
+                     allowHevc: Boolean, preferFps: Boolean, onPlan: (DanmakuGl.Plan) -> Unit = {},
+                     onProgress: (Int) -> Unit, isCancelled: () -> Boolean): Result {
         val src = DanmakuGl.probe(input)
         val (w, h) = if (src.rotation % 180 != 0) src.height to src.width else src.width to src.height
-        val use = if (src.hdr) 0 else DanmakuGl.supportedFps(w, h, fps)
-        if (use > 0) {
-            val main = Handler(Looper.getMainLooper())
+        // 先记下诊断信息：源视频的参数、每个编码器在这个尺寸下的能力（排查「为什么不是 120 帧」）
+        val diag = runCatching { DanmakuGl.diagnose(src, w, h, fps) }.getOrElse { "诊断信息获取失败：${it.message}" }
+        android.util.Log.i("DanmakuBurner", "弹幕版诊断：\n$diag")
+        // 依次尝试的方案：先按想要的帧率；它生成到一半出错（编码器被别的程序占着、手机发热降频……）就退到 60 帧再试，
+        // 还不行才用原帧率方案。
+        val plans = ArrayList<DanmakuGl.Plan>()
+        if (!src.hdr) {
+            DanmakuGl.plan(w, h, fps, allowHevc, preferFps)?.let { plans.add(it) }
+            if (fps > 60 && plans.firstOrNull()?.fps != 60) DanmakuGl.plan(w, h, 60, allowHevc, preferFps)?.let { plans.add(it) }
+        }
+        var why = when {
+            src.hdr -> "HDR 视频的弹幕版按视频原帧率生成（高帧率方案还不支持 HDR）"
+            plans.isEmpty() -> "这台手机的编码器编不了 ${w}x$h 的 60 / $fps 帧，弹幕按视频原帧率生成"
+            else -> ""
+        }
+        val main = Handler(Looper.getMainLooper())
+        for (plan in plans) {
+            main.post { onPlan(plan) }
+            android.util.Log.i("DanmakuBurner", "方案：${if (plan.hevc) "H.265" else "H.264"} ${plan.encoder} " +
+                "${plan.outW}x${plan.outH}（编码 ${plan.encW}x${plan.encH}，旋转 ${plan.rotateHint}）${plan.fps} 帧；${plan.note}")
             try {
-                val info = VideoInfo(src.width, src.height, src.rotation, src.durationUs)
-                return withContext(Dispatchers.IO) {
-                    DanmakuGl.burn(input, output, layout, src, use, bitrateFor(info, sourceVideoBytes),
+                // 码率按实际输出的画面大小算（降了分辨率就按降后的）
+                val info = VideoInfo(plan.outW, plan.outH, 0, src.durationUs)
+                val scale = (plan.outW.toLong() * plan.outH).toDouble() / (w.toLong() * h)
+                withContext(Dispatchers.IO) {
+                    DanmakuGl.burn(input, output, layout, src, plan, bitrateFor(info, (sourceVideoBytes * scale).toLong()),
                         onProgress = { p -> main.post { onProgress(p) } }, isCancelled = isCancelled)
                 }
+                return Result(plan.fps, listOf(why, plan.note).filter { it.isNotEmpty() }.joinToString("；"), diag, plan.hevc)
             } catch (e: java.util.concurrent.CancellationException) {
                 throw CancellationException("已取消")
             } catch (e: Exception) {
-                android.util.Log.w("DanmakuBurner", "高帧率弹幕版失败，改用原帧率方案", e)
+                android.util.Log.w("DanmakuBurner", "${plan.fps} 帧弹幕版生成出错", e)
                 if (isCancelled()) throw CancellationException("已取消")
+                why = "按 ${plan.fps} 帧生成弹幕版时出错（${e.message ?: e.javaClass.simpleName}）" +
+                    if (plan !== plans.last()) "，改为 60 帧" else "，弹幕改按视频原帧率生成"
             }
         }
         burnSourceRate(ctx, input, output, layout, sourceVideoBytes, onProgress, isCancelled)
-        return 0
+        return Result(0, why, diag)
     }
 
     /** 原帧率方案（Media3）：每一帧画面画一次弹幕，弹幕帧率 = 视频帧率。 */

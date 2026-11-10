@@ -14,8 +14,8 @@ android {
         applicationId = "com.videodl.app"
         minSdk = 29                 // Android 10+：可以免权限写入「下载」文件夹
         targetSdk = 36
-        versionCode = 14
-        versionName = "2.4.1"
+        versionCode = 15
+        versionName = "2.5.0"
         ndk {
             abiFilters += listOf("arm64-v8a")     // 手机基本都是 arm64，只打这一种，安装包小一半
         }
@@ -96,7 +96,7 @@ val ytDlpEjsVersion = "0.8.0"
 val syncPythonCore = tasks.register<Sync>("syncPythonCore") {
     from(rootProject.file("../app")) {
         include("__init__.py", "core.py", "extractors.py", "collection.py", "bilibili.py", "danmaku.py", "config.py",
-            "history.py", "fastdl.py", "core_update.py", "app_update.py", "gdrive.py", "cloud_guide.py", "secure_store.py")
+            "history.py", "fastdl.py", "core_update.py", "app_update.py", "gdrive.py", "cloud_guide.py", "secure_store.py", "runtime_update.py")
     }
     into(layout.buildDirectory.dir("pycore/app"))
     // 内置内核的版本号：App 里在线更新内核时，只有比它新才会使用下载的版本

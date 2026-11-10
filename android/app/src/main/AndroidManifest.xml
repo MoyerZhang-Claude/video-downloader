@@ -47,6 +47,11 @@
             android:name=".BiliLoginActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
+        <!-- 在 App 里登录网站（TikTok、X 等），登录后把 Cookie 加密保存 -->
+        <activity
+            android:name=".SiteLoginActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
 
         <service
             android:name=".DownloadService"

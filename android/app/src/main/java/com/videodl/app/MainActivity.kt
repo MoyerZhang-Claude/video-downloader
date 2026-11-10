@@ -158,7 +158,7 @@ fun App(vm: MainViewModel, activity: ComponentActivity) {
                     else SystemBarStyle.light(AColor.TRANSPARENT, AColor.TRANSPARENT)
         activity.enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
     }
-    VdTheme(vm.themeMode, vm.darkOled) {
+    VdTheme(vm.themeMode, vm.darkOled) { CompositionLocalProvider(LocalShowTips provides vm.showTips) {
         var page by rememberSaveable { mutableStateOf("home") }
         val drawer = rememberDrawerState(DrawerValue.Closed)
         val scope = rememberCoroutineScope()
@@ -212,6 +212,7 @@ fun App(vm: MainViewModel, activity: ComponentActivity) {
         if (vm.showAppUpdate) AppUpdateDialog(vm)
         if (vm.showCookieHelp) CookieHelpDialog(vm)
         if (vm.showCookieManager) CookieManagerDialog(vm)
+        vm.diagText?.let { VdAlert("弹幕版详情", it, "知道了", onConfirm = { vm.diagText = null }, onDismiss = { vm.diagText = null }) }
         vm.renaming?.let { RenameDialog(it, vm) }
         vm.moving?.let { MoveDialog(it, vm) }
         vm.renamingParse?.let { ParseRenameDialog(it, vm) }
@@ -219,7 +220,7 @@ fun App(vm: MainViewModel, activity: ComponentActivity) {
         vm.sectionEditor?.let { SectionDialog(it, vm) }
         vm.pan.login?.let { PanLoginDialog(it, vm) }
         vm.pan.captcha?.let { PanCaptchaDialog(it, vm) }
-    }
+    } }
 }
 
 // ================================================================ 侧边栏（像 Claude 手机版：打开时占满整个屏幕）
@@ -264,7 +265,7 @@ private fun Drawer(vm: MainViewModel, page: String, onNavigate: (String) -> Unit
                 item {
                     Text("最近下载", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = P.text3,
                         modifier = Modifier.padding(start = 10.dp, top = 18.dp, bottom = 6.dp))
-                    if (vm.recent.isEmpty()) Text("下载好的视频会出现在这里", fontSize = 14.sp, color = P.text4,
+                    if (vm.recent.isEmpty() && LocalShowTips.current) Text("下载好的视频会出现在这里", fontSize = 14.sp, color = P.text4,
                         modifier = Modifier.padding(10.dp))
                 }
                 items(vm.recent, key = { "r${it.id}" }) { h -> RecentRow(h, vm, goHome) }
@@ -361,6 +362,17 @@ private fun HomeScreen(vm: MainViewModel, focus: FocusRequester, openDrawer: () 
                         .background(P.brand).widthIn(min = 16.dp).padding(horizontal = 4.dp))
             }
         }
+        // 有新版本：不弹窗打断，只在这里放一条小提示，点开才显示更新窗口
+        vm.appBanner?.let { rel ->
+            Row(Modifier.padding(horizontal = 14.dp, vertical = 2.dp).fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                .background(P.tintAccent).clickable { vm.showAppUpdate = true }.padding(start = 14.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Spark(16.dp)
+                Spacer(Modifier.width(8.dp))
+                Text("新版本 ${rel.version} · 查看", fontSize = 14.sp, color = P.accent, modifier = Modifier.weight(1f))
+                RoundIcon(LineIcons.X, { vm.appBannerHidden = true }, size = 38.dp, iconSize = 16.dp, tint = P.accent)
+            }
+        }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if ((vm.items.isEmpty() && vm.pan.shares.isEmpty()) || vm.fresh) EmptyHome(vm) else ResultList(vm)
         }
@@ -442,7 +454,7 @@ private fun Composer(vm: MainViewModel, focus: FocusRequester) {
                     DropdownMenu(plusMenu, { plusMenu = false }, containerColor = P.surface, shape = RoundedCornerShape(14.dp)) {
                         MenuItem(LineIcons.Clipboard, "粘贴剪贴板里的链接") { plusMenu = false; pasteAndParse() }
                         MenuItem(LineIcons.Settings, "下载选项") { plusMenu = false; sheet = true }
-                        MenuItem(LineIcons.Globe, "网站登录信息") { plusMenu = false; vm.showCookieHelp = true }
+                        MenuItem(LineIcons.Globe, "网站登录信息") { plusMenu = false; vm.showCookieManager = true }
                     }
                 }
                 Spacer(Modifier.width(8.dp))
@@ -480,37 +492,50 @@ private fun MenuItem(icon: androidx.compose.ui.graphics.vector.ImageVector, text
 
 @Composable
 private fun DownloadOptionRows(vm: MainViewModel) {
+    val tips = LocalShowTips.current
     SettingsRow(LineIcons.Monitor, "编码偏好", when (vm.codecPref) {
             "quality" -> "同一清晰度优先选 AV1 / H.265：画质差不多，文件小一半左右；很老的手机、电视可能放不了"
             "best" -> "同一清晰度选数据量最大的版本：文件最大，画质最稳妥"
             else -> "同一清晰度优先选 H.264：文件稍大，但任何手机、电脑、电视都能放"
-        }) {
+        }, subtitleIsTip = true) {
         Choice(listOf("compat" to "兼容", "quality" to "体积", "best" to "画质"), vm.codecPref) { vm.chooseCodecPref(it) }
     }
     SettingsRow(null, "显示 HDR / 杜比视界版本", if (vm.showHdr)
                 "开：清晰度列表里会多出 HDR、杜比视界版本。任何手机都能下载；要在支持 HDR 的屏幕上看，颜色才会更鲜艳"
-                else "关：只列出普通版本。如果视频只有 HDR 版本，会提示到这里打开") {
+                else "关：只列出普通版本。如果视频只有 HDR 版本，会提示到这里打开", subtitleIsTip = true) {
         Switch(vm.showHdr, { vm.toggleShowHdr(it) })
     }
-    SettingsRow(LineIcons.Subtitles, "同时下载字幕", "视频有中文或原语言字幕时一起下载，存在「字幕」文件夹里") {
+    SettingsRow(LineIcons.Subtitles, "同时下载字幕", "视频有中文或原语言字幕时一起下载，存在「字幕」文件夹里", subtitleIsTip = true) {
         Switch(vm.wantSubs, { vm.toggleSubs(it) })
     }
-    SettingsRow(LineIcons.Image, "同时保存封面", "把视频封面原图存到相册") {
+    SettingsRow(LineIcons.Image, "同时保存封面", "把视频封面原图存到相册", subtitleIsTip = true) {
         Switch(vm.wantCover, { vm.toggleCover(it) })
     }
     if (vm.cloud.loggedIn) {
-        SettingsRow(LineIcons.CloudUp, "同时上传到谷歌云盘", "下载完成后自动上传。已经下好的视频，长按它选「上传到谷歌云盘」") {
+        SettingsRow(LineIcons.CloudUp, "同时上传到谷歌云盘", "下载完成后自动上传。已经下好的视频，长按它选「上传到谷歌云盘」", subtitleIsTip = true) {
             Switch(vm.cloud.uploadOnDownload, { vm.cloud.chooseUploadOnDownload(it) })
         }
     }
-    SettingsRow(LineIcons.Danmaku, "B站弹幕版", if (vm.wantDanmaku) "开：把弹幕画进视频里，任何播放器都能看到弹幕；下载完要多等一会儿生成"
-                else "关：只下载原视频，不带弹幕", divider = vm.wantDanmaku) {
+    // 这一行的小字前半是状态（开 / 关），后半是解释：关掉「显示功能说明」后只留状态
+    SettingsRow(LineIcons.Danmaku, "B站弹幕版", if (vm.wantDanmaku) "开" + (if (tips) "：把弹幕画进视频里，任何播放器都能看到弹幕；下载完要多等一会儿生成" else "")
+                else "关" + (if (tips) "：只下载原视频，不带弹幕" else ""), divider = vm.wantDanmaku) {
         Switch(vm.wantDanmaku, { vm.toggleDanmaku(it) })
     }
     if (vm.wantDanmaku) {
         SettingsRow(null, "弹幕流畅度", "只影响弹幕滚动有多顺滑，视频画面不变" +
-                if (vm.danmakuFps == 120) "。120 帧在高刷屏上更顺，文件更大、生成更久" else "", divider = false) {
+                if (vm.danmakuFps == 120) "。120 帧在高刷屏上更顺，文件更大、生成更久" else "", subtitleIsTip = true) {
             FpsChoice(vm.danmakuFps) { vm.chooseDanmakuFps(it) }
+        }
+        // 能播放 120 帧和能编码 4K 120 帧是两回事：手机的 H.264 编码器在 4K 下一般只到 60 帧
+        if (vm.danmakuFps == 120) {
+            SettingsRow(null, "4K 等高分辨率视频", if (vm.danmakuPreferFps) "手机编不了原分辨率的 120 帧时：保持 120 帧，弹幕版的分辨率降一档"
+                    else "手机编不了原分辨率的 120 帧时：保持分辨率，弹幕降为 60 帧", subtitleIsTip = true) {
+                Choice(listOf(false to "保持分辨率", true to "保持 120 帧"), vm.danmakuPreferFps) { vm.chooseDanmakuPreferFps(it) }
+            }
+        }
+        SettingsRow(null, "弹幕版编码", if (vm.danmakuHevc) "手机的 H.264 编码器跑不了时改用 H.265（如 4K 120 帧）；很老的电视、电脑可能放不了 H.265"
+                else "只用 H.264，任何设备都能放", subtitleIsTip = true, divider = false) {
+            Choice(listOf(false to "兼容优先", true to "允许 H.265"), vm.danmakuHevc) { vm.chooseDanmakuHevc(it) }
         }
     }
 }
@@ -545,11 +570,11 @@ private fun BackgroundRows(vm: MainViewModel) {
     val sites = vm.cookieSites
     val expired = sites.filter { it.expired }
     SettingsRow(LineIcons.Globe, "网站登录信息", when {
-        sites.isEmpty() -> "未导入：网站提示「需要登录」「人机验证」时导入"
-        expired.isNotEmpty() -> "已导入 ${sites.joinToString("、") { it.name }}（${expired.joinToString("、") { it.name }} 已过期）"
-        else -> "已导入：${sites.joinToString("、") { it.name }}"
+        sites.isEmpty() -> "未登录" + if (LocalShowTips.current) "：网站提示「需要登录」时，在这里登录" else ""
+        expired.isNotEmpty() -> "已登录 ${sites.joinToString("、") { it.name }}（${expired.joinToString("、") { it.name }} 已过期）"
+        else -> "已登录：${sites.joinToString("、") { it.name }}"
     }, subtitleColor = if (sites.isNotEmpty() && expired.isEmpty()) P.ok else null, divider = false,
-        onClick = { if (sites.isEmpty()) vm.showCookieHelp = true else vm.showCookieManager = true }) {
+        onClick = { vm.showCookieManager = true }) {
         LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
     }
 }
@@ -624,6 +649,12 @@ private fun VideoCard(item: VideoItem, vm: MainViewModel) {
             }
             Spacer(Modifier.height(10.dp))
             QualitySelector(item)
+            // 选了 120 帧弹幕、清晰度又很高：提前说这台手机会怎么处理（查编码器能力放在后台线程）
+            val hint by produceState("", item.selected, vm.wantDanmaku, vm.danmakuFps, vm.danmakuHevc, vm.danmakuPreferFps) {
+                value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { vm.danmakuHint(item) }
+            }
+            if (hint.isNotEmpty()) Text(hint, color = P.warn, fontSize = 12.sp, lineHeight = 17.sp,
+                modifier = Modifier.padding(top = 6.dp))
             if (item.locked.isNotEmpty()) Text(
                 "🔒 ${item.locked}：" + if (vm.bili?.loggedIn == true) "需要大会员账号" else "点这里登录 B站 解锁",
                 color = P.text3, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)
@@ -642,6 +673,13 @@ private fun VideoCard(item: VideoItem, vm: MainViewModel) {
                 verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = { vm.remove(item) }) { Text("移除", color = P.text3) }
                 if (item.state == "error") OutlineButton("重试", icon = LineIcons.Refresh) { vm.parse(item) }
+                // 报错像是解析内核过期了，而且查到有新内核：更新 → 重启 → 自动重新解析
+                if (item.state == "error" && item.outdated && vm.coreNew.isNotEmpty()) {
+                    Spacer(Modifier.width(8.dp))
+                    PrimaryButton(if (vm.coreBusy) "正在更新…" else "更新内核后重试", icon = LineIcons.Refresh, enabled = !vm.coreBusy) {
+                        vm.updateCoreAndRetry { restartApp(ctx) }
+                    }
+                }
             }
         }
         // 这个视频的下载进度
@@ -759,8 +797,11 @@ private fun EmptyState(title: String, sub: String) {
         Spark(38.dp, color = P.text4)
         Spacer(Modifier.height(14.dp))
         Text(title, fontFamily = Serif, fontSize = 20.sp, color = P.text2)
-        Spacer(Modifier.height(8.dp))
-        Text(sub, fontSize = 13.sp, color = P.text3, textAlign = TextAlign.Center, lineHeight = 19.sp)
+        // 引导新手的副标题：关掉「显示功能说明」后不显示
+        if (LocalShowTips.current) {
+            Spacer(Modifier.height(8.dp))
+            Text(sub, fontSize = 13.sp, color = P.text3, textAlign = TextAlign.Center, lineHeight = 19.sp)
+        }
     }
 }
 
@@ -800,6 +841,10 @@ private fun TaskCard(task: DownloadTask, vm: MainViewModel) {
                 val cloud = vm.cloud.status("task:${task.id}")
                     ?: if (task.cloud && task.active) "下完后上传云盘" to P.text3 else null
                 cloud?.let { (t, col) -> Text(t, color = col, fontSize = 12.sp) }
+                if (task.diag.isNotEmpty() && !task.active) Text("弹幕版详情", color = P.accent, fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 2.dp).clickable {
+                        vm.diagText = (if (task.note.isNotEmpty()) task.note + "\n\n" else "") + task.diag
+                    })
             }
             when {
                 task.active -> OutlineButton("取消") { vm.cancel(task) }
@@ -1230,6 +1275,7 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
     var editName by remember { mutableStateOf(false) }
     var avatarMenu by remember { mutableStateOf(false) }
     var credits by remember { mutableStateOf(false) }
+    val tips = LocalShowTips.current
     // 当前打开的分类；null = 设置首页（只列分类）
     var section by rememberSaveable { mutableStateOf<String?>(null) }
     BackHandler(enabled = section != null) { section = null }
@@ -1281,11 +1327,13 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
             }
             SettingsGroup {
                 sections.forEachIndexed { i, (sec, desc) ->
-                    SettingsRow(sec.third, sec.second, desc, divider = i < sections.lastIndex, onClick = { section = sec.first }) {
+                    SettingsRow(sec.third, sec.second, desc, divider = i < sections.lastIndex, subtitleIsTip = true,
+                        onClick = { section = sec.first }) {
                         LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
                     }
                 }
             }
+            // 这句是声明（不是官方作品），不属于功能说明，一直显示
             Text("这个软件的代码几乎全部由 Claude 编写。图标「星芒落点」和界面风格是向 Claude 应用致敬的原创设计，" +
                 "不是 Anthropic 的官方作品，本项目与 Anthropic 没有任何官方关系。",
                 fontSize = 12.sp, color = P.text3, lineHeight = 18.sp, modifier = Modifier.padding(horizontal = 6.dp))
@@ -1293,7 +1341,8 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
             if (section == "personal") {
             SettingsGroup("个人") {
                 Box {
-                    SettingsRow(LineIcons.User, "头像", if (vm.avatar != null) "点一下更换图片或调整位置" else "从相册选一张图片当头像",
+                    SettingsRow(LineIcons.User, "头像", if (vm.avatar != null) "已设置" + (if (tips) "：点一下更换图片或调整位置" else "")
+                            else "未设置" + (if (tips) "：从相册选一张图片当头像" else ""),
                         onClick = { if (vm.avatar != null) avatarMenu = true else chooseAvatar() }) {
                         Avatar(if (b?.loggedIn == true) b.name else vm.nickname, 36.dp, image = vm.avatar)
                     }
@@ -1320,8 +1369,12 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                 }
                 SettingsRow(null, "深色时用纯黑背景", if (vm.darkOled)
                         "开：深色模式下背景是纯黑，OLED 屏更省电。已调柔文字、减少滚动拖影，但长时间看仍比深灰更容易累"
-                    else "关：深色模式用和 Claude 官方一样的深灰色，长时间看更舒服", divider = false) {
+                    else "关：深色模式用和 Claude 官方一样的深灰色，长时间看更舒服", subtitleIsTip = true) {
                     Switch(vm.darkOled, { vm.changeOled(it) })
+                }
+                SettingsRow(null, "显示功能说明", "关掉后，每个选项下面解释它是做什么的小字不再显示，界面更干净；" +
+                        "状态（已登录、当前版本……）、错误和警告不受影响", subtitleIsTip = true, divider = false) {
+                    Switch(vm.showTips, { vm.changeShowTips(it) })
                 }
             }
             }
@@ -1344,13 +1397,15 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                     if (vm.appCheckBusy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = P.text3)
                     else LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
                 }
-                SettingsRow(null, "打开 App 时检查新版本", "有新版本会弹窗提醒，也可以选择跳过这个版本") {
+                SettingsRow(null, "打开 App 时检查新版本", "有新版本时在首页顶部提示，也可以选择跳过这个版本", subtitleIsTip = true) {
                     Switch(vm.checkAppUpdate, { vm.changeCheckAppUpdate(it) })
                 }
-                SettingsRow(LineIcons.Github, "GitHub 项目主页", "更新说明、电脑版下载和源代码", onClick = { openWeb(ctx, GITHUB_URL) }) {
+                SettingsRow(LineIcons.Github, "GitHub 项目主页", "更新说明、电脑版下载和源代码", subtitleIsTip = true,
+                    onClick = { openWeb(ctx, GITHUB_URL) }) {
                     LIcon(LineIcons.External, P.text3, 18.dp)
                 }
-                SettingsRow(LineIcons.Heart, "致谢与开源许可", "yt-dlp、PanDL、FFmpeg、界面字体等", divider = false, onClick = { credits = true }) {
+                SettingsRow(LineIcons.Heart, "致谢与开源许可", "yt-dlp、PanDL、FFmpeg、界面字体等", subtitleIsTip = true, divider = false,
+                    onClick = { credits = true }) {
                     LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
                 }
             }
@@ -1395,35 +1450,58 @@ private fun VdAlert(title: String, text: String, confirm: String, danger: Boolea
 
 @Composable
 private fun CookieManagerDialog(vm: MainViewModel) {
+    val ctx = LocalContext.current
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.importCookies(it) } }
+    val login = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (it.resultCode == android.app.Activity.RESULT_OK)
+            vm.onSiteLoggedIn(it.data?.getStringExtra(SiteLoginActivity.RESULT_NAME) ?: "网站")
+    }
+    var other by remember { mutableStateOf("") }
+    // 固定列出的几个常用网站 + 登录 / 导入过的其它网站
+    val saved = vm.cookieSites.associateBy { it.site }
+    val rows = LOGIN_SITES.map { it to saved[it.key] } +
+        vm.cookieSites.filter { c -> LOGIN_SITES.none { it.key == c.site } }.map { c -> loginSiteFor(c.site) to c }
     AlertDialog(
         onDismissRequest = { vm.showCookieManager = false }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
-        title = { Text("已导入的登录信息", color = P.text, fontSize = 18.sp) },
+        title = { Text("网站登录信息", color = P.text, fontSize = 18.sp) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                vm.cookieSites.forEach { s ->
+                if (LocalShowTips.current) Text("有些网站要登录才能下载。点「登录」在 App 里打开网站登录，登录信息加密保存在本机。",
+                    fontSize = 12.sp, color = P.text3, lineHeight = 18.sp, modifier = Modifier.padding(bottom = 6.dp))
+                rows.forEach { (site, s) ->
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
                         Column(Modifier.weight(1f)) {
-                            Text(s.name, fontSize = 15.sp, color = P.text)
-                            Text((if (s.ageDays > 0) "${s.ageDays} 天前导入" else "今天导入") + " · ${s.count} 条" +
-                                if (s.expired) " · 已过期" else "", fontSize = 12.sp, color = if (s.expired) P.warn else P.text3)
+                            Text(site?.name ?: s?.name ?: "", fontSize = 15.sp, color = P.text)
+                            Text(if (s == null) "未登录" else (if (s.ageDays > 0) "${s.ageDays} 天前保存" else "今天保存") +
+                                if (s.expired) " · 已过期" else "", fontSize = 12.sp, color = if (s?.expired == true) P.warn else P.text3)
                         }
-                        TextButton(onClick = { vm.clearCookies(s) }) { Text("清除", color = P.err) }
+                        if (site != null && site.key != "youtube.com") TextButton(onClick = { login.launch(SiteLoginActivity.intent(ctx, site)) }) {
+                            Text(if (s == null) "登录" else "重新登录", color = P.accent)
+                        }
+                        if (s != null) TextButton(onClick = { vm.clearCookies(s) }) { Text("清除", color = P.err) }
                     }
                 }
-                Text("过期或失效后，重新导出再导入即可（同一网站会自动替换）。", fontSize = 12.sp, color = P.text3,
-                    modifier = Modifier.padding(top = 6.dp))
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(other, { other = it }, singleLine = true, shape = RoundedCornerShape(12.dp),
+                        placeholder = { Text("其它网址", fontSize = 14.sp) }, modifier = Modifier.weight(1f))
+                    TextButton(onClick = {
+                        val site = loginSiteFor(other)
+                        if (site == null) vm.toast("请填要登录的网站网址，例如 www.example.com")
+                        else { other = ""; login.launch(SiteLoginActivity.intent(ctx, site)) }
+                    }) { Text("登录", color = P.accent) }
+                }
+                Text("YouTube 不能在 App 里登录（谷歌不允许），需要的话在电脑浏览器里导出 cookies.txt 再「导入」。",
+                    fontSize = 12.sp, color = P.text3, lineHeight = 18.sp, modifier = Modifier.padding(top = 10.dp))
             }
         },
-        confirmButton = {
-            TextButton(onClick = { pick.launch(arrayOf("text/plain", "text/*", "application/octet-stream", "*/*")) }) {
-                Text("导入", color = P.accent)
-            }
-        },
+        confirmButton = { TextButton(onClick = { vm.showCookieManager = false }) { Text("关闭", color = P.text2) } },
         dismissButton = {
             Row {
-                TextButton(onClick = { vm.showCookieManager = false; vm.showCookieHelp = true }) { Text("说明", color = P.text2) }
-                TextButton(onClick = { vm.showCookieManager = false }) { Text("关闭", color = P.text2) }
+                TextButton(onClick = { vm.showCookieManager = false; vm.showCookieHelp = true }) { Text("导入说明", color = P.text2) }
+                TextButton(onClick = { pick.launch(arrayOf("text/plain", "text/*", "application/octet-stream", "*/*")) }) {
+                    Text("导入 cookies.txt", color = P.text2)
+                }
             }
         },
     )
@@ -1439,8 +1517,8 @@ private fun CookieHelpDialog(vm: MainViewModel) {
         title = { Text("导入网站登录信息", color = P.text, fontSize = 18.sp) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text("有些网站要登录才能下载（如 TikTok、Vimeo），YouTube 有时会拦截 VPN 节点要求「人机验证」。" +
-                    "这些网站没法在 App 里直接登录，可以借电脑浏览器导出登录信息：", fontSize = 14.sp, color = P.text2, lineHeight = 21.sp)
+                Text("YouTube 不允许在 App 里登录（有时还会拦截 VPN 节点要求「人机验证」），个别网站在 App 里登录不上。" +
+                    "这时可以借电脑浏览器导出登录信息：", fontSize = 14.sp, color = P.text2, lineHeight = 21.sp)
                 Spacer(Modifier.height(8.dp))
                 listOf(
                     "电脑浏览器（Chrome / Edge / Firefox）安装扩展「Get cookies.txt LOCALLY」",
@@ -1452,8 +1530,8 @@ private fun CookieHelpDialog(vm: MainViewModel) {
                     Text("${i + 1}. $t", fontSize = 14.sp, color = P.text2, lineHeight = 21.sp, modifier = Modifier.padding(vertical = 2.dp))
                 }
                 Spacer(Modifier.height(8.dp))
-                Text("登录信息只保存在本机这个 App 里，每个网站单独保存，可以随时在「设置 → 网站登录信息」里清除。" +
-                    "B站 不用这样，在设置页顶部扫码登录即可。", fontSize = 12.sp, color = P.text3, lineHeight = 18.sp)
+                Text("登录信息加密保存在本机这个 App 里，每个网站单独保存，可以随时在「网站登录信息」里清除。" +
+                    "TikTok、X 等可以直接在「网站登录信息」里点「登录」；B站 在设置页顶部扫码登录。", fontSize = 12.sp, color = P.text3, lineHeight = 18.sp)
             }
         },
         confirmButton = {
@@ -1497,11 +1575,15 @@ private fun CoreRows(vm: MainViewModel) {
         }
     }
     val canReset = info != null && info.downloaded.isNotEmpty()
-    SettingsRow(null, "自动更新内核", "连着 Wi-Fi 时每天检查一次；有新版就自动下载，下次打开 App 时用上", divider = canReset) {
+    SettingsRow(null, "更新通道", "预览版每天更新，网站改版后修得最快，偶尔会有新问题；一般用稳定版就够了", subtitleIsTip = true) {
+        Choice(listOf("stable" to "稳定版", "nightly" to "预览版"), vm.coreChannel) { vm.changeCoreChannel(it) }
+    }
+    SettingsRow(null, "自动更新内核", "连着 Wi-Fi 时每天检查一次；有新版就自动下载，下次打开 App 时用上。" +
+            "解析失败、看起来像是内核过期时也会马上检查一次", subtitleIsTip = true, divider = canReset) {
         Switch(vm.autoCoreUpdate, { vm.changeAutoCoreUpdate(it) })
     }
     if (canReset) {
-        SettingsRow(null, "恢复为内置版本", "更新后反而解析不了时用，回到 App 自带的 ${info?.bundled}", divider = false,
+        SettingsRow(null, "恢复为内置版本", "更新后反而解析不了时用，回到 App 自带的 ${info?.bundled}", subtitleIsTip = true, divider = false,
             onClick = { vm.resetCore() }) {
             Text("恢复", fontSize = 13.sp, color = P.text2)
         }
@@ -1509,7 +1591,7 @@ private fun CoreRows(vm: MainViewModel) {
 }
 
 /** 重新打开 App（新内核要重启 Python 才能生效） */
-private fun restartApp(ctx: Context) {
+fun restartApp(ctx: Context) {
     // 在前台直接启动新的任务再结束进程：系统发现界面所在的进程没了，会新开一个进程把它打开
     // （安卓 14 起不允许用定时器从后台拉起界面）
     val component = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)?.component ?: return
@@ -1517,32 +1599,88 @@ private fun restartApp(ctx: Context) {
     Runtime.getRuntime().exit(0)
 }
 
+/** 更新内容里的一行：支持 **粗体** 和 `行内代码` */
+@Composable
+private fun richText(text: String): androidx.compose.ui.text.AnnotatedString = androidx.compose.ui.text.buildAnnotatedString {
+    val rx = Regex("""\*\*(.+?)\*\*|`([^`]+)`""")
+    var pos = 0
+    for (m in rx.findAll(text)) {
+        append(text.substring(pos, m.range.first))
+        if (m.groupValues[1].isNotEmpty()) {
+            pushStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.SemiBold, color = P.text))
+            append(m.groupValues[1])
+        } else {
+            pushStyle(androidx.compose.ui.text.SpanStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                background = P.subtle, fontSize = 13.sp))
+            append(m.groupValues[2])
+        }
+        pop()
+        pos = m.range.last + 1
+    }
+    append(text.substring(pos))
+}
+
+/** 「2026-11-10T08:00:00Z」→「11 月 10 日」（按手机的时区） */
+private fun fmtPublished(iso: String): String = runCatching {
+    val t = java.time.Instant.parse(iso).atZone(java.time.ZoneId.systemDefault())
+    "${t.monthValue} 月 ${t.dayOfMonth} 日"
+}.getOrDefault("")
+
+/**
+ * 更新窗口（和电脑版同一个结构）：顶部星芒 + 「链接解析下载器 x.y.z」+ 一行灰色小字（当前版本 · 发布日期 · 安装包大小）；
+ * 中间是按「新功能 / 改进 / 修复」分组的更新内容，内容多时在窗口里滚动，不截断；
+ * 底部「下载」「以后再说」「跳过此版本」和「在 GitHub 查看完整说明」。
+ */
 @Composable
 private fun AppUpdateDialog(vm: MainViewModel) {
     val ctx = LocalContext.current
     val rel = vm.appRelease ?: return
-    // 发布说明里「## 更新内容」那一节
-    val notes = rel.notes.lines().map { it.trim() }
-        .dropWhile { !it.startsWith("## 更新内容") }.drop(1).takeWhile { !it.startsWith("## ") }
-        .filter { it.isNotEmpty() }.joinToString("\n").replace("**", "").take(1200)
-    AlertDialog(onDismissRequest = { vm.showAppUpdate = false }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
-        title = { Text("有新版本 ${rel.version}", color = P.text, fontSize = 18.sp) },
-        text = {
-            Text("当前 ${vm.appVersion}。下载新的安装包直接安装就是升级，设置和历史记录都会保留。" +
-                    if (notes.isNotEmpty()) "\n\n$notes" else "",
-                color = P.text2, fontSize = 14.sp, lineHeight = 21.sp, modifier = Modifier.verticalScroll(rememberScrollState()))
-        },
-        confirmButton = {
-            TextButton(onClick = { vm.showAppUpdate = false; openWeb(ctx, rel.download.ifEmpty { rel.page }) }) {
-                Text("下载", color = P.accent)
+    Dialog(onDismissRequest = { vm.showAppUpdate = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(shape = RoundedCornerShape(24.dp), color = P.surface, border = BorderStroke(1.dp, P.border),
+            modifier = Modifier.padding(horizontal = 22.dp).fillMaxWidth()) {
+            Column(Modifier.padding(start = 22.dp, end = 22.dp, top = 22.dp, bottom = 12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Spark(34.dp)
+                    Spacer(Modifier.width(14.dp))
+                    Column {
+                        Text("链接解析下载器 ${rel.version}", fontFamily = Serif, fontSize = 21.sp, color = P.text)
+                        Text(listOf("当前 ${vm.appVersion}", fmtPublished(rel.published).let { if (it.isEmpty()) "" else "发布于 $it" },
+                            if (rel.size > 0) "安装包 ${fmtSize(rel.size)}" else "").filter { it.isNotEmpty() }.joinToString(" · "),
+                            fontSize = 12.sp, color = P.text3)
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                Box(Modifier.fillMaxWidth().height(1.dp).background(P.border))
+                Column(Modifier.weight(1f, fill = false).heightIn(max = 420.dp).verticalScroll(rememberScrollState())
+                    .padding(vertical = 12.dp)) {
+                    if (rel.sections.isEmpty()) Text("这个版本没有写更新内容，可以到 GitHub 查看完整说明。", fontSize = 14.sp, color = P.text3)
+                    rel.sections.forEachIndexed { i, (title, items) ->
+                        if (title.isNotEmpty()) Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = P.text,
+                            modifier = Modifier.padding(top = if (i == 0) 0.dp else 12.dp, bottom = 4.dp))
+                        items.forEach { item ->
+                            Row(Modifier.padding(vertical = 3.dp)) {
+                                Text("•", fontSize = 14.sp, color = P.text3, modifier = Modifier.width(16.dp))
+                                Text(richText(item), fontSize = 14.sp, lineHeight = 21.sp, color = P.text2)
+                            }
+                        }
+                    }
+                    Text("在 GitHub 查看完整说明", fontSize = 13.sp, color = P.accent,
+                        modifier = Modifier.padding(top = 12.dp).clickable { openWeb(ctx, rel.page) })
+                }
+                Box(Modifier.fillMaxWidth().height(1.dp).background(P.border))
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { vm.skipAppVersion() }) { Text("跳过此版本", color = P.text3, fontSize = 13.sp) }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { vm.showAppUpdate = false }) { Text("以后再说", color = P.text2) }
+                    Spacer(Modifier.width(4.dp))
+                    PrimaryButton("下载", icon = LineIcons.Download) {
+                        vm.showAppUpdate = false
+                        openWeb(ctx, rel.download.ifEmpty { rel.page })       // 用浏览器下载安装包，不另外申请「安装应用」权限
+                    }
+                }
             }
-        },
-        dismissButton = {
-            Row {
-                TextButton(onClick = { vm.skipAppVersion() }) { Text("跳过此版本", color = P.text3) }
-                TextButton(onClick = { vm.showAppUpdate = false }) { Text("以后再说", color = P.text2) }
-            }
-        })
+        }
+    }
 }
 
 @Composable

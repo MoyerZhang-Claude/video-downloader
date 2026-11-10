@@ -79,6 +79,9 @@ object PyBridge {
     fun cookiesImport(path: String): JSONObject = JSONObject(module.callAttr("cookies_import", path).toString())
     fun cookiesStatus(): JSONObject = JSONObject(module.callAttr("cookies_status").toString())
     fun cookiesClear(site: String = ""): JSONObject = JSONObject(module.callAttr("cookies_clear", site).toString())
+    /** App 里网页登录后保存这个网站的 Cookie（cookiesJson：{域名: {名字: 值}}）。返回 cookiesStatus 或 {error} */
+    fun saveSiteCookies(site: String, cookiesJson: String): JSONObject =
+        JSONObject(module.callAttr("site_cookies_save", site, cookiesJson).toString())
 
     // ---------------------------------------------------------- B站登录
     /** 保存 App 内网页登录得到的 cookies，返回账号状态 JSON 字符串。 */
@@ -92,8 +95,11 @@ object PyBridge {
 
     // 解析内核在线更新 / 软件新版本（android_bridge.py 末尾）
     fun coreInfo(): JSONObject = JSONObject(module.callAttr("core_info").toString())
-    fun coreUpdate(onProgress: (Float) -> Unit): JSONObject =
-        JSONObject(module.callAttr("core_update", ProgressCallback(onProgress)).toString())
+    /** channel：stable 稳定版 / nightly 预览版 */
+    fun coreUpdate(channel: String, onProgress: (Float) -> Unit): JSONObject =
+        JSONObject(module.callAttr("core_update", ProgressCallback(onProgress), channel).toString())
+    /** 只查有没有新内核，不下载：{ok, latest, newer} */
+    fun coreLatest(channel: String): JSONObject = JSONObject(module.callAttr("core_latest", channel).toString())
     fun coreReset(): JSONObject = JSONObject(module.callAttr("core_reset").toString())
     fun appCheck(current: String): JSONObject = JSONObject(module.callAttr("app_check", current).toString())
 

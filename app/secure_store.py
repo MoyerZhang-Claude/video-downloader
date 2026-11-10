@@ -191,8 +191,14 @@ def import_plain_cookies(txt_path, bin_path):
         return -1
     if not cookies:
         return 0
+    try:
+        st = os.stat(txt_path)
+    except OSError:
+        st = None
     save_cookies(bin_path, cookies)
     try:
+        if st is not None:      # 保留原来的时间：界面上显示的「几天前导入」不会因为加密了一下就变成今天
+            os.utime(bin_path, (st.st_atime, st.st_mtime))
         os.remove(txt_path)
     except OSError:
         pass

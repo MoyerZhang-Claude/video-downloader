@@ -25,8 +25,9 @@ import java.util.concurrent.atomic.AtomicLong
 /** 解析内核（yt-dlp）：version 正在用的版本；downloaded 已下载的新版本（重启 App 后生效）；active 这次用的是在线更新的版本 */
 data class CoreInfo(val version: String, val bundled: String, val downloaded: String, val active: Boolean)
 
-/** GitHub 上的新版本 */
-data class AppRelease(val version: String, val page: String, val download: String, val notes: String)
+/** GitHub 上的新版本。[sections]：分好组的更新内容（新功能 / 改进 / 修复，标题为空 = 没分组的普通列表） */
+data class AppRelease(val version: String, val page: String, val download: String, val notes: String,
+                      val sections: List<Pair<String, List<String>>> = emptyList(), val published: String = "", val size: Long = 0)
 
 data class QualityOpt(val label: String, val tag: String, val kind: String, val size: Long, val res: Int, val streams: Int)
 data class HistoryHit(val quality: String, val uri: String, val ts: Double)
@@ -62,6 +63,7 @@ class VideoItem(val id: Long, val url: String) {
     var history by mutableStateOf(listOf<HistoryHit>())
     var collection by mutableStateOf<CollectionInfo?>(null)
     var danmaku by mutableStateOf(false)           // B站 视频有弹幕（可以生成弹幕版）
+    var outdated by mutableStateOf(false)          // 解析失败，报错像是解析内核过期了
     var key = ""
     var fromCollection = false
     var autoRes: Int? = null          // 从选集加入且勾了「自动下载」：解析完按这个清晰度下载（0 = 最高）
@@ -94,6 +96,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var wantDanmaku by mutableStateOf(false)
     var danmakuFps by mutableStateOf(60)
         private set
+    var danmakuHevc by mutableStateOf(false)         // 弹幕版编码：手机的 H.264 编码器跑不了时允许改用 H.265
+        private set
+    var danmakuPreferFps by mutableStateOf(false)    // 分辨率和 120 帧不能兼得时：保持 120 帧（降分辨率）
+        private set
+    /** 正在查看的弹幕版详情（说明 + 诊断信息） */
+    var diagText by mutableStateOf<String?>(null)
     /** 后台下载是否已经不受电池优化限制 */
     var bgUnrestricted by mutableStateOf(true)
         private set
@@ -135,6 +143,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var autoCoreUpdate by mutableStateOf(true)
         private set
+    var coreChannel by mutableStateOf("stable")                // 内核更新通道：stable 稳定版 / nightly 预览版
+        private set
+    var coreNew by mutableStateOf("")                          // 解析失败后查到的新内核版本（失败卡片上出现「更新内核后重试」）
+        private set
+    private var coreCheckedOnFailure = false                   // 解析失败触发的检查：每次启动最多一次
+    /** 显示功能说明（设置 → 个人与外观）：关掉后解释功能的小字不显示 */
+    var showTips by mutableStateOf(true)
+        private set
     var checkAppUpdate by mutableStateOf(true)
         private set
     var appRelease by mutableStateOf<AppRelease?>(null)        // 查到的新版本
@@ -143,7 +159,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var appCheckStatus by mutableStateOf("")
         private set
-    var showAppUpdate by mutableStateOf(false)                 // 新版本弹窗
+    var showAppUpdate by mutableStateOf(false)                 // 新版本窗口（点了首页的提示条才打开）
+    var appBannerHidden by mutableStateOf(false)               // 这次打开 App 期间，首页的新版本提示条被关掉了
     var codecPref by mutableStateOf("compat")                  // 编码偏好：compat 兼容优先 / quality 体积优先
         private set
     var showHdr by mutableStateOf(true)                        // 列出 HDR / 杜比视界版本
@@ -159,12 +176,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         wantCover = prefs.getBoolean("want_cover", false)
         wantDanmaku = prefs.getBoolean("want_danmaku", false)
         danmakuFps = prefs.getInt("danmaku_fps", 60).let { if (it == 120) 120 else 60 }
+        danmakuHevc = prefs.getBoolean("danmaku_hevc", false)
+        danmakuPreferFps = prefs.getBoolean("danmaku_prefer_fps", false)
         themeMode = prefs.getString("theme", "system") ?: "system"
         darkOled = prefs.getBoolean("dark_oled", false)
         nickname = prefs.getString("nickname", "") ?: ""
         codecPref = prefs.getString("codec_pref", "compat").let { if (it == "quality" || it == "best") it else "compat" }
         showHdr = prefs.getBoolean("show_hdr", true)
         autoCoreUpdate = prefs.getBoolean("auto_core_update", true)
+        coreChannel = if (prefs.getString("core_channel", "stable") == "nightly") "nightly" else "stable"
+        showTips = prefs.getBoolean("show_tips", true)
         checkAppUpdate = prefs.getBoolean("check_app_update", true)
         newGreeting()
         DownloadRepo.attach(app)
@@ -172,6 +193,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         DownloadRepo.wantCover = wantCover
         DownloadRepo.wantDanmaku = wantDanmaku
         DownloadRepo.danmakuFps = danmakuFps
+        DownloadRepo.danmakuHevc = danmakuHevc
+        DownloadRepo.danmakuPreferFps = danmakuPreferFps
         refreshBattery()
         DownloadRepo.onMessage = { toast(it) }
         DownloadRepo.onDone = { task -> onDownloaded(task) }
@@ -189,6 +212,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             refreshCookies()
             loadHistory()
             refreshCore()
+            resumeRetry()
             delay(4000)                      // 不和启动时的其他事情抢网络
             if (checkAppUpdate) withContext(Dispatchers.Main) { checkApp(manual = false) }
             if (autoCoreUpdate && onUnmeteredNetwork() &&
@@ -231,7 +255,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             awaitReady()
             val r = runCatching {
-                PyBridge.coreUpdate { p ->
+                PyBridge.coreUpdate(coreChannel) { p ->
                     viewModelScope.launch(Dispatchers.Main) {
                         coreProgress = p
                         if (manual) coreStatus = "正在下载新内核 ${(p * 100).toInt()}%"
@@ -271,6 +295,71 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun changeCoreChannel(channel: String) {
+        coreChannel = channel
+        prefs.edit().putString("core_channel", channel).apply()
+        toast(if (channel == "nightly") "预览版：每天更新，网站改版后修得最快，偶尔会有新问题" else "稳定版")
+    }
+
+    fun changeShowTips(on: Boolean) {
+        showTips = on
+        prefs.edit().putBoolean("show_tips", on).apply()
+    }
+
+    /** 解析失败、报错像是内核过期了：马上查一次有没有新内核（每次启动最多一次） */
+    private fun checkCoreOnFailure() {
+        if (coreCheckedOnFailure || coreNew.isNotEmpty()) return
+        coreCheckedOnFailure = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.coreLatest(coreChannel) }.getOrNull() ?: return@launch
+            val info = runCatching { PyBridge.coreInfo() }.getOrNull()
+            withContext(Dispatchers.Main) {
+                if (info != null) coreInfo = coreInfoOf(info)
+                if (r.optBoolean("newer") || corePending) coreNew = r.optString("latest")
+            }
+        }
+    }
+
+    /**
+     * 失败卡片上的「更新内核后重试」：下载新内核 → 记下要重试的链接 → 重启 App（[restart]）→ 启动后自动重新解析。
+     * 有下载在进行时不重启（会打断下载），提示一下。
+     */
+    fun updateCoreAndRetry(restart: () -> Unit) {
+        if (coreBusy) return
+        if (!canRestart) { toast("有下载正在进行，下载完再更新内核"); return }
+        coreBusy = true
+        coreProgress = 0f
+        toast("正在下载新的解析内核，完成后自动重启并重新解析…")
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = if (corePending) JSONObject().put("ok", true).put("pending", true) else runCatching {
+                PyBridge.coreUpdate(coreChannel) { p -> viewModelScope.launch(Dispatchers.Main) { coreProgress = p } }
+            }.getOrElse { JSONObject().put("ok", false).put("error", it.message ?: "未知错误") }
+            withContext(Dispatchers.Main) {
+                coreBusy = false
+                if (!r.optBoolean("ok") || !r.optBoolean("pending")) {
+                    toast(if (r.optBoolean("ok")) "已经是最新的解析内核了" else "内核更新失败：" + r.optString("error"))
+                    return@withContext
+                }
+                val urls = items.filter { it.state == "error" && it.outdated }.map { it.url }
+                prefs.edit().putString("retry_urls", org.json.JSONArray(urls).toString()).commit()
+                restart()
+            }
+        }
+    }
+
+    /** 更新内核后重启：自动重新解析重启前失败的链接 */
+    private suspend fun resumeRetry() {
+        val saved = prefs.getString("retry_urls", "") ?: ""
+        if (saved.isEmpty()) return
+        prefs.edit().remove("retry_urls").apply()
+        val urls = runCatching { org.json.JSONArray(saved).let { a -> List(a.length()) { a.getString(it) } } }.getOrDefault(emptyList())
+        if (urls.isEmpty()) return
+        withContext(Dispatchers.Main) {
+            submitUrls(urls, quiet = true)
+            toast("解析内核已更新，正在重新解析刚才失败的 ${urls.size} 个链接")
+        }
+    }
+
     fun changeAutoCoreUpdate(on: Boolean) {
         autoCoreUpdate = on
         prefs.edit().putBoolean("auto_core_update", on).apply()
@@ -296,9 +385,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     !r.optBoolean("ok") -> if (manual) appCheckStatus = "检查失败：" + r.optString("error")
                     v.isEmpty() -> if (manual) appCheckStatus = "已经是最新版本"
                     else -> {
-                        appRelease = AppRelease(v, r.optString("page"), r.optString("download"), r.optString("notes"))
+                        val secs = r.optJSONArray("sections")?.let { a ->
+                            List(a.length()) { i ->
+                                val o = a.getJSONObject(i)
+                                val items = o.optJSONArray("items")
+                                o.optString("title") to List(items?.length() ?: 0) { items!!.getString(it) }
+                            }
+                        }.orEmpty()
+                        appRelease = AppRelease(v, r.optString("page"), r.optString("download"), r.optString("notes"),
+                            secs, r.optString("published"), r.optLong("size"))
                         appCheckStatus = "有新版本 $v"
-                        if (manual || prefs.getString("skip_app_version", "") != v) showAppUpdate = true
+                        // 启动时查到的不直接弹窗：首页顶部出现一条小提示，点开才显示更新窗口；手动检查的直接打开
+                        if (manual) showAppUpdate = true
                     }
                 }
             }
@@ -308,6 +406,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun skipAppVersion() {
         appRelease?.let { prefs.edit().putString("skip_app_version", it.version).apply() }
         showAppUpdate = false
+        appBannerHidden = true
+    }
+
+    /** 首页要不要显示「新版本 x.y.z · 查看」的提示条（跳过的版本、这次已经关掉的不显示） */
+    val appBanner: AppRelease? get() = appRelease?.takeIf {
+        !appBannerHidden && prefs.getString("skip_app_version", "") != it.version
     }
 
     fun changeCheckAppUpdate(on: Boolean) {
@@ -430,6 +534,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         toast(if (fps == 120) "弹幕 120 帧：高刷屏上更顺滑，文件更大、生成更久" else "弹幕 60 帧")
     }
 
+    fun chooseDanmakuHevc(on: Boolean) {
+        danmakuHevc = on
+        DownloadRepo.danmakuHevc = on
+        prefs.edit().putBoolean("danmaku_hevc", on).apply()
+        toast(if (on) "弹幕版：手机的 H.264 编码器跑不了时改用 H.265" else "弹幕版只用 H.264，任何设备都能放")
+    }
+
+    fun chooseDanmakuPreferFps(on: Boolean) {
+        danmakuPreferFps = on
+        DownloadRepo.danmakuPreferFps = on
+        prefs.edit().putBoolean("danmaku_prefer_fps", on).apply()
+        toast(if (on) "手机编不了原分辨率的 120 帧时：保持 120 帧，降低分辨率" else "手机编不了原分辨率的 120 帧时：保持分辨率，降为 60 帧")
+    }
+
+    private val danmakuHints = HashMap<String, String>()
+
+    /**
+     * 选了 120 帧弹幕、清晰度又很高时，提前说这台手机会怎么处理（不要等生成完才说）。
+     * 手机的 H.264 编码器普遍只到 4K 60 帧。没有要提醒的返回空。要查编码器的能力，别在界面线程里调用。
+     */
+    fun danmakuHint(item: VideoItem): String {
+        if (!wantDanmaku || !item.danmaku || danmakuFps <= 60) return ""
+        val o = item.options.getOrNull(item.selected) ?: return ""
+        if (o.kind != "video" || o.res < 1440) return ""
+        val key = "${o.res}/$danmakuFps/$danmakuHevc/$danmakuPreferFps"
+        return synchronized(danmakuHints) {
+            danmakuHints.getOrPut(key) {
+                runCatching {
+                    val w = o.res * 16 / 9 / 2 * 2          // 按横屏 16:9 估计
+                    val plan = DanmakuGl.plan(w, o.res, danmakuFps, danmakuHevc, danmakuPreferFps)
+                    plan?.note ?: "这台手机的编码器编不了 ${DanmakuGl.resLabel(o.res)} 的高帧率，弹幕会按视频原帧率生成"
+                }.getOrDefault("")
+            }
+        }
+    }
+
     fun toggleDanmaku(on: Boolean) {
         wantDanmaku = on
         DownloadRepo.wantDanmaku = on
@@ -510,10 +650,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val r = runCatching { PyBridge.cookiesClear(site.site) }.getOrNull()
             withContext(Dispatchers.Main) {
                 r?.let { cookieSites = parseCookies(it) }
-                if (cookieSites.isEmpty()) showCookieManager = false
+                // App 里网页登录留下的登录状态也清掉（下次登录从头来）
+                CookieManager.getInstance().removeAllCookies(null)
+                CookieManager.getInstance().flush()
                 toast("已清除 ${site.name} 的登录信息")
             }
         }
+    }
+
+    /** 在 App 里网页登录成功：刷新状态，之前失败的链接（多半就是因为没登录）自动重新解析 */
+    fun onSiteLoggedIn(name: String) {
+        refreshCookies()
+        val failed = items.filter { it.state == "error" }
+        failed.forEach { parse(it) }
+        toast("✓ 已登录 $name，登录信息已加密保存" + if (failed.isNotEmpty()) "，正在重新解析 ${failed.size} 个失败的链接" else "")
     }
 
     /** 别的 App 分享过来一个文本文件：是 cookies 就导入，否则当作文字提取链接。 */
@@ -652,6 +802,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun parse(item: VideoItem) {
         item.state = "parsing"
         item.error = ""
+        item.outdated = false
         viewModelScope.launch(Dispatchers.IO) {
             val r: JSONObject = parseSlots.withPermit {
                 runCatching { PyBridge.parse(item.url, !item.fromCollection) }
@@ -671,7 +822,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (r.has("error")) {
             item.error = r.getString("error")
+            item.outdated = r.optBoolean("outdated")
             item.state = "error"
+            if (item.outdated) checkCoreOnFailure()
             return
         }
         item.key = r.getString("key")

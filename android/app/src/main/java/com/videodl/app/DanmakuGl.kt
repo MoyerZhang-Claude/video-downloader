@@ -38,6 +38,8 @@ import kotlin.math.roundToLong
 /**
  * 高帧率弹幕版：视频画面保持原来的帧率（每一帧原样重复），弹幕按 60 / 120 帧的时钟逐帧重新计算位置，所以弹幕滚动是丝滑的。
  *
+ * 用哪个编码器、多大的画面、多少帧由 [plan] 决定（手机的 H.264 编码器在 4K 下一般只到 60 帧）。
+ *
  * 流程（全部在 GPU / 硬件编解码器里，CPU 基本不参与）：
  *   硬件解码 → SurfaceTexture（OES 纹理）→ OpenGL 画画面 + 把每条弹幕当一张小贴图画上去 → 硬件编码器的输入 Surface
  *   输出时钟每 1/fps 秒一帧：取「此刻之前最近的那一帧」画面，弹幕按此刻的时间算坐标。
@@ -45,24 +47,133 @@ import kotlin.math.roundToLong
  */
 object DanmakuGl {
     private const val TAG = "DanmakuGl"
-    private const val MIME = MediaFormat.MIMETYPE_VIDEO_AVC      // H.264：所有手机、电脑、播放器都能放
+    const val AVC = MediaFormat.MIMETYPE_VIDEO_AVC       // H.264：所有手机、电脑、播放器都能放
+    const val HEVC = MediaFormat.MIMETYPE_VIDEO_HEVC     // H.265：不少手机的 H.265 编码器能编 4K 120 帧，H.264 的不行
 
-    /** 这台手机的编码器能不能以 [fps] 编 [w]×[h]；不能就降到 60，再不行返回 0（交给旧的原帧率方案）。 */
-    fun supportedFps(w: Int, h: Int, want: Int): Int {
-        for (fps in listOf(want, 60).distinct().filter { it <= want }) {
-            if (findEncoder(w, h, fps) != null) return fps
-        }
-        return 0
+    /**
+     * 编码方案：用哪个编码器、多大的画面、多少帧，以及为什么是这样。
+     * [outW]×[outH] 是看到的画面大小；[encW]×[encH] 是编码器实际编的大小——编码器只支持横向尺寸时两者互换，
+     * 画面转 90° 编进去，再在文件里写上旋转信息（[rotateHint]），播放时转回来。
+     * [note]：和用户想要的不一样时（降了帧率 / 换了编码 / 降了分辨率）给用户看的原因，一样时为空。
+     */
+    class Plan(val mime: String, val encoder: String, val encW: Int, val encH: Int, val outW: Int, val outH: Int,
+               val fps: Int, val rotateHint: Int, val note: String) {
+        val hevc get() = mime == HEVC
     }
 
-    private fun findEncoder(w: Int, h: Int, fps: Int): MediaCodecInfo? {
-        val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
-        return list.codecInfos.filter { it.isEncoder && it.supportedTypes.any { t -> t.equals(MIME, true) } }
+    private class Enc(val info: MediaCodecInfo, val swapped: Boolean)
+
+    private fun encoders(mime: String): List<MediaCodecInfo> =
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+            .filter { it.isEncoder && it.supportedTypes.any { t -> t.equals(mime, true) } }
             .sortedBy { if (it.isHardwareAccelerated) 0 else 1 }
-            .firstOrNull { info ->
-                val vc = info.getCapabilitiesForType(MIME).videoCapabilities ?: return@firstOrNull false
-                runCatching { vc.areSizeAndRateSupported(w, h, fps.toDouble()) }.getOrDefault(false)
+
+    private fun videoCaps(info: MediaCodecInfo, mime: String): MediaCodecInfo.VideoCapabilities? =
+        runCatching { info.getCapabilitiesForType(mime).videoCapabilities }.getOrNull()
+
+    private fun supports(vc: MediaCodecInfo.VideoCapabilities, w: Int, h: Int, fps: Int) =
+        runCatching { vc.areSizeAndRateSupported(w, h, fps.toDouble()) }.getOrDefault(false)
+
+    /**
+     * 能以 [fps] 编 [w]×[h] 的编码器（硬件的优先）。先按原样查，查不到再把宽高对调查一次：
+     * 很多编码器的能力是按横向声明的，竖屏 4K（2160×3840）直接查会说不支持，其实横过来编就行。
+     */
+    private fun findEncoder(mime: String, w: Int, h: Int, fps: Int): Enc? {
+        val list = encoders(mime)
+        list.firstOrNull { info -> videoCaps(info, mime)?.let { supports(it, w, h, fps) } == true }?.let { return Enc(it, false) }
+        if (w != h) list.firstOrNull { info -> videoCaps(info, mime)?.let { supports(it, h, w, fps) } == true }
+            ?.let { return Enc(it, true) }
+        return null
+    }
+
+    /** 这种编码在 [w]×[h] 下最高能到多少帧（横竖都算）；这个尺寸根本编不了返回 0 */
+    private fun maxFps(mime: String, w: Int, h: Int): Int = encoders(mime).maxOfOrNull { info ->
+        val vc = videoCaps(info, mime) ?: return@maxOfOrNull 0
+        listOf(w to h, h to w).maxOf { (a, b) ->
+            runCatching { vc.getSupportedFrameRatesFor(a, b).upper.toInt() }.getOrDefault(0)
+        }
+    } ?: 0
+
+    fun resLabel(shortSide: Int) = when {
+        shortSide >= 4320 -> "8K"
+        shortSide >= 2160 -> "4K"
+        shortSide >= 1440 -> "1440p"
+        else -> "${shortSide}p"
+    }
+
+    /** 等比缩到短边为 [short]（宽高取偶数） */
+    private fun scaled(w: Int, h: Int, short: Int): Pair<Int, Int> {
+        val f = short.toDouble() / min(w, h)
+        return (Math.round(w * f / 2) * 2).toInt() to (Math.round(h * f / 2) * 2).toInt()
+    }
+
+    /**
+     * 定编码方案。[w]×[h] 是看到的画面大小，[want] 想要的弹幕帧率（60 / 120）。
+     * 能播放 120 帧和能编码 4K 120 帧是两回事：手机的 H.264 硬件编码器普遍只到 4K 60 帧，1080P 120 帧一般没问题。
+     * 所以 4K 想要 120 帧时，按设置选一条路：
+     *   [allowHevc]：允许换成 H.265 编码器（不少旗舰芯片的支持 4K 120 帧）；
+     *   [preferFps]：保持 120 帧，降低分辨率（找能跑 120 帧的最大尺寸）；否则保持分辨率，降为 60 帧。
+     * 都不行返回 null（交给原帧率方案）。
+     */
+    fun plan(w: Int, h: Int, want: Int, allowHevc: Boolean, preferFps: Boolean): Plan? {
+        val codecs = if (allowHevc) listOf(AVC, HEVC) else listOf(AVC)
+        fun at(pw: Int, ph: Int, fps: Int): Pair<String, Enc>? {
+            for (m in codecs) findEncoder(m, pw, ph, fps)?.let { return m to it }
+            return null
+        }
+        fun make(m: String, e: Enc, pw: Int, ph: Int, fps: Int, note: String) =
+            Plan(m, e.info.name, if (e.swapped) ph else pw, if (e.swapped) pw else ph, pw, ph, fps, if (e.swapped) 90 else 0, note)
+
+        val res = resLabel(min(w, h))
+        val avcMax = maxFps(AVC, w, h)
+        val hevcMax = maxFps(HEVC, w, h)
+        val limit = if (avcMax > 0) "这台手机的 H.264 编码器在 $res 下最高 $avcMax 帧" else "这台手机的 H.264 编码器编不了 $res"
+        // 1) 原分辨率、想要的帧率
+        at(w, h, want)?.let { (m, e) -> return make(m, e, w, h, want, if (m == HEVC) "$limit，弹幕版改用 H.265 编码" else "") }
+        if (want > 60) {
+            // 能跑 want 帧的最大尺寸（给下面的方案和提示用）
+            fun smaller(cs: List<String>): Triple<String, Enc, Int>? {
+                for (short in listOf(1440, 1080, 720)) {
+                    if (short >= min(w, h)) continue
+                    val (sw, sh) = scaled(w, h, short)
+                    for (m in cs) findEncoder(m, sw, sh, want)?.let { return Triple(m, it, short) }
+                }
+                return null
             }
+            // 2) 保持帧率、降低分辨率
+            if (preferFps) smaller(codecs)?.let { (m, e, short) ->
+                val (sw, sh) = scaled(w, h, short)
+                return make(m, e, sw, sh, want, "$limit：为了保持 $want 帧，弹幕版降为 ${resLabel(short)}" +
+                        if (m == HEVC) "（H.265 编码）" else "")
+            }
+            // 3) 保持分辨率、降为 60 帧
+            at(w, h, 60)?.let { (m, e) ->
+                val tips = ArrayList<String>()
+                if (!allowHevc && hevcMax >= want) tips.add("允许 H.265")
+                if (!preferFps) smaller(listOf(AVC, HEVC))?.let { tips.add("改为 $want 帧优先（降为 ${resLabel(it.third)}）") }
+                return make(m, e, w, h, 60, "$limit，弹幕版按 60 帧生成" + (if (m == HEVC) "（H.265 编码）" else "") +
+                        if (tips.isNotEmpty()) "。可以在下载选项里" + tips.joinToString("，或") else "")
+            }
+        }
+        return null
+    }
+
+    /** 诊断信息（写进日志，排查「为什么不是 120 帧」用）：源视频的参数，每个 H.264 / H.265 编码器在这个尺寸下的能力 */
+    fun diagnose(src: Source, w: Int, h: Int, want: Int): String {
+        val sb = StringBuilder()
+        sb.append("源视频 ${src.width}x${src.height} 旋转 ${src.rotation}° ${src.fps} 帧 ${if (src.hdr) "HDR" else "SDR"}，")
+            .append("显示 ${w}x$h，想要弹幕 $want 帧\n")
+        for (mime in listOf(AVC, HEVC)) for (info in encoders(mime)) {
+            val vc = videoCaps(info, mime)
+            fun rates(a: Int, b: Int) = if (vc == null) "?" else
+                runCatching { vc.getSupportedFrameRatesFor(a, b).let { "${it.lower.toInt()}-${it.upper.toInt()} 帧" } }.getOrDefault("不支持")
+            sb.append("${if (mime == AVC) "H.264" else "H.265"} ${info.name}${if (info.isHardwareAccelerated) "（硬件）" else "（软件）"}：")
+                .append("最大 ${vc?.supportedWidths?.upper}x${vc?.supportedHeights?.upper}；")
+                .append("${w}x$h → ${rates(w, h)}；${h}x$w → ${rates(h, w)}；")
+                .append("$want 帧 ${if (vc != null && (supports(vc, w, h, want) || supports(vc, h, w, want))) "可以" else "不行"}，")
+                .append("60 帧 ${if (vc != null && (supports(vc, w, h, 60) || supports(vc, h, w, 60))) "可以" else "不行"}\n")
+        }
+        return sb.toString().trimEnd()
     }
 
     class Source(val width: Int, val height: Int, val rotation: Int, val durationUs: Long, val fps: Float, val hdr: Boolean)
@@ -89,22 +200,21 @@ object DanmakuGl {
     }
 
     /**
-     * 生成弹幕版。返回实际输出的帧率。
+     * 按 [plan] 生成弹幕版。
      * [bitrate] 30 帧时合适的码率，这里按帧率再放大一些（画面重复的帧几乎不占空间，主要是弹幕的运动）。
      */
-    fun burn(input: File, output: File, layout: DanmakuBurner.Layout, src: Source, fps: Int, bitrate: Int,
-             onProgress: (Int) -> Unit, isCancelled: () -> Boolean): Int {
-        val (outW, outH) = if (src.rotation % 180 != 0) src.height to src.width else src.width to src.height
-        val encInfo = findEncoder(outW, outH, fps) ?: error("编码器不支持 ${outW}x$outH ${fps} 帧")
-        val capsT = encInfo.getCapabilitiesForType(MIME)
+    fun burn(input: File, output: File, layout: DanmakuBurner.Layout, src: Source, plan: Plan, bitrate: Int,
+             onProgress: (Int) -> Unit, isCancelled: () -> Boolean) {
+        val encInfo = encoders(plan.mime).firstOrNull { it.name == plan.encoder } ?: error("找不到编码器 ${plan.encoder}")
+        val capsT = encInfo.getCapabilitiesForType(plan.mime)
         val range = capsT.videoCapabilities!!.bitrateRange
-        // 重复的画面几乎不占码率，多出来的主要是弹幕的运动：60 帧 ×1.2、120 帧 ×1.5 左右就够
-        val scaled = (bitrate * Math.pow(fps / 30.0, 0.3)).toLong()
+        // 重复的画面几乎不占码率，多出来的主要是弹幕的运动：60 帧 ×1.2、120 帧 ×1.5 左右就够；H.265 同画质码率省三分之一
+        val scaled = (bitrate * Math.pow(plan.fps / 30.0, 0.3) * (if (plan.hevc) 0.65 else 1.0)).toLong()
         val vbr = runCatching { capsT.encoderCapabilities?.isBitrateModeSupported(
             MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR) == true }.getOrDefault(false)
         val br = scaled.coerceIn(range.lower.toLong(), min(range.upper.toLong(), 100_000_000L)).toInt()
 
-        val job = Job(input, output, layout, src, outW, outH, fps, br, vbr, encInfo.name, onProgress, isCancelled)
+        val job = Job(input, output, layout, src, plan, br, vbr, onProgress, isCancelled)
         try {
             job.run()
         } catch (e: Throwable) {
@@ -113,14 +223,18 @@ object DanmakuGl {
         } finally {
             job.release()
         }
-        return fps
     }
 
     private class Job(
         val input: File, val output: File, val lay: DanmakuBurner.Layout, val src: Source,
-        val outW: Int, val outH: Int, val fps: Int, val bitrate: Int, val vbr: Boolean, val encoderName: String,
+        val plan: Plan, val bitrate: Int, val vbr: Boolean,
         val onProgress: (Int) -> Unit, val isCancelled: () -> Boolean,
     ) {
+        // 看到的画面大小（弹幕坐标按它算）；编码器实际编的大小是 plan.encW × plan.encH
+        private val outW = plan.outW
+        private val outH = plan.outH
+        private val fps = plan.fps
+        private val rot = if (plan.rotateHint != 0) 1f else 0f      // 画面转 90° 编进去（编码器只支持横向尺寸）
         // EGL
         private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
         private var context: EGLContext = EGL14.EGL_NO_CONTEXT
@@ -186,18 +300,18 @@ object DanmakuGl {
         }
 
         private fun setupEncoderAndEgl() {
-            val fmt = MediaFormat.createVideoFormat(MIME, outW, outH).apply {
+            val fmt = MediaFormat.createVideoFormat(plan.mime, plan.encW, plan.encH).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
                 // 可变码率：画面不动（重复帧）时少用码率，文件小很多
                 if (vbr) setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
                 setInteger(MediaFormat.KEY_FRAME_RATE, fps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+                if (!plan.hevc) setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
                 setInteger(MediaFormat.KEY_PRIORITY, 1)          // 不要求实时：尽量快就行
                 setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
             }
-            val enc = MediaCodec.createByCodecName(encoderName).also { encoder = it }
+            val enc = MediaCodec.createByCodecName(plan.encoder).also { encoder = it }
             try {
                 enc.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             } catch (e: Exception) {
@@ -232,8 +346,8 @@ object DanmakuGl {
         private fun setupGl() {
             oesProg = program(
                 """
-                attribute vec4 aPos; attribute vec4 aTex; uniform mat4 uTexM; varying vec2 vTex;
-                void main() { gl_Position = aPos; vTex = (uTexM * aTex).xy; }
+                attribute vec4 aPos; attribute vec4 aTex; uniform mat4 uTexM; uniform float uRot; varying vec2 vTex;
+                void main() { gl_Position = vec4(mix(aPos.xy, vec2(-aPos.y, aPos.x), uRot), 0.0, 1.0); vTex = (uTexM * aTex).xy; }
                 """,
                 """
                 #extension GL_OES_EGL_image_external : require
@@ -242,8 +356,11 @@ object DanmakuGl {
                 """)
             spriteProg = program(
                 """
-                attribute vec2 aPos; attribute vec2 aTex; uniform vec2 uView; varying vec2 vTex;
-                void main() { gl_Position = vec4(aPos.x / uView.x * 2.0 - 1.0, 1.0 - aPos.y / uView.y * 2.0, 0.0, 1.0); vTex = aTex; }
+                attribute vec2 aPos; attribute vec2 aTex; uniform vec2 uView; uniform float uRot; varying vec2 vTex;
+                void main() {
+                    vec2 p = vec2(aPos.x / uView.x * 2.0 - 1.0, 1.0 - aPos.y / uView.y * 2.0);
+                    gl_Position = vec4(mix(p, vec2(-p.y, p.x), uRot), 0.0, 1.0); vTex = aTex;
+                }
                 """,
                 """
                 precision mediump float; varying vec2 vTex; uniform sampler2D sTex; uniform float uAlpha;
@@ -264,7 +381,7 @@ object DanmakuGl {
             stSurface = Surface(st)
             // 整屏四边形：顶点（左下、右下、左上、右上）和对应的源画面纹理坐标（按旋转换算）
             quad.put(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)).position(0)
-            GLES20.glViewport(0, 0, outW, outH)
+            GLES20.glViewport(0, 0, plan.encW, plan.encH)
         }
 
         private fun texCoordsFor(rotation: Int): FloatArray {
@@ -363,7 +480,8 @@ object DanmakuGl {
             writeAudio(Long.MAX_VALUE)
             onProgress(100)
             val sec = (System.nanoTime() - started) / 1e9
-            Log.i(TAG, "done: $k frames @ $fps fps, ${outW}x$outH, src ${src.fps} fps, ${bitrate / 1000} kbps${if (vbr) " VBR" else ""}, " +
+            Log.i(TAG, "done: $k frames @ $fps fps, ${outW}x$outH (enc ${plan.encW}x${plan.encH} ${if (plan.hevc) "HEVC" else "AVC"} " +
+                "${plan.encoder}${if (plan.rotateHint != 0) " rot ${plan.rotateHint}" else ""}), src ${src.fps} fps, ${bitrate / 1000} kbps${if (vbr) " VBR" else ""}, " +
                 "%.1f s (%.0f frames/s), video %.1f s; decode %.1f wait %.1f draw %.1f enc %.1f".format(sec, k / sec, (endUs - t0) / 1e6,
                     prof[0] / 1e9, prof[1] / 1e9, prof[2] / 1e9, prof[3] / 1e9))
         }
@@ -446,6 +564,7 @@ object DanmakuGl {
                     idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         check(!muxerStarted) { "编码格式中途变化" }
                         val m = MediaMuxer(output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4).also { muxer = it }
+                        if (plan.rotateHint != 0) m.setOrientationHint(plan.rotateHint)      // 播放时转回来
                         videoTrack = m.addTrack(enc.outputFormat)
                         audioFormat?.let { audioTrack = m.addTrack(it) }
                         m.start()
@@ -548,6 +667,7 @@ object DanmakuGl {
             GLES20.glEnableVertexAttribArray(aTex)
             GLES20.glVertexAttribPointer(aTex, 4, GLES20.GL_FLOAT, false, 0, texCoords)
             GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(oesProg, "uTexM"), 1, false, stMatrix, 0)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(oesProg, "uRot"), rot)
             GLES20.glUniform1i(GLES20.glGetUniformLocation(oesProg, "sTex"), 0)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GLES20.glDisableVertexAttribArray(aPos)
@@ -570,6 +690,7 @@ object DanmakuGl {
             val sPos = GLES20.glGetAttribLocation(spriteProg, "aPos")
             val sTex = GLES20.glGetAttribLocation(spriteProg, "aTex")
             GLES20.glUniform2f(GLES20.glGetUniformLocation(spriteProg, "uView"), outW.toFloat(), outH.toFloat())
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(spriteProg, "uRot"), rot)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(spriteProg, "uAlpha"), lay.opacity)
             GLES20.glUniform1i(GLES20.glGetUniformLocation(spriteProg, "sTex"), 0)
             GLES20.glEnableVertexAttribArray(sPos)

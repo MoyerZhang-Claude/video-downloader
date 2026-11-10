@@ -258,9 +258,20 @@ fun SettingsGroup(title: String? = null, content: @Composable ColumnScope.() -> 
     }
 }
 
+/** 「显示功能说明」开关（设置 → 个人与外观）：关掉后，解释功能的小字不显示；状态、错误、警告不受影响。 */
+val LocalShowTips = compositionLocalOf { true }
+
+/**
+ * 设置页的一行。[subtitle] 是标题下面的小字：
+ * 默认当作状态（已登录、当前版本、已开启……），一直显示；[subtitleIsTip] = true 表示它只是解释这个功能是做什么的，
+ * 关掉「显示功能说明」后不显示。
+ */
 @Composable
 fun SettingsRow(icon: ImageVector?, title: String, subtitle: String? = null, subtitleColor: Color? = null,
-                divider: Boolean = true, onClick: (() -> Unit)? = null, trailing: @Composable (() -> Unit)? = null) {
+                divider: Boolean = true, onClick: (() -> Unit)? = null, subtitleIsTip: Boolean = false,
+                trailing: @Composable (() -> Unit)? = null) {
+    @Suppress("NAME_SHADOWING")
+    val subtitle = if (subtitleIsTip && !LocalShowTips.current) null else subtitle
     Column {
         Row(Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 16.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {

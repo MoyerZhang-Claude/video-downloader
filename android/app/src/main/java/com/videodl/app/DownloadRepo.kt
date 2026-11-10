@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -38,6 +39,7 @@ class DownloadTask(val id: Long, val item: VideoItem, val optIndex: Int, val bur
     var coverSaved by mutableStateOf(false)
     var cloud = false                               // 下完同时上传到谷歌云盘（加入下载时的开关）
     var burned by mutableStateOf(false)
+    var diag by mutableStateOf("")                  // 弹幕版的诊断信息（源视频参数、编码器能力），任务卡片上可以查看
     var callback: DownloadCallback? = null
     val active get() = status in ACTIVE
 
@@ -62,9 +64,13 @@ object DownloadRepo {
     @Volatile var wantCloud = false          // 下载完同时上传到谷歌云盘
     @Volatile var wantDanmaku = false
     @Volatile var danmakuFps = 60            // 弹幕版里弹幕的帧率：60 / 120（画面保持原来的帧率）
+    @Volatile var danmakuHevc = false        // 手机的 H.264 编码器跑不了时，允许弹幕版改用 H.265
+    @Volatile var danmakuPreferFps = false   // 分辨率和 120 帧不能兼得时：保持 120 帧（降低分辨率）；否则保持分辨率（降为 60 帧）
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val slots = Semaphore(2)
+    // 弹幕版一次只生成一个：硬件编码器同时开两路 4K 高帧率很容易超出手机的能力（第二路直接失败，退回原帧率）
+    private val burnLock = kotlinx.coroutines.sync.Mutex()
     private val ids = AtomicLong(1)
     private lateinit var app: Context
 
@@ -221,6 +227,14 @@ object DownloadRepo {
 
     /** 返回 (弹幕版视频, 原始弹幕 XML) */
     private suspend fun burnDanmaku(task: DownloadTask, work: File, video: File, videoStreamBytes: Long): Pair<File, File> {
+        if (burnLock.isLocked) withContext(Dispatchers.Main) { task.stage = "等前一个弹幕版生成完"; task.progress = 0f }
+        return burnLock.withLock {
+            if (task.callback?.cancelled == true) throw CancellationException("已取消")
+            burnDanmakuNow(task, work, video, videoStreamBytes)
+        }
+    }
+
+    private suspend fun burnDanmakuNow(task: DownloadTask, work: File, video: File, videoStreamBytes: Long): Pair<File, File> {
         withContext(Dispatchers.Main) { task.stage = "获取弹幕"; task.progress = 0f }
         val dm = PyBridge.danmakuPrepare(task.item.key, task.optIndex, File(work, "dm").absolutePath)
         if (dm.has("error")) error(dm.getString("error"))
@@ -229,12 +243,18 @@ object DownloadRepo {
         withContext(Dispatchers.Main) { task.stage = "${layout.items.size} 条弹幕" }
         val want = danmakuFps
         withContext(Dispatchers.Main) { task.stage = "${layout.items.size} 条弹幕 · ${want} 帧" }
-        val got = DanmakuBurner.burn(app, video, out, layout, videoStreamBytes, want,
+        val got = DanmakuBurner.burn(app, video, out, layout, videoStreamBytes, want, danmakuHevc, danmakuPreferFps,
+            onPlan = { plan ->       // 实际用的方案（可能和想要的不一样：降了帧率 / 分辨率、换了 H.265）
+                task.stage = "${layout.items.size} 条弹幕 · ${plan.fps} 帧" +
+                    (if (plan.outH != 0 && plan.note.contains("降为")) " · ${DanmakuGl.resLabel(minOf(plan.outW, plan.outH))}" else "") +
+                    (if (plan.hevc) " · H.265" else "")
+            },
             onProgress = { p -> task.progress = p / 100f },
             isCancelled = { task.callback?.cancelled == true })
-        if (got != want) withContext(Dispatchers.Main) {
-            task.note = listOf(task.note, if (got == 0) "这台手机不支持 ${want} 帧，弹幕按视频原帧率生成" else "这台手机不支持 ${want} 帧，弹幕改用 ${got} 帧")
-                .filter { it.isNotEmpty() }.joinToString("；")
+        withContext(Dispatchers.Main) {
+            task.diag = got.diag
+            // 和设置的不一样（降了帧率 / 换了编码 / 降了分辨率）：把真实的原因告诉用户
+            if (got.note.isNotEmpty()) task.note = listOf(task.note, got.note).filter { it.isNotEmpty() }.joinToString("；")
         }
         return out to File(dm.getString("xml"))
     }
