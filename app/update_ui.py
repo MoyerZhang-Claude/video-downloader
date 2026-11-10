@@ -110,6 +110,7 @@ class UpdateHint(ui._HoverButton):
 
     def set_version(self, version):
         self.version = version
+        self.setText(f'新版本 {version} · 查看')        # 文字是自己画的；这里设上是给读屏软件 / 界面自动化用的
         self.setToolTip(f'{APP_NAME} 有新版本 {version}（当前 {APP_VERSION}），点这里查看更新内容')
         self.update()
 

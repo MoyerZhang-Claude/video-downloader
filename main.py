@@ -44,6 +44,20 @@ def selftest(out_path, urls):
         done.acquire(timeout=300)
     # 解析 YouTube 时如果电脑上没有 JS 运行时，会先把 Deno 下载到数据目录：放在解析之后再看
     lines.insert(1, f'js runtimes: {core._js_runtimes()}')
+    # 内置浏览器（网站登录、Cookie 刷新、资源嗅探都靠它）：无界面启动一次，通过调试端口读一遍 Cookie；再试一下登录信息的加解密
+    try:
+        from app import browser, proc_job, secure_store
+        proc_job.install()
+        if browser.available():
+            lines.insert(2, f'browser: {browser.find_browser()[1]} ok, {len(browser.read_cookies())} cookies')
+        else:
+            lines.insert(2, 'browser: 没有找到 Edge / Chrome')
+        browser.shutdown()
+        blob = secure_store.protect(b'selftest')
+        good = secure_store.unprotect(blob) == b'selftest' and b'selftest' not in blob
+        lines.insert(3, f'secure store: {"ok" if good else "FAIL"}')
+    except Exception as e:  # noqa: BLE001
+        lines.insert(2, f'browser: FAIL {type(e).__name__}: {e}')
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines) + '\n')
 
