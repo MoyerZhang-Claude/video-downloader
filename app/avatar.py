@@ -14,10 +14,11 @@ import shutil
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QImageReader, QPainter, QPainterPath, QPen, QTransform
-from PySide6.QtWidgets import QDialog, QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from .config import DATA
 from .theme import c
+from . import ui
 from .ui import Avatar, IconButton
 
 log = logging.getLogger(__name__)
@@ -495,7 +496,7 @@ class AvatarEditor(QDialog):
             save(self.view.result(), self.view.state(), self.new_source)
         except OSError as e:
             log.warning('保存头像失败: %s', e)
-            QMessageBox.warning(self, '保存头像失败', f'{e}\n\n保存位置：{DIR}')
+            ui.alert(self, '保存头像失败', f'{e}\n\n保存位置：{DIR}')
             return
         super().accept()
 
@@ -506,8 +507,8 @@ def pick_image(parent):
         return None
     img, err = load_image(path)
     if img is None:
-        QMessageBox.warning(parent, '打不开这张图片',
-                            f'{os.path.basename(path)}\n{err or "格式不支持"}\n\n支持 JPG、PNG、WebP、BMP、GIF、TIFF。')
+        ui.alert(parent, '打不开这张图片',
+                 f'{os.path.basename(path)}\n{err or "格式不支持"}\n\n支持 JPG、PNG、WebP、BMP、GIF、TIFF。')
     return img
 
 

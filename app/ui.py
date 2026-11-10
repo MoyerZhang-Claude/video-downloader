@@ -91,11 +91,37 @@ def sync_layout(lay, desired):
 
 # ---------------------------------------------------------------- 「显示功能说明」开关（设置 → 常规）
 _tips = {'on': True}
+_tip_widgets = weakref.WeakSet()
+
+
+class _TipSignals(QObject):
+    changed = Signal(bool)
+
+
+tip_signals = _TipSignals()
 
 
 def tips_on():
     """解释功能的小字要不要显示（关掉后界面更干净；状态、错误、警告不受影响）。"""
     return _tips['on']
+
+
+def mark_tip(w):
+    """把一个控件登记为「功能说明」：开关关掉时隐藏，打开时显示。返回它自己。
+    只登记纯说明的文字（解释功能、使用建议、空状态下引导新手的副标题）；状态、错误、警告不要登记。"""
+    _tip_widgets.add(w)
+    if not _tips['on']:
+        w.hide()        # 只能隐藏：还没放进窗口的控件调用 show 会变成一个独立的小窗口闪一下
+    return w
+
+
+def set_tips(on):
+    """切换「显示功能说明」，立即生效。"""
+    _tips['on'] = bool(on)
+    for w in list(_tip_widgets):
+        if shiboken6.isValid(w) and w.parentWidget() is not None:
+            w.setVisible(_tips['on'])
+    tip_signals.changed.emit(_tips['on'])
 
 
 # ---------------------------------------------------------------- 动画时钟（所有动画共用一个定时器）
@@ -975,6 +1001,43 @@ class SmoothScrollArea(QScrollArea):
         self.overlay.raise_()
 
 
+class IconTag(QWidget):
+    """小标签：线条图标 + 文字（淡色底的圆角胶囊），比如「✓ 已下载 1080p」里的对勾。
+    用图标而不是文字符号（✓ 🔒 这类字符在不同字体下大小、颜色不一致，深色模式下也不跟着主题变）。"""
+
+    def __init__(self, icon, text='', role='ok', tint='tint_ok', parent=None):
+        super().__init__(parent)
+        self._icon, self._text, self.role, self.tint = icon, text, role, tint
+        self.setFont(px_font(12))
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def setText(self, text):
+        if text != self._text:
+            self._text = text
+            self.updateGeometry()
+            self.update()
+
+    def text(self):
+        return self._text
+
+    def sizeHint(self):
+        return QSize(px_metrics(12).horizontalAdvance(self._text) + 14 + 13 + 5, 22)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(c(self.tint))
+        p.drawRoundedRect(QRectF(self.rect()), 6, 6)
+        icons.paint(p, self._icon, QRectF(7, (self.height() - 13) / 2, 13, 13), c(self.role), 2.2)
+        p.setPen(c(self.role))
+        p.setFont(self.font())
+        p.drawText(QRectF(7 + 13 + 5, 0, self.width() - 25, self.height()), int(Qt.AlignVCenter | Qt.AlignLeft), self._text)
+
+
 class Combo(QComboBox):
     """下拉框：下拉列表用圆角高亮的样式（需要 QStyledItemDelegate 才会套用样式表）。"""
 
@@ -1355,6 +1418,11 @@ class Dialog(Overlay):
     def exec(self):
         loop = QEventLoop()
         self.closed.connect(loop.quit)
+        win = self.host.window()
+        if not win.isVisible() or win.isMinimized():      # 窗口缩在托盘里时弹出的（如从托盘退出）：先把窗口拿出来
+            win.showNormal()
+            win.raise_()
+            win.activateWindow()
         self.open()
         if self.isVisible():
             loop.exec()
@@ -1377,7 +1445,15 @@ def _host_of(w):
 
 def ask(parent, title, text='', buttons=(('取消', None, ''), ('确定', 'ok', 'primary')), width=460):
     """问一个问题。buttons：[(文字, key, 样式)]，从左到右；返回点的那个按钮的 key（取消 / Esc 返回 None）。"""
-    dlg = Dialog(_host_of(parent), title, text, width)
+    host = _host_of(parent)
+    if host is None:            # 没有可以盖上去的窗口（理论上不会）：退回系统对话框
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(QMessageBox.NoIcon, title, text)
+        made = {box.addButton(label, QMessageBox.AcceptRole if key else QMessageBox.RejectRole): key
+                for label, key, _kind in buttons}
+        box.exec()
+        return made.get(box.clickedButton())
+    dlg = Dialog(host, title, text, width)
     for label, key, kind in buttons:
         dlg.add_button(label, key, kind)
     return dlg.exec()

@@ -3,11 +3,13 @@ import datetime
 import os
 import sys
 import threading
+import weakref
 
+import shiboken6
 from PySide6.QtCore import QObject, QProcess, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout,
+    QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout,
     QWidget,
 )
 
@@ -43,6 +45,62 @@ def _clear():
     w = QWidget()
     w.setObjectName('clear')
     return w
+
+
+class _Desc(QLabel):
+    """设置项标题下面的小字。里面可以有两种内容：
+    - 说明 set_tip()：解释这个功能是做什么的、使用建议、举例。关掉「显示功能说明」后不显示。
+    - 状态 set_status()：已登录、当前版本、保存路径、检查结果、错误和警告……一直显示。
+    两种都没有（或者说明被关掉了又没有状态）时整行隐藏，标题自己垂直居中。"""
+    every = weakref.WeakSet()
+
+    def __init__(self, tip='', status=''):
+        super().__init__()
+        self.setObjectName('rowDesc')
+        self.setWordWrap(True)
+        self._tip, self._status, self._solo = tip or '', status or '', False
+        self.title = None
+        _Desc.every.add(self)
+        self._apply(first=True)
+
+    def set_tip(self, text):
+        self._tip = text or ''
+        self._apply()
+
+    def set_status(self, text, error=False, solo=False):
+        """solo：有这段状态时不显示说明（操作的结果、错误：这时候说明已经不重要了）。"""
+        self._status, self._solo = text or '', bool(text) and (solo or error)
+        name = 'metaError' if error and text else 'rowDesc'
+        if self.objectName() != name:
+            self.setObjectName(name)
+            self.style().unpolish(self)
+            self.style().polish(self)
+        self._apply()
+
+    def setText(self, text):        # 运行中直接改文字的地方（登录状态、检查结果）都是状态
+        self.set_status(text, solo=True)
+
+    def show(self):
+        self._apply()
+
+    def _apply(self, first=False):
+        tip = '' if self._solo or not ui.tips_on() else self._tip
+        # 路径里没有空格，很长时整行换不了行、会把页面撑宽：在 \ 后面加上「可以在这里换行」的零宽空格
+        status = self._status.replace('\\', '\\​') if ':\\' in self._status else self._status
+        if tip and status:
+            # 短的写在一行，长的、带路径的分两行
+            if '\n' in tip or tip.endswith('：') or len(tip) + len(status) > 46:
+                text = tip + '\n' + status
+            else:
+                text = tip.rstrip('；。') + '；' + status
+        else:
+            text = (tip.rstrip('：') if tip.endswith('：') else tip) or status
+        QLabel.setText(self, text)
+        if not text:
+            self.hide()
+        elif not first and self.parentWidget() is not None:
+            # 还没放进窗口的控件不能调用 setVisible(True)（会变成一个独立的小窗口闪一下），所以第一次不动
+            self.setVisible(True)
 
 
 class SettingsPanel(ui.Overlay):
@@ -101,6 +159,7 @@ class SettingsPanel(ui.Overlay):
         self._sig.app_done.connect(self._app_check_done)
         self._sig.deno_progress.connect(lambda p: self.deno_btn.setText(f'下载中 {p * 100:.0f}%'))
         self._sig.deno_done.connect(self._deno_done)
+        ui.tip_signals.changed.connect(self._tips_changed)
         self._refresh_core_version()
         self.show_page('general')
 
@@ -129,7 +188,15 @@ class SettingsPanel(ui.Overlay):
         lay.addSpacing(2)
         self._fresh_section = True
 
-    def _row(self, lay, title, desc, control=None, last=False):
+    def _tips_changed(self, _on):
+        for d in list(_Desc.every):
+            if shiboken6.isValid(d):
+                d._apply()
+
+    def _row(self, lay, title, desc, control=None, last=False, tip=True, status=''):
+        """一行设置：标题 + 小字 + 右边的控件。返回小字的标签（_Desc），之后可以 set_tip() / set_status()。
+        desc 默认是「说明」（解释这个功能，受「显示功能说明」开关控制）；tip=False 表示它是状态（路径、警告……），一直显示。
+        status：说明之外另有一段一直显示的内容（如限速的「0 = 不限速」）。"""
         w = _clear()
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 13, 0, 13)
@@ -138,12 +205,11 @@ class SettingsPanel(ui.Overlay):
         left.setSpacing(3)
         t = _label(title, 'rowLabel')
         left.addWidget(t)
-        d = _label(desc, 'rowDesc', wrap=True)
-        if not desc:
-            d.hide()     # 只能隐藏：还没放进窗口的控件调用 show/setVisible(True) 会变成一个独立的小窗口闪一下
+        d = _Desc(desc if tip else '', status or ('' if tip else desc))
         d.title = t
         left.addWidget(d)
         h.addLayout(left, 1)
+        h.setAlignment(left, Qt.AlignVCenter)       # 小字隐藏后，标题和右边的控件对齐在一行的中间
         if control is not None:
             if isinstance(control, QWidget):
                 h.addWidget(control, 0, Qt.AlignVCenter)
@@ -202,6 +268,8 @@ class SettingsPanel(ui.Overlay):
         self._row(lay, '深色时用纯黑（OLED）', '背景变成纯黑，OLED 屏上黑色部分不发光、更省电。已针对纯黑做了护眼处理：'
                   '文字不用纯白、滚动的内容放在深灰卡片上减少拖影、用细边框分层。看久了累眼可以关掉，用官方的深灰色',
                   self._toggle('dark_oled', on_change=self.win.apply_oled))
+        self._row(lay, '显示功能说明', '关掉后，每个选项下面解释它是做什么的小字不再显示，界面更干净；'
+                  '状态（已登录、当前版本、保存位置）、错误和警告不受影响', self._toggle('show_tips'))
         self._section(lay, '个人')
         box = QHBoxLayout()
         box.setSpacing(6)
@@ -253,18 +321,16 @@ class SettingsPanel(ui.Overlay):
             self.win.setting_changed('avatar')
 
     def _avatar_remove(self):
-        if QMessageBox.question(self.win, '移除头像', '移除后左下角恢复显示名字首字母。') == QMessageBox.Yes:
+        if ui.confirm(self.win, '移除头像？', '移除后左下角恢复显示名字首字母。', ok='移除', danger=True):
             avatar.remove()
             self.win.setting_changed('avatar')
 
     def _set_hotkey(self):
         text = self.hotkey_edit.text().strip()
         ok = not text or hotkey.parse(text) is not None
-        self.hotkey_desc.setText('在任何地方复制视频链接后按下，软件会弹出来并开始解析；留空 = 不使用' if ok
-                                 else '格式不对：需要 Ctrl / Alt / Win + 字母、数字或 F1~F12，例如 Ctrl+Alt+D')
-        self.hotkey_desc.setObjectName('rowDesc' if ok else 'metaError')
-        self.hotkey_desc.style().unpolish(self.hotkey_desc)
-        self.hotkey_desc.style().polish(self.hotkey_desc)
+        # 格式不对是错误，一直显示；平时的那句是说明
+        self.hotkey_desc.set_status('' if ok else '格式不对：需要 Ctrl / Alt / Win + 字母、数字或 F1~F12，例如 Ctrl+Alt+D',
+                                    error=not ok)
         if ok and text != self.s.hotkey:
             self.s.hotkey = text
             self.win.setting_changed('hotkey')
@@ -276,7 +342,7 @@ class SettingsPanel(ui.Overlay):
         box.setSpacing(6)
         box.addWidget(_btn('打开', self.win._open_dir))
         box.addWidget(_btn('更改…', self._change_dir))
-        self.dir_desc = self._row(lay, '保存位置', self.s.download_dir, box)
+        self.dir_desc = self._row(lay, '保存位置', self.s.download_dir, box, tip=False)
         self._row(lay, '自动分文件夹', '', self._combo('subfolder', SUBFOLDER_MODES.items()))
         self._row(lay, '文件名格式', '', self._combo('filename_template',
                                                      [(k, v[0]) for k, v in FILENAME_TEMPLATES.items()]))
@@ -298,7 +364,8 @@ class SettingsPanel(ui.Overlay):
         self._row(lay, '同时下载的文件数', '网盘分享里的文件同时下载几个', self._pan_spin('maxConcurrent', 1, 20))
         self._row(lay, '每个文件的连接数', '多条连接一起下，能跑满带宽（百度网盘非会员会自动只用 1 条，避免被限速）',
                   self._pan_spin('connsPerTask', 1, 64))
-        self._row(lay, '限速', '所有网盘下载加起来的速度上限；0 = 不限速', self._pan_spin('speedLimitKB', 0, 1_000_000, 130, ' KB/s'))
+        self._row(lay, '限速', '所有网盘下载加起来的速度上限', self._pan_spin('speedLimitKB', 0, 1_000_000, 130, ' KB/s'),
+                  status='0 = 不限速')
         self._row(lay, '失败后自动重试', '网络断了、下载地址过期等情况自动重试的次数', self._pan_spin('maxAutoRetries', 0, 20))
 
     def _pan_spin(self, key, lo, hi, width=90, suffix=''):
@@ -375,7 +442,7 @@ class SettingsPanel(ui.Overlay):
     def _page_network(self, lay):
         self._section(lay, '网络', first=True)
         proxy = QLineEdit(self.s.proxy)
-        proxy.setPlaceholderText('留空 = 跟随系统代理')
+        proxy.setPlaceholderText('留空 = 跟随系统代理，例如 http://127.0.0.1:7890')
         proxy.setFixedWidth(300)
 
         def set_proxy():
@@ -383,7 +450,8 @@ class SettingsPanel(ui.Overlay):
                 self.s.proxy = proxy.text().strip()
                 self.win.setting_changed('proxy')
         proxy.editingFinished.connect(set_proxy)
-        self._row(lay, '代理', '例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080（网盘下载重启软件后生效）', proxy)
+        proxy.setToolTip('例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080')
+        self._row(lay, '代理', '网盘下载重启软件后生效', proxy, tip=False)
         self._section(lay, '网站登录')
         # 每个网站一行（登录过的其它网站也列在这里）：内容会变，放在单独的容器里，refresh_sites() 重画
         wrap = _clear()
@@ -429,7 +497,7 @@ class SettingsPanel(ui.Overlay):
             self.s.cookie_browser = self.browser.currentText()
             self.win.setting_changed('cookie_browser')
         self.browser.currentIndexChanged.connect(set_browser)
-        self._row(lay, '从哪个浏览器读取', '新版 Chrome / Edge 的 cookies 读不出来，推荐 Firefox', self.browser)
+        self._row(lay, '从哪个浏览器读取', '新版 Chrome / Edge 的 cookies 读不出来，推荐 Firefox', self.browser, tip=False)
         fbox = QHBoxLayout()
         fbox.setSpacing(6)
         self.cookie_file = QLineEdit(self.s.cookie_file)
@@ -470,12 +538,13 @@ class SettingsPanel(ui.Overlay):
                 b.setEnabled(have)
                 btns.addWidget(b)
                 desc = '未登录'
-            self._row(box, site.name, desc, btns)
+            self._row(box, site.name, desc, btns, tip=False)
         self._fresh_section = False
         self.site_other.setEnabled(have)
         self.site_other_btn.setEnabled(have)
-        self.site_other_desc.setText(
-            f'需要登录才能看的其它网站：填网址，在内置浏览器（{name}）里登录。登录信息加密保存在本机' if have else
+        self.site_other_desc.set_tip(f'需要登录才能看的其它网站：填网址，在内置浏览器（{name}）里登录' if have else '')
+        self.site_other_desc.set_status(
+            '登录信息加密保存在本机' if have else
             '没有找到 Edge 或 Chrome，内置浏览器登录用不了：可以用下面「高级」里的 cookies 文件夹导入 cookies.txt')
 
     def _site_login(self, site):
@@ -508,15 +577,14 @@ class SettingsPanel(ui.Overlay):
             vip = info.get('vip_label') or ('大会员' if info.get('vip') else '非大会员')
             exp = bilibili.sessdata_expires()
             until = f'，有效期至 {datetime.datetime.fromtimestamp(exp):%Y-%m-%d}（过期前自动续期）' if exp else ''
-            self.bili_desc.setText(f'已登录：{info.get("name") or "（网络不通，稍后显示）"} · {vip}{until}')
-            self.bili_desc.show()
+            self.bili_desc.set_tip('')
+            self.bili_desc.set_status(f'已登录：{info.get("name") or "（网络不通，稍后显示）"} · {vip}{until}')
             self.bili_box.addWidget(_btn('重新扫码', lambda: self.win._bili_login(True)))
             self.bili_box.addWidget(_btn('退出登录', self.win._bili_logout, 'danger'))
         else:
-            self.bili_desc.setText(('登录已失效，请重新扫码。' if info and info.get('expired') else '')
-                                   + '登录后解锁 1080P 高码率 / 4K 等大会员画质。长效登录约 180 天，网页登录约 7 天。'
-                                   r'登录信息只保存在本机（%APPDATA%\VideoDownloader）')
-            self.bili_desc.show()
+            self.bili_desc.set_tip('登录后解锁 1080P 高码率 / 4K 等大会员画质。长效登录约 180 天，网页登录约 7 天')
+            self.bili_desc.set_status(('登录已失效，请重新扫码。' if info and info.get('expired') else '未登录。')
+                                      + '登录信息加密保存在本机')
             self.bili_box.addWidget(_btn('长效登录', lambda: self.win._bili_login(True), 'primary'))
             self.bili_box.addWidget(_btn('网页登录', lambda: self.win._bili_login(False)))
 
@@ -546,11 +614,13 @@ class SettingsPanel(ui.Overlay):
                     bits = [a.get('nickname') or '已登录', a.get('vip') or '']
                     if a.get('expiresAt'):
                         bits.append(f'有效期至 {datetime.datetime.fromtimestamp(a["expiresAt"]):%Y-%m-%d}')
-                    desc.setText('已登录：' + ' · '.join(b for b in bits if b))
+                    desc.set_tip('')
+                    desc.set_status('已登录：' + ' · '.join(b for b in bits if b))
                     box.addWidget(_btn('重新扫码', lambda p=prov: self._pan_login(p)))
                     box.addWidget(_btn('退出登录', lambda p=prov: self._pan_logout(p), 'danger'))
                 else:
-                    desc.setText((a.get('note') or '') + '。登录信息加密保存在本机（只有当前 Windows 用户能解开）')
+                    desc.set_tip(a.get('note') or '')
+                    desc.set_status('未登录。登录信息加密保存在本机（只有当前 Windows 用户能解开）')
                     box.addWidget(_btn('扫码登录', lambda p=prov: self._pan_login(p), 'primary'))
                 desc.show()
         eng.call('accounts', None, done)
@@ -561,7 +631,7 @@ class SettingsPanel(ui.Overlay):
 
     def _pan_logout(self, provider):
         name = pan.PROVIDERS.get(provider, provider)
-        if QMessageBox.question(self.win, f'退出{name}', f'退出{name}登录？本机保存的登录信息会被删除。') != QMessageBox.Yes:
+        if not ui.confirm(self.win, f'退出{name}登录？', '本机保存的登录信息会被删除。', ok='退出登录', danger=True):
             return
         self.win.pan.call('logout', {'provider': provider}, lambda r, e: self.refresh_pan_accounts())
 
@@ -569,10 +639,10 @@ class SettingsPanel(ui.Overlay):
         from . import core
         found = core.cookie_file_names()
         found = [n for n in found if not n.startswith(core.SITE_PREFIX)]      # 内置浏览器登录的在上面单独列了
-        self.cookie_hint.setText('也可以导入 cookies.txt：用浏览器扩展「Get cookies.txt LOCALLY」在对应网站导出 .txt，'
-                                 '放进 cookies 文件夹（点右边的按钮打开）。软件读到后会加密保存，并删除明文文件。\n'
-                                 f'当前已导入：{"、".join(found) if found else "（没有）"}')
-        self.cookie_hint.show()
+        self.cookie_hint.set_tip('也可以导入 cookies.txt：用浏览器扩展「Get cookies.txt LOCALLY」在对应网站导出 .txt，'
+                                 '放进 cookies 文件夹（点右边的按钮打开）')
+        self.cookie_hint.set_status('软件读到后会加密保存，并删除明文文件。'
+                                    f'当前已导入：{"、".join(found) if found else "（没有）"}')
 
     def _open_cookie_dir(self):
         from . import core
@@ -618,7 +688,7 @@ class SettingsPanel(ui.Overlay):
                                             _btn('恢复', self._reset_core))
         self._section(lay, 'YouTube 组件（Deno）')
         self.deno_btn = _btn('', self._deno_clicked)
-        self.deno_desc = self._row(lay, 'YouTube 组件', ' ', self.deno_btn)
+        self.deno_desc = self._row(lay, 'YouTube 组件', '', self.deno_btn)
         self._refresh_deno()
 
     def _refresh_core_version(self):
@@ -705,17 +775,17 @@ class SettingsPanel(ui.Overlay):
         others = [n for n in core._find_js_runtimes(verify=False) if not (n == 'deno' and ver)]
         if ver:
             self.deno_desc.title.setText(f'YouTube 组件：Deno {ver}')
-            self.deno_desc.setText('YouTube 的验证脚本要靠它运行。每周自动检查一次新版本')
+            self.deno_desc.set_tip('YouTube 的验证脚本要靠它运行。每周自动检查一次新版本')
             self.deno_btn.setText('检查更新')
         elif others:
             self.deno_desc.title.setText(f'YouTube 组件：使用电脑上已有的 {" / ".join(others)}')
-            self.deno_desc.setText('电脑上已经装了 JS 运行时，不需要另外下载')
+            self.deno_desc.set_tip('电脑上已经装了 JS 运行时，不需要另外下载')
             self.deno_btn.setText('下载 Deno')
         else:
             self.deno_desc.title.setText('YouTube 组件：还没有下载')
-            self.deno_desc.setText('第一次解析 YouTube 链接时会自动下载（约 40MB，只需一次）；也可以现在就下载')
+            self.deno_desc.set_tip('第一次解析 YouTube 链接时会自动下载（约 40MB，只需一次）；也可以现在就下载')
             self.deno_btn.setText('现在下载')
-        self.deno_desc.show()
+        self.deno_desc.set_status('')
 
     def _deno_clicked(self):
         from . import runtime_update
@@ -740,7 +810,7 @@ class SettingsPanel(ui.Overlay):
         self.deno_btn.setEnabled(True)
         self._refresh_deno()
         if error:
-            self.deno_desc.setText(f'下载失败：{error[:160]}（请检查网络或代理设置）')
+            self.deno_desc.set_status(f'下载失败：{error[:160]}（请检查网络或代理设置）', error=True)
         else:
             self.win.notify(msg, 'ok')
 
@@ -748,15 +818,15 @@ class SettingsPanel(ui.Overlay):
     def _page_cloud(self, lay):
         self._section(lay, '账号', first=True)
         self.cloud_key_btn = _btn('', self._cloud_import)
-        self.cloud_key_row = self._row(lay, '密钥文件', ' ', self.cloud_key_btn)
+        self.cloud_key_row = self._row(lay, '密钥文件', '', self.cloud_key_btn)
         self.cloud_btn = _btn('', self._cloud_login_clicked)
-        self.cloud_row = self._row(lay, '谷歌账号', ' ', self.cloud_btn)
+        self.cloud_row = self._row(lay, '谷歌账号', '', self.cloud_btn)
         self._cloud_render()
         self._section(lay, '上传')
         self._row(lay, '怎么上传', '打开输入框下方的「云盘」开关，之后的下载完成后会自动上传；\n'
                   '已经下好的视频、网盘文件，右键选「上传到谷歌云盘」。进度显示在对应的下载任务上。')
         self._row(lay, '上传后保留本地文件', '关闭后，上传成功的文件会移到回收站（可以从回收站恢复）',
-                  self._toggle('cloud_keep_local'))
+                  self._toggle('cloud_keep_local'), tip=False)
         self._row(lay, '云盘里的位置', '链接解析下载器 / 视频分区 / 平台 / 年-月\n'
                   '链接解析下载器 / 网盘分区 / 网盘名 / 年-月\n认不出来源平台的网站放在「其他网站」',
                   self._cloud_open_btn)
@@ -776,7 +846,7 @@ class SettingsPanel(ui.Overlay):
             return
         err = self.win.cloud_import_client(path)
         if err:
-            QMessageBox.warning(self.win, '谷歌云盘', err)
+            ui.alert(self.win, '密钥文件没有导入', err)
             return
         self._cloud_render()
         self.win.notify('已导入密钥文件，接下来点「连接」登录谷歌账号', 'ok')
@@ -785,7 +855,7 @@ class SettingsPanel(ui.Overlay):
         from . import gdrive
         has_key = gdrive.available()
         self.cloud_key_row.title.setText('密钥文件：已导入' if has_key else '密钥文件：未导入')
-        self.cloud_key_row.setText('想换一个 Google Cloud 项目的密钥，可以重新导入（需要重新连接账号）' if has_key else
+        self.cloud_key_row.set_tip('想换一个 Google Cloud 项目的密钥，可以重新导入（需要重新连接账号）' if has_key else
                                    '先按下面的「使用教程」在 Google Cloud 创建「桌面应用」密钥，下载 JSON 文件后在这里导入')
         self.cloud_key_btn.setText('重新导入…' if has_key else '导入密钥文件…')
         if not hasattr(self, '_cloud_open_btn'):
@@ -794,19 +864,21 @@ class SettingsPanel(ui.Overlay):
         self._cloud_open_btn.setEnabled(bool(auth and auth.logged_in))
         if auth and auth.logged_in:
             self.cloud_row.title.setText(f'已连接：{auth.email or "谷歌账号"}')
-            self.cloud_row.setText('软件只能看到、管理它自己上传的文件，碰不到你云盘里的其它内容')
+            self.cloud_row.set_tip('')
+            self.cloud_row.set_status('软件只能看到、管理它自己上传的文件，碰不到你云盘里的其它内容')      # 隐私说明：一直显示
             self.cloud_btn.setText('断开')
         else:
             self.cloud_row.title.setText('谷歌账号：未连接')
-            self.cloud_row.setText('点「连接」会打开浏览器，登录谷歌账号并允许访问即可' if auth else '导入密钥文件后才能连接')
+            self.cloud_row.set_status('')
+            self.cloud_row.set_tip('点「连接」会打开浏览器，登录谷歌账号并允许访问即可' if auth else '导入密钥文件后才能连接')
             self.cloud_btn.setText('连接')
         self.cloud_btn.setEnabled(bool(auth))
 
     def _cloud_login_clicked(self):
         auth = self.win.cloud_drive.auth
         if auth.logged_in:
-            if QMessageBox.question(self.win, '谷歌云盘', '断开谷歌账号？\n已经上传的文件不受影响；没传完的会暂停，重新连接后继续。') \
-                    != QMessageBox.Yes:
+            if not ui.confirm(self.win, '断开谷歌账号？', '已经上传的文件不受影响；没传完的会暂停，重新连接后继续。',
+                              ok='断开', danger=True):
                 return
             self.win.cloud_logout()
             self._cloud_render()
@@ -817,7 +889,7 @@ class SettingsPanel(ui.Overlay):
         def done(email, err):
             self._cloud_render()
             if err:
-                QMessageBox.warning(self.win, '谷歌云盘', f'没有连接成功：{err}')
+                ui.alert(self.win, '谷歌云盘没有连接成功', str(err))
             else:
                 self.win.notify(f'已连接谷歌云盘：{email}', 'ok')
         self.win.cloud_login(done)
@@ -859,13 +931,13 @@ class SettingsPanel(ui.Overlay):
         self.app_check_btn = _btn('检查更新', self._check_app)
         self.app_update_row = self._row(lay, f'当前版本 {APP_VERSION}', '新版本发布在 GitHub；下载新的安装包装在原来的位置就是升级',
                                         self.app_check_btn)
-        self._row(lay, '启动时检查软件新版本', '有新版本时弹窗提示，可以选择跳过某个版本', self._toggle('check_app_update'))
+        self._row(lay, '启动时检查软件新版本', '有新版本时在侧边栏左下角提示，可以选择跳过某个版本', self._toggle('check_app_update'))
         self._section(lay, '数据')
         box = QHBoxLayout()
         box.setSpacing(6)
         box.addWidget(_btn('打开', lambda: os.startfile(DATA)))
         box.addWidget(_btn('导入旧版数据…', self._import_legacy))
-        self._row(lay, '数据文件夹', f'设置、历史记录、登录信息、头像和日志都在这里，卸载或升级软件不会丢：\n{DATA}', box)
+        self._row(lay, '数据文件夹', '设置、历史记录、登录信息、头像和日志都在这里，卸载或升级软件不会丢：', box, status=DATA)
         lay.addSpacing(18)
         h = QHBoxLayout()
         h.setSpacing(8)
@@ -895,7 +967,7 @@ class SettingsPanel(ui.Overlay):
         self.app_check_btn.setEnabled(True)
         if error:
             self.app_check_btn.setText('检查更新')
-            QMessageBox.warning(self, '软件更新', f'检查失败：{error}\n（GitHub 在国内有时连不上，可以稍后再试或开代理）')
+            self.app_update_row.set_status(f'检查失败：{error}（GitHub 在国内有时连不上，可以稍后再试或开代理）', error=True)
         elif rel:
             self._app_rel = rel
             self.app_check_btn.setText('去下载')
@@ -912,20 +984,17 @@ class SettingsPanel(ui.Overlay):
         if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(DATA)):
             return
         if not has_legacy_data(src):
-            QMessageBox.information(self.win, '导入旧版数据', '这个文件夹里没有找到旧版的数据（config.json / history.db）。\n'
-                                                       '请选择旧版软件 exe 所在的那个文件夹。')
+            ui.alert(self.win, '没有找到旧版的数据', '这个文件夹里没有 config.json / history.db。\n请选择旧版软件 exe 所在的那个文件夹。')
             return
-        if QMessageBox.question(self.win, '导入旧版数据',
-                                '用这个文件夹里的设置、历史记录、网站登录信息和头像，替换现在的？\n'
-                                '（旧文件夹里的文件不会动。导入后需要重新打开软件。）') != QMessageBox.Yes:
+        if not ui.confirm(self.win, '用旧版的数据替换现在的？', '会换成这个文件夹里的设置、历史记录、网站登录信息和头像。\n'
+                          '旧文件夹里的文件不会动。导入后需要重新打开软件。', ok='导入', danger=True):
             return
         try:
             got = import_legacy(src, dest=PENDING)
         except OSError as e:
-            QMessageBox.warning(self.win, '导入旧版数据', f'导入失败：{e}')
+            ui.alert(self.win, '导入失败', str(e))
             return
-        if QMessageBox.question(self.win, '导入旧版数据',
-                                f'已准备好（{len(got)} 项），重新打开软件后生效。现在退出软件吗？') == QMessageBox.Yes:
+        if ui.confirm(self.win, '已准备好，现在退出软件吗？', f'导入了 {len(got)} 项，重新打开软件后生效。', ok='退出软件', cancel='稍后'):
             self.win._quit()
 
 

@@ -13,11 +13,11 @@ import shiboken6
 from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QApplication, QCheckBox, QDialog, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QPushButton, QSystemTrayIcon, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import APP_NAME, icons, theme, ui
+from . import icons, theme, ui
 from .folder_dialog import TextDialog
 from .history import PAN
 from .pan import (
@@ -1259,15 +1259,12 @@ class PanMixin:
     def pan_delete_batch(self, b, delete_files=None):
         st = b.stats(self.pan)
         if delete_files is None:
-            box = QMessageBox(QMessageBox.Question, APP_NAME,
-                              f'删除「{b.title}」的 {st["total"]} 个下载任务？\n没下完的会停止。', parent=self)
-            keep = box.addButton('删除任务，保留已下载的文件', QMessageBox.AcceptRole)
-            drop = box.addButton('连同已下载的文件一起删除', QMessageBox.DestructiveRole)
-            box.addButton('取消', QMessageBox.RejectRole)
-            box.exec()
-            if box.clickedButton() not in (keep, drop):
+            choice = ui.ask(self, f'删除「{b.title}」的 {st["total"]} 个下载任务？', '没下完的会停止。',
+                            (('取消', None, ''), ('连同已下载的文件一起删除', 'drop', 'danger'),
+                             ('只删除任务，保留文件', 'keep', 'primary')), width=560)
+            if choice not in ('keep', 'drop'):
                 return
-            delete_files = box.clickedButton() is drop
+            delete_files = choice == 'drop'
         self.pan.call('removeMany', {'ids': list(b.task_ids), 'deleteFile': bool(delete_files)})
         if self.history and b.id > 0:
             self.history.update_batch(b.id, state='cleared')

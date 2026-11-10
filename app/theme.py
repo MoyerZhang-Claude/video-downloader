@@ -250,7 +250,7 @@ def stylesheet():
                            for r in ('brand', 'info', 'ok', 'err', 'text2', 'text3', 'text4'))
     return f"""
 QWidget {{ font-size: 13px; color: {p['text']}; }}
-QMainWindow, QDialog, QMessageBox {{ background: {p['bg']}; }}
+QMainWindow, QDialog {{ background: {p['bg']}; }}
 QWidget#central, QWidget#page {{ background: {p['bg']}; }}
 QWidget#clear {{ background: transparent; }}
 QFrame#sidebar {{ background: {p['sidebar']}; border: none; border-right: 1px solid {p['border']}; }}
@@ -409,5 +409,4 @@ QMenu::indicator {{ width: 14px; height: 14px; padding-left: 8px; }}
 QMenu::indicator:checked {{ image: url({ic['check_menu']}); }}
 QMenu::right-arrow {{ image: url({ic['chevron_right']}); width: 12px; height: 12px; padding-right: 8px; }}
 QToolTip {{ background: {p['tooltip']}; color: {p['on_tooltip']}; border: none; padding: 5px 9px; font-size: 12px; }}
-QMessageBox QLabel {{ color: {p['text']}; }}
 """

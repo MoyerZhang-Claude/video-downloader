@@ -169,6 +169,7 @@ class Settings:
     dark_oled: bool = False       # 深色时用纯黑（OLED）
     theme: str = 'system'         # 外观：system 跟随系统 / light / dark
     nickname: str = ''            # 首页问候语里的称呼
+    show_tips: bool = True        # 显示功能说明（解释每个功能是做什么的小字）；关掉后界面更干净，状态和错误不受影响
     sidebar_collapsed: bool = False
     preset: str = 'pick'          # 输入框下方的清晰度预设
     window_geometry: str = ''

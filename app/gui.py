@@ -647,6 +647,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self._core_updating = False
         self._restart_pending = False
         self.settings = Settings.load()
+        ui.set_tips(self.settings.show_tips)
         self.bridge = Bridge()
         self.parser = core.Parser(lambda: self.settings, self.bridge.log.emit)
         self.manager = core.DownloadManager(lambda: self.settings, self.bridge.task_updated.emit,
@@ -749,8 +750,9 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         QTimer.singleShot(700, self._resume_retry)
         QTimer.singleShot(1500, self._secure_cookies)
         if not ffmpeg_dir():
-            QTimer.singleShot(300, lambda: QMessageBox.warning(
-                self, APP_NAME, '没有找到 ffmpeg（程序目录下的 ffmpeg 文件夹），YouTube/B站等需要合并音视频的高清格式将无法下载。'))
+            QTimer.singleShot(300, lambda: ui.alert(
+                self, '没有找到 ffmpeg', '程序目录下的 ffmpeg 文件夹不见了：YouTube、B站 等需要合并音视频的高清格式将无法下载。\n'
+                                       '重新安装软件可以恢复。'))
 
     # ------------------------------------------------------------ 界面
     def _build_ui(self):
@@ -996,7 +998,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             sync_layout(box, desired)
         desired = [(('rec', h['id']), self._rec_sig(h), lambda h=h: self._record_row(h), None) for h in recents]
         if recents_open and not recents:
-            desired.append((('empty',), 0, self._recent_empty, None))
+            if ui.tips_on():
+                desired.append((('empty',), 0, self._recent_empty, None))
         elif more:
             desired.append((('more',), 0, self._recent_more, None))
         sync_layout(self.recent_box, desired)
@@ -1026,7 +1029,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         else:
             kids = [(('parse', r['id']), (r['title'], r['url']), lambda r=r: self._parse_side_row(r, 30), None)
                     for r in recs]
-        kids.append((('more',), (s['count'],), lambda s=s: self._section_more(s), None))
+        if s['count'] or ui.tips_on():      # 空分区里的占位文字是说明：关掉「显示功能说明」后不显示
+            kids.append((('more',), (s['count'],), lambda s=s: self._section_more(s), None))
         return kids
 
     def _tree_box(self, kids):
@@ -1231,8 +1235,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             self._after_history_change()
 
     def _delete_section(self, s):
-        if QMessageBox.question(self, APP_NAME, f'删除分区「{s["name"]}」？\n里面的记录和文件不会被删除，会回到所属平台的分区。'
-                                ) != QMessageBox.Yes:
+        if not ui.confirm(self, f'删除分区「{s["name"]}」？', '里面的记录和文件不会被删除，会回到所属平台的分区。',
+                          ok='删除分区', danger=True):
             return
         self.history.delete_section(s['id'])
         if self.hist_section == s['id']:
@@ -1625,6 +1629,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         s = label(sub, 'hint')
         s.setAlignment(Qt.AlignCenter)
         lay.addWidget(s)
+        ui.mark_tip(s)          # 引导新手的副标题：关掉「显示功能说明」后不显示
         return w
 
     # 历史页 ----------------------------------------------------------
@@ -1685,7 +1690,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             button('复制全部', lambda: (QGuiApplication.clipboard().setText(self.log_view.toPlainText()),
                                         self.notify('日志已复制', 'ok')), icon='copy'),
             button('清空', self.log_view.clear, icon='trash')],
-            label('解析、下载的详细过程和报错。反馈问题时可以把这里的内容发过去。', 'meta'))
+            ui.mark_tip(label('解析、下载的详细过程和报错。反馈问题时可以把这里的内容发过去。', 'meta')))
         v.addWidget(centered(head, COLUMN, (32, 0, 32, 0)))
         card = Card(radius=14)
         cl = QVBoxLayout(card)
@@ -2340,19 +2345,13 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             if quiet:
                 return False
             when = datetime.datetime.fromtimestamp(done_before[0]['ts']).strftime('%m-%d %H:%M')
-            box = QMessageBox(self)
-            box.setWindowTitle(APP_NAME)
-            box.setText(f'这个视频的「{option.tag}」已经在 {when} 下载过了。')
-            box.setInformativeText(os.path.basename(done_before[0]['filepath']))
-            open_btn = box.addButton('打开已有文件', QMessageBox.AcceptRole)
-            again_btn = box.addButton('重新下载', QMessageBox.DestructiveRole)
-            box.addButton('取消', QMessageBox.RejectRole)
-            restyle(open_btn, 'primary')
-            box.exec()
-            if box.clickedButton() is open_btn:
+            choice = ui.ask(self, f'「{option.tag}」已经下载过了',
+                            f'{when} 下载的：{os.path.basename(done_before[0]["filepath"])}',
+                            (('取消', None, ''), ('重新下载', 'again', ''), ('打开已有文件', 'open', 'primary')), width=520)
+            if choice == 'open':
                 os.startfile(done_before[0]['filepath'])
                 return False
-            if box.clickedButton() is not again_btn:
+            if choice != 'again':
                 return False
             overwrite = True
         task = core.DownloadTask(row.video, option, self.settings.download_dir, save_cover=self.settings.save_cover)
@@ -2796,15 +2795,15 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         if not self.history:
             return
         if self.hist_mode == 'downloads':
-            if QMessageBox.question(self, APP_NAME, '确定清空全部视频下载记录吗？（只删除记录，不会删除已下载的文件；'
-                                                    '侧边栏「最近下载」和视频分区里的记录也会清空）') != QMessageBox.Yes:
+            if not ui.confirm(self, '清空全部视频下载记录？', '只删除记录，不会删除已下载的文件。'
+                              '侧边栏「最近下载」和视频分区里的记录也会清空。', ok='清空', danger=True):
                 return
             self.history.clear()
         else:
             kind = self.hist_kind
             what = {VIDEO: '视频的', PAN: '网盘分享的'}.get(kind, '全部')
             extra = '（网盘分区里保存的分享链接也会清空）' if kind != VIDEO else ''
-            if QMessageBox.question(self, APP_NAME, f'确定清空{what}解析记录吗？{extra}') != QMessageBox.Yes:
+            if not ui.confirm(self, f'清空{what}解析记录？', extra.strip('（）'), ok='清空', danger=True):
                 return
             self.history.clear_parses(kind)
         self._after_history_change()
@@ -3115,7 +3114,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError as e:
-            QMessageBox.warning(self, APP_NAME, f'无法使用该目录：{e}')
+            ui.alert(self, '无法使用这个文件夹', str(e))
             return False
         self.settings.download_dir = d
         self._save_settings()
@@ -3168,6 +3167,9 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             self._update_account()
         elif key == 'download_dir':
             self._update_folder_btn()
+        elif key == 'show_tips':
+            ui.set_tips(s.show_tips)
+            self._refresh_sidebar()
         elif key == 'proxy':
             self._pan_apply_proxy()
         elif key == 'avatar':
@@ -3235,7 +3237,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             self.notify(msg, 'ok')
 
     def _bili_logout(self):
-        if QMessageBox.question(self, APP_NAME, '确定退出 B站登录吗？') != QMessageBox.Yes:
+        if not ui.confirm(self, '退出 B站登录？', '本机保存的 B站登录信息会被删除。', ok='退出登录', danger=True):
             return
         threading.Thread(target=bilibili.logout, daemon=True).start()
         self._on_bili_status(None)
@@ -3363,10 +3365,10 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         pc = self._pan_counts()
         n_pan = pc['running'] + pc['queued']
         if active or n_pan:
-            ret = QMessageBox.question(
-                self, APP_NAME, f'还有 {len(active) + n_pan} 个任务未完成，确定{"重启" if self._restart_pending else "退出"}吗？\n'
-                                '（已下载的部分会保留：视频下次下载同一清晰度时自动续传，网盘文件下次打开软件自动继续）')
-            if ret != QMessageBox.Yes:
+            what = '重启' if self._restart_pending else '退出'
+            if not ui.confirm(self, f'还有 {len(active) + n_pan} 个任务没下完，确定{what}吗？',
+                              '已下载的部分会保留：视频下次下载同一清晰度时自动续传，网盘文件下次打开软件自动继续。',
+                              ok=what, danger=True):
                 event.ignore()
                 return
             for t in active:

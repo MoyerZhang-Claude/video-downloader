@@ -123,7 +123,12 @@ class SniffCard(Card):
         self.note.setObjectName('metaError')
         self.note.setWordWrap(True)
         v.addWidget(self.note)
+        ui.tip_signals.changed.connect(self._tips_changed)
         self.refresh()
+
+    def _tips_changed(self, _on):
+        if shiboken6.isValid(self):
+            self.refresh()
 
     def _toggle_small(self):
         self.show_small = not self.show_small
