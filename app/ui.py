@@ -14,8 +14,8 @@ import weakref
 
 import shiboken6
 from PySide6.QtCore import (
-    Property, QAbstractAnimation, QEasingCurve, QEvent, QObject, QPointF, QPropertyAnimation, QRectF, QSize, Qt,
-    QTimer, QVariantAnimation, Signal,
+    Property, QAbstractAnimation, QEasingCurve, QEvent, QEventLoop, QObject, QPointF, QPropertyAnimation, QRectF,
+    QSize, Qt, QTimer, QVariantAnimation, Signal,
 )
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
@@ -1202,7 +1202,12 @@ class Overlay(QWidget):
     def _layout(self):
         self.setGeometry(self.host.rect())
         w = min(self.pref[0], self.width() - 48)
-        h = min(self.pref[1], self.height() - 48)
+        want = self.pref[1]
+        if not want:                    # 高度没指定：按内容来（对话框）
+            lay = self.panel.layout()
+            want = lay.totalHeightForWidth(w) if lay is not None and lay.hasHeightForWidth() else \
+                self.panel.sizeHint().height()
+        h = min(want, self.height() - 48)
         self.panel.setGeometry((self.width() - w) // 2, (self.height() - h) // 2, w, h)
 
     def open(self):
@@ -1220,8 +1225,10 @@ class Overlay(QWidget):
         p = QPainter(self)
         p.fillRect(self.rect(), c('scrim'))
 
+    scrim_closes = True         # 点面板外面的遮罩是否关闭（进行到一半不能误关的对话框设成 False）
+
     def mousePressEvent(self, e):
-        if not self.panel.geometry().contains(e.position().toPoint()):
+        if self.scrim_closes and not self.panel.geometry().contains(e.position().toPoint()):
             self.close_panel()
 
     def keyPressEvent(self, e):
@@ -1229,6 +1236,116 @@ class Overlay(QWidget):
             self.close_panel()
         else:
             super().keyPressEvent(e)
+
+
+class Dialog(Overlay):
+    """窗口内的对话框：标题 + 一段说明 + 可以放任意控件的正文 + 底部一排按钮。
+    代替系统的 QMessageBox（那个的样子和软件不统一），用法也差不多：
+
+        dlg = Dialog(win.central, '退出 B站登录', '确定退出吗？')
+        dlg.add_button('取消')
+        dlg.add_button('退出', 'ok', 'danger')
+        if dlg.exec() == 'ok': ...
+
+    exec() 等到用户点了某个按钮才返回那个按钮的 key；按 Esc、点对话框外面 = 取消（返回 None）。
+    主按钮（primary / accent / danger）在最右边，按 Enter 就是点它。
+    """
+
+    def __init__(self, host, title='', text='', width=460):
+        super().__init__(host, width, 0)
+        self.result = None
+        self._default = None
+        v = QVBoxLayout(self.panel)
+        v.setContentsMargins(26, 22, 26, 18)
+        v.setSpacing(0)
+        self.head = QHBoxLayout()
+        self.head.setSpacing(12)
+        self.title = QLabel(title)
+        self.title.setObjectName('dialogTitle')
+        self.title.setWordWrap(True)
+        self.head.addWidget(self.title, 1)
+        v.addLayout(self.head)
+        self.text = QLabel(text)
+        self.text.setObjectName('dialogText')
+        self.text.setWordWrap(True)
+        self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        if not text:
+            self.text.hide()
+        v.addSpacing(10)
+        v.addWidget(self.text)
+        self.body = QVBoxLayout()
+        self.body.setSpacing(8)
+        v.addLayout(self.body)
+        v.addSpacing(20)
+        self.bar = QHBoxLayout()
+        self.bar.setSpacing(8)
+        self.left = QHBoxLayout()           # 左下角：不那么重要的文字按钮（如「跳过此版本」）
+        self.left.setSpacing(4)
+        self.bar.addLayout(self.left)
+        self.bar.addStretch(1)
+        v.addLayout(self.bar)
+
+    def set_text(self, text):
+        self.text.setText(text)
+        self.text.setVisible(bool(text))
+        if self.isVisible():
+            self._layout()
+
+    def add_button(self, text, key=None, kind='', left=False):
+        """kind：'' 普通 / 'primary' 深色主按钮 / 'accent' 橙色主按钮 / 'danger' 红字 / 'link' 文字按钮。
+        key：exec() 返回的值（不给就是 None，相当于取消）。"""
+        b = QPushButton(text)
+        if kind:
+            b.setObjectName(kind)
+        b.setCursor(Qt.PointingHandCursor)
+        b.setFocusPolicy(Qt.NoFocus)
+        b.clicked.connect(lambda: self.finish(key))
+        (self.left if left else self.bar).addWidget(b)
+        if kind in ('primary', 'accent') or (kind == 'danger' and self._default is None):
+            self._default = b
+        return b
+
+    def finish(self, result=None):
+        self.result = result
+        self.close_panel()
+
+    def exec(self):
+        loop = QEventLoop()
+        self.closed.connect(loop.quit)
+        self.open()
+        if self.isVisible():
+            loop.exec()
+        self.host.removeEventFilter(self)
+        self.deleteLater()
+        return self.result
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Return, Qt.Key_Enter) and self._default is not None and self._default.isEnabled():
+            self._default.click()
+        else:
+            super().keyPressEvent(e)
+
+
+def _host_of(w):
+    """对话框盖在哪个控件上：主窗口的中间区域。"""
+    win = w.window() if w is not None else None
+    return getattr(win, 'central', None) or win
+
+
+def ask(parent, title, text='', buttons=(('取消', None, ''), ('确定', 'ok', 'primary')), width=460):
+    """问一个问题。buttons：[(文字, key, 样式)]，从左到右；返回点的那个按钮的 key（取消 / Esc 返回 None）。"""
+    dlg = Dialog(_host_of(parent), title, text, width)
+    for label, key, kind in buttons:
+        dlg.add_button(label, key, kind)
+    return dlg.exec()
+
+
+def confirm(parent, title, text='', ok='确定', cancel='取消', danger=False):
+    return ask(parent, title, text, ((cancel, None, ''), (ok, 'ok', 'danger' if danger else 'primary'))) == 'ok'
+
+
+def alert(parent, title, text='', ok='知道了'):
+    ask(parent, title, text, ((ok, 'ok', 'primary'),))
 
 
 # ---------------------------------------------------------------- Windows 窗口外观

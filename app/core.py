@@ -79,14 +79,14 @@ _ERROR_HINTS = [
     (r'Requested format is not available', '所选清晰度已不可用，请重新解析'),
     (r"not a bot|confirm you.re not a bot",
      'YouTube 暂时拦截了当前网络（多半是代理 / VPN 节点被风控）：换一个节点后重试；'
-     '经常出现的话，把 YouTube 的 cookies 放进 cookies 文件夹（设置 → 网络与登录 有说明）'),
+     '经常出现的话，在 设置 → 网络与登录 里登录 YouTube'),
     (r'Log ?in|login|logged|sign in|cookies|authentication|premium member|会员',
-     '该内容需要登录：把该网站导出的 cookies.txt 放进 cookies 文件夹（设置 → 网络与登录 里打开；或已过期，请重新导出）'),
-    (r'Private video', '视频为私密内容，需要有权限的账号 cookies'),
+     '该内容需要登录：在 设置 → 网络与登录 里登录这个网站'),
+    (r'Private video', '视频为私密内容：需要用有权限的账号登录（设置 → 网络与登录）'),
     (r'geo.?restrict|not available in your (?:country|region)|in your country', '地区限制：请尝试更换代理节点'),
     (r'Video unavailable|has been removed|This video is not available|已删除|不存在',
      '视频不可用（可能已删除、私密或地区限制）'),
-    (r'HTTP Error 403|Forbidden', '服务器拒绝访问 (403)，可稍后重试或配置 cookies'),
+    (r'HTTP Error 403|Forbidden', '服务器拒绝访问 (403)：可以稍后重试，或在 设置 → 网络与登录 里登录这个网站'),
     (r'HTTP Error 404', '资源不存在 (404)'),
     (r'HTTP Error 429|Too Many Requests', '请求过于频繁 (429)，请稍后再试'),
     (r'timed out|Timeout|Connection|getaddrinfo|Network|SSL|EOF occurred|ProxyError|Unable to download',
@@ -94,6 +94,41 @@ _ERROR_HINTS = [
     (r'ffmpeg|ffprobe', 'ffmpeg 处理失败（请确认程序目录下的 ffmpeg 文件夹完整）'),
     (r'No space left|磁盘', '磁盘空间不足'),
 ]
+
+
+_LOGIN_RE = re.compile(r"Log ?in|login|logged|sign in|cookies|authentication|premium member|会员|not a bot|"
+                       r"confirm you.re not a bot|Private video|age.?restrict|members.only", re.I)
+LOGIN_EXPIRED = '登录已过期'
+
+
+def needs_login(raw):
+    """这个报错是不是「要登录才能看」一类（卡片上给「去登录」按钮用）"""
+    return bool(raw) and bool(_LOGIN_RE.search(raw))
+
+
+def site_cookies_fresh(url, log=None, force=False):
+    """解析 / 下载之前：这个网站是用内置浏览器登录的话，Cookie 有一阵没读了就从浏览器再读一次（见 site_login.py）。
+    返回是否重新读了。只有 Windows 电脑版有内置浏览器。"""
+    if os.name != 'nt':
+        return False
+    try:
+        from . import site_login
+        return site_login.ensure_fresh(url, force)
+    except Exception as e:  # noqa: BLE001 - 刷新失败就用上次保存的
+        if log:
+            log('warning', f'从内置浏览器刷新登录信息失败：{e}')
+        return False
+
+
+def site_logged_in(url):
+    if os.name != 'nt':
+        return False
+    try:
+        from . import site_login
+        site = site_login.for_url(url)
+        return bool(site and site_login.logged_in(site.key))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def friendly_error(exc):
@@ -228,10 +263,36 @@ def base_options(settings, logger):
     if settings.proxy.strip():
         opts['proxy'] = settings.proxy.strip()
     if settings.cookie_mode == 'browser' and settings.cookie_browser:
-        opts['cookiesfrombrowser'] = (settings.cookie_browser,)
+        # 不把 cookiesfrombrowser 交给 yt-dlp：那样每创建一个 YoutubeDL（解析、下载、字幕、过期重试各一个）
+        # 都要重新读一遍浏览器的 Cookie 数据库，又慢，浏览器开着时还常被锁。改成读一次缓存 10 分钟（new_ydl 里加进去）。
+        opts[_BROWSER_KEY] = (settings.cookie_browser, logger)
     elif settings.cookie_mode == 'file' and settings.cookie_file and os.path.isfile(settings.cookie_file):
         opts['cookiefile'] = settings.cookie_file
     return opts
+
+
+_BROWSER_KEY = '_vd_cookies_from_browser'
+_browser_cookies = {}       # 浏览器名 -> (读取时间, Cookie 列表)
+_browser_lock = threading.Lock()
+BROWSER_COOKIE_TTL = 600
+
+
+def browser_mode_cookies(name, logger=None):
+    """「从浏览器读取」模式：读出这个浏览器的 Cookie，10 分钟内重复用同一份。读不出来返回空（1 分钟后再试）。"""
+    with _browser_lock:
+        cached = _browser_cookies.get(name)
+        now = time.monotonic()
+        if cached and now - cached[0] < (BROWSER_COOKIE_TTL if cached[1] else 60):
+            return cached[1]
+        try:
+            from yt_dlp.cookies import extract_cookies_from_browser
+            cookies = list(extract_cookies_from_browser(name, logger=logger))
+        except Exception as e:  # noqa: BLE001
+            cookies = []
+            if logger:
+                logger.warning(f'从浏览器 {name} 读取 cookies 失败：{e}（新版 Chrome / Edge 读不出来，建议在 设置 → 网络与登录 里用内置浏览器登录）')
+        _browser_cookies[name] = (now, cookies)
+        return cookies
 
 
 COOKIE_DIR = os.path.join(DATA, 'cookies')
@@ -350,11 +411,13 @@ def pick_fast_urls(info, format_ids, ydl, is_cancelled=None):
     return chosen
 
 
-def new_ydl(opts):
+def new_ydl(opts, cookies=()):
+    """cookies：只给这一次用的额外 Cookie（网页嗅探到的资源，带着浏览器里那个页面的 Cookie）。"""
     y = yt()
+    from_browser = opts.pop(_BROWSER_KEY, None)
     ydl = y.YoutubeDL(opts, auto_init=False)
     y.extractors.register(ydl)
-    extra = folder_cookies()
+    extra = (browser_mode_cookies(*from_browser) if from_browser else []) + folder_cookies() + list(cookies)
     if extra:
         jar = ydl.cookiejar
         for c in extra:
@@ -701,12 +764,14 @@ class Parser:
         settings = self.get_settings()
         logger = _Logger(self.log)
         ensure_js_runtime(url, settings, (lambda text: on_status(url, text)) if on_status else None, self.log)
+        site_cookies_fresh(url, self.log)       # 用内置浏览器登录过这个网站：Cookie 有一阵没读了就先刷新
         opts = base_options(settings, logger)
         opts['extract_flat'] = 'in_playlist'
         opts['writesubtitles'] = True      # 只取字幕/弹幕列表，不会下载
-        for attempt in (1, 2):
+        refreshed = False
+        for attempt in (1, 2, 3):
             try:
-                with new_ydl(opts) as ydl:
+                with new_ydl(dict(opts)) as ydl:
                     info = ydl.sanitize_info(ydl.extract_info(url, download=False))
                 break
             except Exception as e:  # noqa: BLE001 - 任何异常都要回到界面
@@ -716,6 +781,14 @@ class Parser:
                     self.log('warning', f'解析 {url} 网络错误，重试中：{raw[:120]}')
                     time.sleep(1.5)
                     continue
+                # 报「需要登录」而这个网站登录过：从内置浏览器重新读一次 Cookie 再试；还不行就是登录过期了
+                if needs_login(raw) and site_logged_in(url):
+                    if not refreshed:
+                        refreshed = True
+                        self.log('info', f'解析 {url} 提示需要登录，从内置浏览器刷新登录信息后重试')
+                        if site_cookies_fresh(url, self.log, force=True):
+                            continue
+                    msg = f'{LOGIN_EXPIRED}：请重新登录这个网站（点「重新登录」，或 设置 → 网络与登录）'
                 on_error(url, msg, raw)
                 return
         if info.get('_type') == 'playlist':
@@ -961,6 +1034,7 @@ class DownloadManager:
         logger = _Logger(self.log, f'[任务{task.id}] ')
         info = task.video.info
         y = yt()
+        site_cookies_fresh(info.get('webpage_url') or task.video.url, self.log)
         for attempt in (1, 2):
             try:
                 with new_ydl(self._build_opts(task, logger)) as ydl:

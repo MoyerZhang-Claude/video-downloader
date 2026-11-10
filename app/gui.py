@@ -255,6 +255,7 @@ class ResultRow:
         self.status_text = ''        # 解析前的准备工作（如「正在准备 YouTube 组件」）
         self.status_label = None
         self.outdated = False        # 报错像是解析内核过期了
+        self.login = False           # 报错是「要登录才能看」一类：卡片上给「去登录」按钮
         self.hist = []               # 这个视频下载过的记录（后台查好的，「已下载」标记和「全部下载」用）
         self.pending_render = True   # 卡片内容还在排队等着画（一次加入很多链接时分批画）
         self.auto_download = False   # 从选集加入：解析完自动下载
@@ -1910,7 +1911,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
 
     def _start_parse(self, token):
         row = self.rows[token]
-        row.state, row.error, row.status_text, row.outdated = 'parsing', '', '', False
+        row.state, row.error, row.status_text, row.outdated, row.login = 'parsing', '', '', False, False
         self._render_result(row)
         self._update_res_label()
         self.parser.submit(
@@ -1957,6 +1958,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             return
         row.state, row.error, row.error_raw = 'error', msg, raw
         row.outdated = core.looks_outdated(raw)
+        row.login = core.needs_login(raw) or msg.startswith(core.LOGIN_EXPIRED)
         self._render_result(row)
         self._update_res_label()
         self._append_log('error', f'解析失败 {row.url}\n    {raw}')
@@ -2154,6 +2156,13 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
                 act.addStretch(1)
                 act.addWidget(button('移除', lambda: self._remove_result(token), 'ghost'))
                 act.addWidget(button('重试', lambda: self._start_parse(token), icon='refresh'))
+                if row.login:
+                    bili = 'bilibili.com' in row.url or 'b23.tv' in row.url
+                    again = row.error.startswith(core.LOGIN_EXPIRED)
+                    act.addWidget(button('扫码登录 B站' if bili else '重新登录' if again else '去登录',
+                                         lambda: self._login_for_row(token), 'primary',
+                                         'B站用扫码登录（左下角头像菜单里也有）' if bili else
+                                         '在内置浏览器里登录这个网站，登录好以后自动重新解析', 'user'))
                 if row.outdated and self._core_new:
                     act.addWidget(button('更新内核后重试', self._update_core_and_retry, 'primary',
                                          f'解析内核有新版本 {self._core_new}：更新后自动重启软件，并重新解析这个链接', 'refresh'))
@@ -2166,6 +2175,37 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
                 task = next((x for x in self.manager.tasks if x.id == tid), None)
                 if task:
                     self._add_task_line(task, row)
+
+    def _login_for_row(self, token):
+        """失败卡片上的「去登录」：在内置浏览器里登录这个链接所在的网站，登录好以后重新解析。"""
+        row = self.rows.get(token)
+        if row is None:
+            return
+        if 'bilibili.com' in row.url or 'b23.tv' in row.url:
+            self._bili_login(True)          # B站有自己的扫码登录（成功后会自动重新解析 B站的卡片）
+            return
+        from . import login_ui, site_login
+        site = site_login.guess(row.url)
+        if site is None:
+            self._open_settings('network')
+            return
+        if login_ui.login(self, site):
+            self._after_site_login(site)
+
+    def _after_site_login(self, site):
+        """登录了一个网站：之前因为要登录而失败的、这个网站的卡片自动重新解析。"""
+        from . import site_login
+        n = 0
+        for token, row in list(self.rows.items()):
+            if row.state == 'error' and row.login:
+                s = site_login.for_url(row.url)
+                if s is not None and s.key == site.key:
+                    self._start_parse(token)
+                    n += 1
+        if self.settings_panel is not None:
+            self.settings_panel.refresh_sites()
+        if n:
+            self.notify(f'已登录 {site.name}，正在重新解析 {n} 个链接', 'ok')
 
     def _remove_result(self, token):
         row = self.rows.pop(token, None)
@@ -3348,6 +3388,11 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self._save_settings()
         self._save_tasks()
         self.pan.stop()
+        if 'app.browser' in sys.modules:        # 用过内置浏览器：关掉还开着的窗口（它开着调试端口，不能留下）
+            try:
+                sys.modules['app.browser'].shutdown()
+            except Exception as e:  # noqa: BLE001
+                log.warning('关闭内置浏览器失败: %s', e)
         self.hotkey.unregister()
         if self.tray:
             self.tray.hide()

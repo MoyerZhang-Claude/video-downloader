@@ -261,6 +261,11 @@ QLabel#pageTitle {{ font-family: "{SERIF}", "{SANS}"; font-size: 26px; color: {p
 QLabel#brandName {{ font-family: "{SERIF}", "{SANS}"; font-size: 17px; color: {p['text']}; }}
 QLabel#serifSmall {{ font-family: "{SERIF}", "{SANS}"; font-size: 15px; color: {p['text2']}; }}
 QLabel#panelTitle {{ font-size: 18px; font-weight: 600; color: {p['text']}; }}
+QLabel#dialogTitle {{ font-size: 17px; font-weight: 600; color: {p['text']}; }}
+QLabel#dialogText {{ font-size: 13px; color: {p['text2']}; }}
+QLabel#dialogSub {{ font-size: 12px; color: {p['text3']}; }}
+QPushButton#link {{ background: transparent; border: none; color: {p['text3']}; padding: 6px 4px; }}
+QPushButton#link:hover {{ color: {p['text']}; text-decoration: underline; }}
 QLabel#sectionTitle {{ font-size: 15px; font-weight: 600; color: {p['text']}; }}
 QLabel#headTitle {{ font-size: 14px; font-weight: 600; color: {p['text']}; }}
 QLabel#cardTitle {{ font-size: 14px; font-weight: 600; color: {p['text']}; }}

@@ -110,6 +110,7 @@ class SettingsPanel(ui.Overlay):
         self.refresh_avatar()
         self.refresh_pan_accounts()
         self.refresh_pan_settings()
+        self.refresh_sites()
         self._refresh_cookie_hint()
         self._refresh_core_version()
         if page:
@@ -381,6 +382,24 @@ class SettingsPanel(ui.Overlay):
                 self.win.setting_changed('proxy')
         proxy.editingFinished.connect(set_proxy)
         self._row(lay, '代理', '例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080（网盘下载重启软件后生效）', proxy)
+        self._section(lay, '网站登录')
+        # 每个网站一行（登录过的其它网站也列在这里）：内容会变，放在单独的容器里，refresh_sites() 重画
+        wrap = _clear()
+        self.sites_box = QVBoxLayout(wrap)
+        self.sites_box.setContentsMargins(0, 0, 0, 0)
+        self.sites_box.setSpacing(0)
+        lay.addWidget(wrap)
+        obox = QHBoxLayout()
+        obox.setSpacing(6)
+        self.site_other = QLineEdit()
+        self.site_other.setPlaceholderText('网址，例如 https://www.example.com')
+        self.site_other.setFixedWidth(260)
+        self.site_other.returnPressed.connect(self._site_other)
+        obox.addWidget(self.site_other)
+        self.site_other_btn = _btn('登录', self._site_other)
+        obox.addWidget(self.site_other_btn)
+        self._fresh_section = False
+        self.site_other_desc = self._row(lay, '其它网址', '需要登录才能看的其它网站：填网址，在内置浏览器里登录', obox)
         self._section(lay, 'B站账号')
         self.bili_box = QHBoxLayout()
         self.bili_box.setSpacing(6)
@@ -392,12 +411,12 @@ class SettingsPanel(ui.Overlay):
             box.setSpacing(6)
             self.pan_rows[prov] = (self._row(lay, pan.PROVIDERS[prov], '', box), box)
         self._row(lay, 'Mega', 'Mega 的分享链接不需要登录就能下载')
-        self._section(lay, '其它网站的登录信息（Cookies）')
+        self._section(lay, '高级：其它登录方式')
         self.cookie_hint = self._row(lay, 'cookies 文件夹', '', _btn('打开文件夹', self._open_cookie_dir))
         mode = self._combo('cookie_mode', COOKIE_MODES.items(), 220)
         mode.currentIndexChanged.connect(self._sync_cookie_widgets)
         self.cookie_mode = mode
-        self._row(lay, '额外的 cookies 来源', '一般不需要：把 cookies.txt 放进上面的文件夹就够了', mode)
+        self._row(lay, '额外的 cookies 来源', '一般不需要：用上面的内置浏览器登录就够了', mode)
         self.browser = Combo()
         self.browser.addItems(BROWSERS)
         if self.s.cookie_browser in BROWSERS:
@@ -419,6 +438,62 @@ class SettingsPanel(ui.Overlay):
         fbox.addWidget(_btn('浏览…', self._pick_cookie_file))
         self._row(lay, 'cookies.txt 文件', '', fbox)
         self._sync_cookie_widgets()
+
+    # 网站登录（内置浏览器） ---------------------------------------------
+    def refresh_sites(self):
+        from . import browser, site_login
+        from .gui import fmt_ago
+        box = self.sites_box
+        while box.count():
+            w = box.takeAt(0).widget()
+            if w:
+                w.hide()
+                w.setParent(None)
+                w.deleteLater()
+        have, name = browser.available(), browser.find_browser()[1]
+        st = site_login.status()
+        self._fresh_section = True
+        for site in site_login.listed():
+            info = st.get(site.key)
+            btns = QHBoxLayout()
+            btns.setSpacing(6)
+            if info:
+                relogin = _btn('重新登录', lambda _=False, x=site: self._site_login(x))
+                relogin.setEnabled(have)
+                btns.addWidget(relogin)
+                btns.addWidget(_btn('退出登录', lambda _=False, x=site: self._site_logout(x), 'danger'))
+                desc = f'已登录 · {fmt_ago(info.get("saved") or 0)}从内置浏览器读取（用之前会自动刷新）'
+            else:
+                b = _btn('登录', lambda _=False, x=site: self._site_login(x), 'primary')
+                b.setEnabled(have)
+                btns.addWidget(b)
+                desc = '未登录'
+            self._row(box, site.name, desc, btns)
+        self._fresh_section = False
+        self.site_other.setEnabled(have)
+        self.site_other_btn.setEnabled(have)
+        self.site_other_desc.setText(
+            f'需要登录才能看的其它网站：填网址，在内置浏览器（{name}）里登录。登录信息加密保存在本机' if have else
+            '没有找到 Edge 或 Chrome，内置浏览器登录用不了：可以用下面「高级」里的 cookies 文件夹导入 cookies.txt')
+
+    def _site_login(self, site):
+        from . import login_ui
+        if login_ui.login(self.win, site):
+            self.win._after_site_login(site)
+        self.refresh_sites()
+
+    def _site_logout(self, site):
+        from . import login_ui
+        login_ui.logout(self.win, site, self.refresh_sites)
+
+    def _site_other(self):
+        from . import site_login
+        site = site_login.custom(self.site_other.text())
+        if site is None:
+            self.win.notify('请填要登录的网站网址，例如 https://www.example.com', 'error')
+            return
+        self.site_other.clear()
+        self._site_login(site)
 
     def refresh_account(self):
         while self.bili_box.count():
@@ -491,9 +566,10 @@ class SettingsPanel(ui.Overlay):
     def _refresh_cookie_hint(self):
         from . import core
         found = core.cookie_file_names()
-        self.cookie_hint.setText('TikTok、Vimeo 等需要登录的网站：用浏览器扩展「Get cookies.txt LOCALLY」在对应网站导出 '
-                                 '.txt，放进 cookies 文件夹（点右边的按钮打开），自动生效。\n'
-                                 f'当前已生效：{"、".join(found) if found else "（空）"}')
+        found = [n for n in found if not n.startswith(core.SITE_PREFIX)]      # 内置浏览器登录的在上面单独列了
+        self.cookie_hint.setText('也可以导入 cookies.txt：用浏览器扩展「Get cookies.txt LOCALLY」在对应网站导出 .txt，'
+                                 '放进 cookies 文件夹（点右边的按钮打开）。软件读到后会加密保存，并删除明文文件。\n'
+                                 f'当前已导入：{"、".join(found) if found else "（没有）"}')
         self.cookie_hint.show()
 
     def _open_cookie_dir(self):
