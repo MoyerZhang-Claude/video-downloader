@@ -356,7 +356,7 @@ class CoverDialog(QDialog):
 
     def _copy(self):
         QGuiApplication.clipboard().setImage(self.img)
-        self.sender().setText('✓ 已复制')
+        self.sender().setText('已复制')
 
     def _save(self):
         self.saved_path = save_cover_bytes(self.data, self.out_dir, self.title)

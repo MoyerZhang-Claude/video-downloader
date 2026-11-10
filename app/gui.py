@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from . import (
     APP_NAME, APP_VERSION, avatar, bilibili, core, core_update, greetings, icons, pan, proc_job, runtime_update,
-    task_store, theme, ui,
+    logsafe, task_store, theme, ui,
 )
 from .bili_dialog import BiliLoginDialog
 from .config import DATA, ROOT, Settings, ffmpeg_dir
@@ -228,6 +228,7 @@ class ResultRow:
         self.extra = None            # 网页嗅探到的资源：解析时要带上的请求头、Cookie、标题（见 sniff_ui.py）
         self.hist = []               # 这个视频下载过的记录（后台查好的，「已下载」标记和「全部下载」用）
         self.pending_render = True   # 卡片内容还在排队等着画（一次加入很多链接时分批画）
+        self.picked = None           # 用户在下拉框里手动选的清晰度（格式）：卡片重画后选回去
         self.auto_download = False   # 从选集加入：解析完自动下载
         self.from_collection = False
 
@@ -2034,7 +2035,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             line = QHBoxLayout()
             line.setSpacing(6)
             line.addWidget(PlatformTag(v.platform))
-            badge = label('', 'tagOk')
+            badge = ui.IconTag('check', '', 'ok', 'tint_ok')       # 对勾是画出来的图标，不是文字符号
             badge.hide()           # 放进卡片后再由 _update_badge 决定是否显示
             row.badge = badge
             line.addWidget(badge)
@@ -2086,7 +2087,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
                 combo.addItem(opt.label, opt)
             if v.locked:
                 need = '需要大会员账号' if bilibili.is_logged_in() else '左下角头像菜单里扫码登录 B站'
-                combo.addItem(f'🔒 {v.locked}（{need}）')
+                combo.addItem(icons.icon('lock', c('text3'), 16), f'{v.locked}（{need}）')
                 combo.model().item(combo.count() - 1).setEnabled(False)
                 combo.setToolTip(f'未解锁的清晰度：{v.locked}')
             combo.setMinimumWidth(200)
@@ -2094,6 +2095,15 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             row.combo = combo
             self._apply_preset(row)
+            if row.picked:          # 改了编码偏好 / HDR / 字幕语言后卡片重画：手动选好的清晰度还在列表里就选回去
+                keep = next((i for i in range(combo.count())
+                             if combo.itemData(i) is not None and combo.itemData(i).format == row.picked), -1)
+                if keep >= 0:
+                    combo.setCurrentIndex(keep)
+                else:
+                    row.picked = None
+            combo.activated.connect(lambda i, r=row, cb=combo: setattr(
+                r, 'picked', cb.itemData(i).format if cb.itemData(i) is not None else None))
             act.addWidget(combo, 3)
             act.addStretch(1)
             for icon, tip, slot in (('scissors', '只下载其中一段（输入起止时间）', lambda: self._download_section(token)),
@@ -2327,7 +2337,9 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         combo.setCurrentIndex(idx)
 
     def _apply_preset_all(self):
+        """换了「清晰度」预设：所有卡片都按新的预设选（之前手动选的不再保留）。"""
         for row in self.rows.values():
+            row.picked = None
             if row.state == 'ok':
                 self._apply_preset(row)
 
@@ -2339,9 +2351,10 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         option = row.combo.currentData()
         if option is None:
             return False
-        vid = row.video.info.get('id')
+        # 同一个视频：用「网站 + id」认（不同网站的 id 可能一样）；只下载其中一段的任务不算（整段还是可以下）
+        key = video_key(row.video.info)
         for t in self.manager.tasks:
-            if t.video.info.get('id') == vid and t.option.format == option.format and t.status in (
+            if video_key(t.video.info) == key and t.option.format == option.format and not t.section and t.status in (
                     core.QUEUED, core.RUNNING, core.MERGING, core.PAUSED):
                 if not quiet:
                     self.notify('这个视频的该清晰度已经在下载列表里了')
@@ -2588,7 +2601,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             badge.hide()
             return
         qualities = '、'.join(dict.fromkeys(h['quality'].replace('] [', ' · ') for h in recs))
-        badge.setText(f'✓ 已下载 {qualities}')
+        badge.setText(f'已下载 {qualities}')
         badge.setToolTip('\n'.join(
             f'{datetime.datetime.fromtimestamp(h["ts"]).strftime("%Y-%m-%d %H:%M")}  {h["filepath"]}' for h in recs))
         badge.show()
@@ -3329,7 +3342,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
     def _append_log(self, level, msg):
         if level == 'info' and msg.startswith('[任务') and '[download]' in msg and '%' in msg:
             return
-        prefix = {'warning': '⚠ ', 'error': '✖ '}.get(level, '')
+        msg = logsafe.redact(msg)       # 签名参数、Cookie、Windows 用户名打码（日志是给用户复制出去反馈问题用的）
+        prefix = {'warning': '[警告] ', 'error': '[错误] '}.get(level, '')
         self.log_view.appendPlainText(prefix + msg)
         getattr(log, 'error' if level == 'error' else 'warning' if level == 'warning' else 'info')(msg)
 
@@ -3442,7 +3456,7 @@ def _setup_logging():
         os.makedirs(log_dir, exist_ok=True)
         handler = RotatingFileHandler(os.path.join(log_dir, 'app.log'), maxBytes=1_000_000, backupCount=2,
                                       encoding='utf-8')
-        handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+        handler.setFormatter(logsafe.Formatter('%(asctime)s %(levelname)s %(message)s'))
         log.addHandler(handler)
         log.setLevel(logging.INFO)
     except OSError:

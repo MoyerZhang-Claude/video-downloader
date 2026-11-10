@@ -37,6 +37,11 @@ _PARSE_COLS = ('id', 'kind', 'pkey', 'title', 'orig_title', 'platform', 'uploade
                'section_id')
 
 
+def like_arg(search):
+    """搜索词 → LIKE 的参数：% 和 _ 是 LIKE 的通配符，按字面搜要转义（SQL 里配 ESCAPE '\\'）。"""
+    return '%' + search.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+
+
 def video_key(info):
     """同一个视频在不同链接（短链、带参数的分享链接）下也得到同一个键。"""
     return f'{info.get("extractor_key") or info.get("extractor") or ""}:{info.get("id") or info.get("webpage_url")}'
@@ -170,8 +175,9 @@ class History:
             where.append("COALESCE(kind, 'video')=?")
             args.append(kind)
         if search:
-            where.append('(title LIKE ? OR custom_title LIKE ? OR uploader LIKE ? OR platform LIKE ?)')
-            args += [f'%{search}%'] * 4
+            where.append("(title LIKE ? ESCAPE '\\' OR custom_title LIKE ? ESCAPE '\\' OR uploader LIKE ? ESCAPE '\\' "
+                         "OR platform LIKE ? ESCAPE '\\')")
+            args += [like_arg(search)] * 4
         if section == 0:
             where.append('section_id IS NULL')
         elif section:
@@ -297,8 +303,9 @@ class History:
                'count, size, ts, section_id FROM parses')
         where, args = [], []
         if search:
-            where.append('(title LIKE ? OR custom_title LIKE ? OR uploader LIKE ? OR platform LIKE ? OR url LIKE ?)')
-            args += [f'%{search}%'] * 5
+            where.append("(title LIKE ? ESCAPE '\\' OR custom_title LIKE ? ESCAPE '\\' OR uploader LIKE ? ESCAPE '\\' "
+                         "OR platform LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\')")
+            args += [like_arg(search)] * 5
         if kind:
             where.append('kind=?')
             args.append(kind)

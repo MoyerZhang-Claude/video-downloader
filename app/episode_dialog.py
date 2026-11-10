@@ -58,7 +58,7 @@ class EpisodeDialog(QDialog):
         width = len(str(len(entries)))
         existing = set(existing_urls)
         for i, e in enumerate(entries):
-            mark = '　▶ 当前' if i == cur else ''
+            mark = '　·　当前' if i == cur else ''
             have = e['url'] in existing or i == cur
             text = f'{i + 1:0{width}d}　{e["title"]}' + (f'　·　{_dur(e.get("duration"))}' if e.get('duration') else '') + mark
             item = QListWidgetItem(text)

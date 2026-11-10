@@ -819,7 +819,7 @@ class PanBatchView(Card):
         else:
             status, role = '已完成', 'ok'
             loc = b.location(eng)
-            parts = ['✓ 校验通过' if st['verified'] == total else '', f'已存到 {loc}' if loc else '']
+            parts = ['校验通过' if st['verified'] == total else '', f'已存到 {loc}' if loc else '']
             self.bar.set_state(1, 'ok')
             self.b1.set_icon('play_circle', '打开')
             self.b1.color_role = 'ok'
