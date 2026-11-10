@@ -147,6 +147,28 @@ class DownloadInstaller(unittest.TestCase):
                 app_update.download_installer(self.rel(''), d)
             self.assertEqual(os.listdir(d), [])
 
+    def test_reuses_verified_file(self):
+        """下载完选了「稍后安装」：下次点「下载并安装」直接用已经下好、校验对得上的文件。"""
+        with tempfile.TemporaryDirectory() as d:
+            rel = self.rel(hashlib.sha256(self.payload).hexdigest())
+            path = app_update.download_installer(rel, d)
+            again = app_update.download_installer(dict(rel, download='http://127.0.0.1:9/unreachable'), d)
+            self.assertEqual(again, path)
+
+    def test_stale_file_is_replaced(self):
+        with tempfile.TemporaryDirectory() as d:
+            rel = self.rel(hashlib.sha256(self.payload).hexdigest())
+            with open(os.path.join(d, rel['name']), 'wb') as f:
+                f.write(b'half downloaded or tampered')
+            path = app_update.download_installer(rel, d)
+            self.assertEqual(open(path, 'rb').read(), self.payload)
+
+    def test_cancel_leaves_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(InterruptedError):
+                app_update.download_installer(self.rel(hashlib.sha256(self.payload).hexdigest()), d, cancelled=lambda: True)
+            self.assertEqual(os.listdir(d), [])
+
     def test_only_setup_exe(self):
         with tempfile.TemporaryDirectory() as d:
             rel = dict(self.rel(hashlib.sha256(self.payload).hexdigest()), name='LinkDownloader-9.9.9-windows.zip')

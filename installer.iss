@@ -66,6 +66,8 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "现在打开{#AppName}"; Flags: nowait postinstall skipifsilent
+; 软件内更新是静默安装（/SILENT，只显示进度）：装完直接打开新版
+Filename: "{app}\{#AppExe}"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
 ; 卸载前先结束还在运行的软件和网盘引擎

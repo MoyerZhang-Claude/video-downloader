@@ -123,28 +123,52 @@ def parse_release(data, platform, current=APP_VERSION):
             'name': asset.get('name') or ''}
 
 
-def check(platform, current=APP_VERSION, timeout=10):
+def _opener(proxy=''):
+    """设置里填了 http(s) 代理就用它；没填（或者是 urllib 不支持的 socks 代理）跟随系统代理。"""
+    if proxy and proxy.lower().startswith(('http://', 'https://')):
+        return urllib.request.build_opener(urllib.request.ProxyHandler({'http': proxy, 'https': proxy}))
+    return urllib.request.build_opener()
+
+
+def check(platform, current=APP_VERSION, timeout=10, proxy=''):
     """联网检查。有新版返回 dict（见 parse_release），没有返回 None；网络错误会抛异常，调用方自己决定要不要提示。"""
     req = urllib.request.Request(_API, headers={'User-Agent': 'LinkDownloader-update-check',
                                                 'Accept': 'application/vnd.github+json'})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _opener(proxy).open(req, timeout=timeout) as r:
         data = json.load(r)
     return parse_release(data, platform, current)
 
 
-def download_installer(rel, folder, progress=None, cancelled=None, timeout=60):
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        while chunk := f.read(1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest().lower()
+
+
+def download_installer(rel, folder, progress=None, cancelled=None, timeout=60, proxy=''):
     """电脑版应用内更新：把安装包下载到 folder，核对 GitHub 给出的 sha256，返回文件路径。
-    没有校验值、或者校验不通过，一律抛异常并删掉文件——来路说不清的安装包绝不运行。"""
+    没有校验值、或者校验不通过，一律抛异常并删掉文件——来路说不清的安装包绝不运行。
+    之前已经下载好、校验也对得上的（下载完选了「稍后安装」）直接用，不重新下载。取消时抛 InterruptedError。"""
     if not rel.get('download') or not rel.get('name', '').endswith('-setup.exe'):
-        raise RuntimeError('这个版本没有可以直接安装的安装包，请到发布页下载')
+        raise RuntimeError('这个版本没有可以直接安装的安装包，请到下载页下载')
     if not rel.get('digest'):
-        raise RuntimeError('GitHub 没有给出这个安装包的校验值，为安全起见不自动安装，请到发布页下载')
+        raise RuntimeError('GitHub 没有给出这个安装包的校验值，为安全起见不自动安装，请到下载页下载')
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, re.sub(r'[^\w.\-]', '_', rel['name']))
+    try:
+        if os.path.exists(path) and _sha256(path) == rel['digest']:
+            if progress:
+                progress(1.0)
+            return path
+    except OSError:
+        pass
+    part = path + '.part'
     h = hashlib.sha256()
     req = urllib.request.Request(rel['download'], headers={'User-Agent': 'LinkDownloader-update'})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r, open(path, 'wb') as f:
+        with _opener(proxy).open(req, timeout=timeout) as r, open(part, 'wb') as f:
             total = int(r.headers.get('Content-Length') or 0) or rel.get('size') or 0
             done = 0
             while chunk := r.read(256 * 1024):
@@ -156,11 +180,13 @@ def download_installer(rel, folder, progress=None, cancelled=None, timeout=60):
                 if progress and total:
                     progress(min(1.0, done / total))
         if h.hexdigest().lower() != rel['digest']:
-            raise RuntimeError('下载的安装包校验不通过（可能下载不完整或被改动过），没有运行它。请重试，或到发布页下载')
+            raise RuntimeError('下载的安装包校验不通过（可能没下完整，或者被改动过），已经删除、没有运行。可以重试，或到下载页下载')
+        os.replace(part, path)
     except BaseException:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+        for x in (part, path):
+            try:
+                os.remove(x)
+            except OSError:
+                pass
         raise
     return path

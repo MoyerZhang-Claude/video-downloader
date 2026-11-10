@@ -18,7 +18,7 @@ from PySide6.QtGui import (
     QShortcut,
 )
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu,
     QPlainTextEdit, QPushButton, QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
@@ -646,6 +646,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self._core_checked_on_failure = False
         self._core_updating = False
         self._restart_pending = False
+        self._force_quit = False         # 退出时不再问「还有任务没下完」（安装新版本前已经问过了）
+        self._app_rel = None             # 查到的软件新版本（app_update.parse_release 的结果）
         self.settings = Settings.load()
         ui.set_tips(self.settings.show_tips)
         self.bridge = Bridge()
@@ -858,6 +860,12 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self.side_fill.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         v.addWidget(self.side_fill, 1)
         v.addSpacing(6)
+        from .update_ui import UpdateHint
+        self.update_hint = UpdateHint()          # 「新版本 x.y.z · 查看」：查到新版本才出现
+        self.update_hint.clicked.connect(lambda: self.show_update())
+        self.update_hint.hide()
+        v.addWidget(self.update_hint)
+        v.addSpacing(4)
         self.account = AccountButton()
         self.account.clicked.connect(self._account_menu)
         v.addWidget(self.account)
@@ -887,6 +895,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         for n in (*self.navs.values(), self.nav_search):
             n.set_collapsed(on)
         self.account.set_collapsed(on)
+        self.update_hint.set_collapsed(on)
         self.collapse_btn.setToolTip('展开侧边栏' if on else '收起侧边栏')
         if save:
             self._save_settings()
@@ -3020,12 +3029,15 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def _check_app_update(self):
-        """启动时在后台看一下 GitHub 上有没有软件新版本；失败不打扰。"""
-        from . import app_update
+        """启动时在后台看一下 GitHub 上有没有软件新版本；失败不打扰。
+        查到了也不弹窗：只在侧边栏左下角出现一条「新版本 x.y.z · 查看」，点开才显示更新窗口。"""
+        from . import app_update, update_ui
+        proxy = (self.settings.proxy or '').strip()
 
         def work():
+            update_ui.clean_downloads()
             try:
-                rel = app_update.check('windows')
+                rel = app_update.check('windows', proxy=proxy)
             except Exception as e:  # noqa: BLE001
                 self.bridge.log.emit('info', f'检查软件新版本失败：{e}')
                 return
@@ -3035,21 +3047,50 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def _on_app_update(self, rel):
-        box = QMessageBox(self)
-        box.setWindowTitle('软件更新')
-        box.setIcon(QMessageBox.Information)
-        box.setText(f'{APP_NAME} 有新版本 {rel["version"]}（当前 {APP_VERSION}）')
-        box.setInformativeText('打开下载页，下载新的安装包装在原来的位置就是升级，设置和历史记录都会保留。')
-        go = box.addButton('去下载', QMessageBox.AcceptRole)
-        box.addButton('以后再说', QMessageBox.RejectRole)
-        skip = box.addButton('跳过这个版本', QMessageBox.DestructiveRole)
-        box.setDefaultButton(go)
-        box.exec()
-        if box.clickedButton() is go:
-            QDesktopServices.openUrl(QUrl(rel['page']))
-        elif box.clickedButton() is skip:
+        self._app_rel = rel
+        self.update_hint.set_version(rel['version'])
+        self.update_hint.setVisible(True)
+
+    def show_update(self, rel=None):
+        """打开更新窗口（点侧边栏的小条，或者在「设置 → 关于」里检查到新版本后点「查看更新」）。"""
+        from . import update_ui
+        rel = rel or self._app_rel
+        if not rel:
+            return
+        if rel is not self._app_rel:
+            self._on_app_update(rel)
+        if self.settings_panel is not None and self.settings_panel.isVisible():
+            self.settings_panel.close_panel()
+        dlg = update_ui.UpdateDialog(self.centralWidget(), rel, (self.settings.proxy or '').strip())
+        res = dlg.exec()
+        if res == 'skip':
             self.settings.skip_app_version = rel['version']
             self._save_settings()
+            self._app_rel = None
+            self.update_hint.hide()
+        elif res == 'install':
+            self._install_update(dlg.installer, rel)
+
+    def _install_update(self, path, rel):
+        """安装包已经下载好、sha256 也核对过了：启动它，然后退出软件（安装程序要替换程序文件）。"""
+        from . import update_ui
+        active = [t for t in self.manager.tasks if t.status in (core.RUNNING, core.MERGING, core.QUEUED)]
+        pc = self._pan_counts()
+        n = len(active) + pc['running'] + pc['queued']
+        if n and not ui.confirm(self, f'还有 {n} 个任务没下完，现在安装新版本吗？',
+                                '安装时软件会退出，装好后自动重新打开。已下载的部分会保留：'
+                                '视频下次下载同一清晰度时自动续传，网盘文件重新打开后自动继续。\n'
+                                '选「稍后」的话，安装包留着，下次点「下载并安装」不用重新下载。',
+                                ok='现在安装', cancel='稍后'):
+            return
+        try:
+            update_ui.run_installer(path)
+        except Exception as e:  # noqa: BLE001
+            ui.alert(self, '安装程序没有启动', f'{e}\n\n可以到下载页手动下载安装包。')
+            return
+        self._append_log('info', f'开始安装新版本 {rel["version"]}，软件即将退出')
+        self._force_quit = True
+        self._quit()
 
     def _tray_message(self, title, text, icon=QSystemTrayIcon.Information):
         if self.tray:
@@ -3364,7 +3405,10 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         active = [t for t in self.manager.tasks if t.status in (core.RUNNING, core.MERGING, core.QUEUED)]
         pc = self._pan_counts()
         n_pan = pc['running'] + pc['queued']
-        if active or n_pan:
+        if (active or n_pan) and self._force_quit:
+            for t in active:
+                t._stop = 'pause'
+        elif active or n_pan:
             what = '重启' if self._restart_pending else '退出'
             if not ui.confirm(self, f'还有 {len(active) + n_pan} 个任务没下完，确定{what}吗？',
                               '已下载的部分会保留：视频下次下载同一清晰度时自动续传，网盘文件下次打开软件自动继续。',

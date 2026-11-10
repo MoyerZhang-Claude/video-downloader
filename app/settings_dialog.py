@@ -929,7 +929,8 @@ class SettingsPanel(ui.Overlay):
             self._row(lay, name, desc)
         self._section(lay, '软件更新')
         self.app_check_btn = _btn('检查更新', self._check_app)
-        self.app_update_row = self._row(lay, f'当前版本 {APP_VERSION}', '新版本发布在 GitHub；下载新的安装包装在原来的位置就是升级',
+        self.app_update_row = self._row(lay, f'当前版本 {APP_VERSION}', '新版本发布在 GitHub。用安装包装的可以在软件里直接下载并安装；'
+                                        '便携版下载新的压缩包解压覆盖。设置和历史记录都会保留',
                                         self.app_check_btn)
         self._row(lay, '启动时检查软件新版本', '有新版本时在侧边栏左下角提示，可以选择跳过某个版本', self._toggle('check_app_update'))
         self._section(lay, '数据')
@@ -950,15 +951,17 @@ class SettingsPanel(ui.Overlay):
     def _check_app(self):
         from . import app_update
         self._app_rel = getattr(self, '_app_rel', None)
-        if self._app_rel:           # 已经查到新版：按钮变成「去下载」
-            QDesktopServices.openUrl(QUrl(self._app_rel['page']))
+        if self._app_rel:           # 已经查到新版：按钮变成「查看更新」
+            self.win.show_update(self._app_rel)
             return
         self.app_check_btn.setEnabled(False)
         self.app_check_btn.setText('检查中…')
+        self.app_update_row.set_status('')
+        proxy = (self.s.proxy or '').strip()
 
         def work():
             try:
-                self._sig.app_done.emit(app_update.check('windows'), '')
+                self._sig.app_done.emit(app_update.check('windows', proxy=proxy), '')
             except Exception as e:  # noqa: BLE001
                 self._sig.app_done.emit(None, str(e))
         threading.Thread(target=work, daemon=True).start()
@@ -970,8 +973,9 @@ class SettingsPanel(ui.Overlay):
             self.app_update_row.set_status(f'检查失败：{error}（GitHub 在国内有时连不上，可以稍后再试或开代理）', error=True)
         elif rel:
             self._app_rel = rel
-            self.app_check_btn.setText('去下载')
+            self.app_check_btn.setText('查看更新')
             self.app_update_row.title.setText(f'有新版本 {rel["version"]}（当前 {APP_VERSION}）')
+            self.win.show_update(rel)
         else:
             self.app_check_btn.setText('检查更新')
             self.app_update_row.title.setText(f'当前版本 {APP_VERSION} · 已经是最新版')
