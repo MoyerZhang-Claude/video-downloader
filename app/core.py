@@ -1154,6 +1154,14 @@ class DownloadManager:
         if not os.path.isfile(ff):
             return
         fps = s.danmaku_fps if s.danmaku_fps in (60, 120) else 60
+        if fps > 60 and s.danmaku_4k_60:
+            # 4K 120 帧：软件编码非常慢，而且生成的是 H.264 Level 6，很多手机、电视的硬件解码器放不了
+            fmt = next((f for f in task.video.info.get('formats') or []
+                        if task.option.streams and f.get('format_id') == task.option.streams[0][0]), task.video.info)
+            if min(fmt.get('width') or 0, fmt.get('height') or 0) >= 2160:
+                fps = 60
+                self.log('info', f'[任务{task.id}] 4K 视频的弹幕版按 60 帧生成：4K 120 帧编码非常慢，生成的文件很多手机、电视也放不了'
+                                 '（想要 120 帧可以在 设置 → 字幕与弹幕 里关掉「4K 视频的弹幕版最高 60 帧」）')
         task.stage = f'弹幕版{fps}帧'
         self.on_update(task)
         last = [0.0]

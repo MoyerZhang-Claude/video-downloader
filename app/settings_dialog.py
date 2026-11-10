@@ -356,6 +356,8 @@ class SettingsPanel(ui.Overlay):
             self.win.setting_changed('danmaku_fps')
         fps.currentIndexChanged.connect(set_fps)
         self._row(lay, '弹幕版帧率', '', fps)
+        self._row(lay, '4K 视频的弹幕版最高 60 帧', '4K 120 帧要用软件逐帧编码，非常慢；生成的文件（H.264 Level 6）很多手机、电视也硬件解码不了。'
+                  '关闭后 4K 视频也按上面选的帧率生成', self._toggle('danmaku_4k_60'))
         self._row(lay, '生成弹幕版后保留原视频', '默认只留流畅的弹幕版，省空间；打开后同时保留原视频和外挂弹幕文件',
                   self._toggle('keep_original'))
         self._section(lay, '字幕')

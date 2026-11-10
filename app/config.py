@@ -151,6 +151,7 @@ class Settings:
     save_danmaku: bool = True     # B站弹幕转 ASS
     burn_danmaku: bool = True     # 另外生成弹幕画进视频的高帧率「弹幕版」，任何播放器都流畅
     danmaku_fps: int = 60
+    danmaku_4k_60: bool = True    # 4K 及以上的视频，弹幕版最高 60 帧（4K 120 帧软件编码极慢，很多设备硬件解码不了）
     keep_original: bool = False   # 生成弹幕版后是否保留原视频和外挂弹幕
     close_to_tray: bool = True    # 关闭窗口时缩小到托盘，下载继续
     tray_hint_shown: bool = False

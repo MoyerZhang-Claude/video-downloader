@@ -207,8 +207,28 @@ import shutil        # noqa: E402
 import subprocess    # noqa: E402
 import tempfile      # noqa: E402
 import threading     # noqa: E402
+import time          # noqa: E402
 
 _NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+# 生成弹幕版要把整个视频重新编码一遍，会把 CPU 占满：ffmpeg 用「低于正常」的优先级跑，
+# 这样电脑上别的程序和软件自己的界面不会跟着变卡（空闲的 CPU 它照样全用上，速度基本不受影响）
+_LOW_PRIORITY = getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0)
+_TMP_PREFIX = 'danmaku_tmp_'
+
+
+def _work_dir(out_path):
+    """临时文件夹放在输出目录里，不放 %TEMP%：4K 弹幕版的临时文件可能有几 GB，C 盘空间不够会失败；
+    放在同一个盘上，最后改名也是瞬间完成。输出目录里建不了（没有权限）时退回系统临时目录。
+    顺便清掉以前留下的（软件在生成过程中被强行结束时来不及删）。"""
+    folder = os.path.dirname(os.path.abspath(out_path))
+    try:
+        for name in os.listdir(folder):
+            old = os.path.join(folder, name)
+            if name.startswith(_TMP_PREFIX) and os.path.isdir(old) and time.time() - os.path.getmtime(old) > 6 * 3600:
+                shutil.rmtree(old, ignore_errors=True)
+        return tempfile.mkdtemp(prefix=_TMP_PREFIX, dir=folder)
+    except OSError:
+        return tempfile.mkdtemp(prefix=_TMP_PREFIX)
 # 实测 x264 比 Intel 硬件编码更快、文件更小，且任何电脑都可用。
 # 满屏滚动文字很费码率：不限的话 60 帧版本会是原视频的 10 倍大，这里按原码率的 3.5 倍封顶，文字依然清晰。
 
@@ -239,7 +259,7 @@ def _has_cover(ffprobe, video):
 
 def burn(ffmpeg, video, ass_file, out_path, fps=60, duration=None, on_progress=None, should_stop=None):
     """把 ASS 弹幕按 fps 帧率画进视频；被取消时抛 InterruptedError。"""
-    work = tempfile.mkdtemp(prefix='danmaku_')
+    work = _work_dir(out_path)
     try:
         # ass 滤镜对路径里的盘符冒号、方括号等很敏感：复制成简单文件名，并在临时目录里运行
         shutil.copyfile(ass_file, os.path.join(work, 'dm.ass'))
@@ -253,7 +273,7 @@ def burn(ffmpeg, video, ass_file, out_path, fps=60, duration=None, on_progress=N
                *_encoder_args(os.path.join(os.path.dirname(ffmpeg), 'ffprobe.exe'), os.path.abspath(video), fps),
                '-c:a', 'copy', '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', tmp_out]
         proc = subprocess.Popen(cmd, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                creationflags=_NO_WINDOW, text=True, encoding='utf-8', errors='replace')
+                                creationflags=_NO_WINDOW | _LOW_PRIORITY, text=True, encoding='utf-8', errors='replace')
         err_lines = []
         threading.Thread(target=lambda: err_lines.extend(proc.stderr), daemon=True).start()
         for line in proc.stdout:
