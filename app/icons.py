@@ -195,13 +195,34 @@ def _split(color):
     return col.name(), col.alphaF()
 
 
+_paint_cache = {}       # (图标, 颜色, 线宽, 像素宽, 像素高) -> QPixmap
+
+
 def paint(painter, name, rect, color, width=1.75):
-    """直接画到 painter 上（自绘控件用）。"""
+    """直接画到 painter 上（自绘控件用）。
+    矢量图标每次重新渲染很慢（滚动时所有可见的条目每一帧都要重画），这里按屏幕缩放比例渲染成位图缓存起来，
+    之后只是贴图。"""
+    rect = QRectF(rect)
+    dev = painter.device()
+    dpr = dev.devicePixelRatioF() if dev is not None else 1.0
+    w, h = max(1, round(rect.width() * dpr)), max(1, round(rect.height() * dpr))
     cname, alpha = _split(color)
+    key = (name, cname, width, w, h)
+    pm = _paint_cache.get(key)
+    if pm is None:
+        if len(_paint_cache) > 1500:        # 换了很多次主题 / 缩放：清掉重来
+            _paint_cache.clear()
+        pm = QPixmap(w, h)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        _renderer(name, cname, width).render(p, QRectF(0, 0, w, h))
+        p.end()
+        _paint_cache[key] = pm
     if alpha < 1:
         painter.save()
         painter.setOpacity(painter.opacity() * alpha)
-    _renderer(name, cname, width).render(painter, QRectF(rect))
+    painter.drawPixmap(rect, pm, QRectF(0, 0, w, h))
     if alpha < 1:
         painter.restore()
 

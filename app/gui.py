@@ -8,17 +8,18 @@ import threading
 import time
 import traceback
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 
 import shiboken6
-from PySide6.QtCore import QByteArray, QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal, QObject
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal, QObject
 from PySide6.QtGui import (
     QAction, QActionGroup, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon, QKeySequence, QPainter,
     QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
 from . import (
@@ -175,7 +176,8 @@ def centered(inner, max_w=COLUMN, margins=(24, 0, 24, 0)):
 
 
 def scroll_area(content):
-    sa = QScrollArea()
+    """带平滑滚动和细滚动条的滚动区（侧边栏、解析结果、历史、下载页、设置面板都用它）。"""
+    sa = ui.SmoothScrollArea()
     sa.setWidgetResizable(True)
     sa.setFrameShape(QFrame.NoFrame)
     sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -183,6 +185,40 @@ def scroll_area(content):
     sa.setWidget(content)
     sa.verticalScrollBar().setSingleStep(24)
     return sa
+
+
+def sync_layout(lay, desired):
+    """增量更新一个纵向列表，只增删改变化的条目（不是整个删掉重建，所以不闪、滚动位置不动）。
+    desired：[(键, 签名, 创建函数() -> 控件, 更新函数(控件) 或 None)]，按显示顺序。
+    键相同、签名也相同的控件原样保留；签名变了的调用更新函数（没有就重新创建）。"""
+    items = getattr(lay, '_vd_items', None)
+    if items is None:
+        items = lay._vd_items = {}
+    keys = {d[0] for d in desired}
+
+    def drop(w):
+        lay.removeWidget(w)
+        w.hide()               # 立刻从界面上拿掉（deleteLater 要等事件循环，期间会和新内容叠在一起）
+        w.setParent(None)
+        w.deleteLater()
+
+    for key in [k for k in items if k not in keys]:
+        drop(items.pop(key)[0])
+    for i, (key, sig, make, update) in enumerate(desired):
+        cur = items.get(key)
+        if cur is None:
+            w = make()
+            lay.insertWidget(i, w)
+        else:
+            w, old = cur
+            if old != sig and (update is None or update(w) is False):
+                drop(w)
+                w = make()
+                lay.insertWidget(i, w)
+            elif lay.indexOf(w) != i:
+                lay.removeWidget(w)
+                lay.insertWidget(i, w)
+        items[key] = (w, sig)
 
 
 class Bridge(QObject):
@@ -198,6 +234,7 @@ class Bridge(QObject):
     core_ready = Signal(str)             # 新内核已经下载好，重启后生效
     core_retry = Signal(str)             # 「更新内核后重试」下载完成（参数是错误信息，空 = 成功）
     parse_status = Signal(int, str)      # 解析前的准备工作（如下载 YouTube 组件）显示在卡片上
+    ui_call = Signal(object)             # 后台线程干完活，把一个函数交回界面线程执行
     app_update = Signal(object)
 
 
@@ -218,6 +255,8 @@ class ResultRow:
         self.status_text = ''        # 解析前的准备工作（如「正在准备 YouTube 组件」）
         self.status_label = None
         self.outdated = False        # 报错像是解析内核过期了
+        self.hist = []               # 这个视频下载过的记录（后台查好的，「已下载」标记和「全部下载」用）
+        self.pending_render = True   # 卡片内容还在排队等着画（一次加入很多链接时分批画）
         self.auto_download = False   # 从选集加入：解析完自动下载
         self.from_collection = False
 
@@ -258,6 +297,7 @@ class TaskView(Card):
         super().__init__(radius=14, fill=None if compact else 'surface', border=None if compact else 'border')
         self.win, self.task, self.compact = win, task, compact
         self.state = None
+        self._seen = {}             # 上次显示的内容：没变的部分刷新时不碰
         self.b1 = IconButton('pause', '暂停', size=30, icon_size=17)
         self.b2 = IconButton('x', '取消', size=30, icon_size=17)
         self.b3 = IconButton('folder', '打开所在文件夹', size=30, icon_size=17)
@@ -341,12 +381,24 @@ class TaskView(Card):
         if self.task.status in (core.DONE, core.EXISTS):
             self.win._open_file(self.task)
 
-    def refresh(self):
+    def refresh(self, force=False):
+        """按任务当前的状态更新显示。下载时每个任务每秒要刷新好几次，所以只改真正变了的部分：
+        文字、图标、提示没变就不重设；状态颜色用样式类（st_ok、st_err…），只在状态变化时换一次，
+        不在每次进度更新时调用 setStyleSheet（那会触发样式重新计算，十来个任务同时下载时界面明显发涩）。
+        force：换主题后全部重设一遍。"""
         task = self.task
         s = task.status
-        if self.name is not None and task.filepath:
+        seen = self._seen
+
+        def changed(key, value):
+            if force or seen.get(key, seen) != value:
+                seen[key] = value
+                return True
+            return False
+
+        if self.name is not None and task.filepath and changed('path', task.filepath):
             self.name.set_full_text(os.path.basename(task.filepath), task.filepath)
-        if self.compact:
+        if self.compact and force:
             self._icon.setPixmap(icons.pixmap('download', c('text3'), 15))
         state = PROGRESS_STATE.get(s, 'running')
         role = {'done': 'ok', 'failed': 'err', 'paused': 'text4', 'merging': 'info'}.get(state, 'brand')
@@ -372,7 +424,9 @@ class TaskView(Card):
         cloud_text, _ = task_cloud_text(self.win, task)
         if cloud_text:
             parts.append(cloud_text)
-        self.detail.set_full_text('  ·  '.join(parts), task.error_raw or None)
+        detail = '  ·  '.join(parts)
+        if changed('detail', (detail, task.error_raw)):
+            self.detail.set_full_text(detail, task.error_raw or None)
 
         status = core.STATUS_TEXT.get(s, s)
         if s == core.RUNNING:
@@ -381,20 +435,31 @@ class TaskView(Card):
             status = f'{task.stage}…'
         if s == core.FAILED and task.error:
             status = f'失败：{task.error}'
-        self.status.setText(status)
-        self.status.setToolTip(task.error_raw or task.error or status)
-        self.status.setStyleSheet(f'color: {c(theme.STATUS_ROLE.get(s, "text2")).name()};')
-        self.status.setMaximumWidth(460 if s == core.FAILED else 16777215)
+        if changed('status', status):
+            self.status.setText(status)
+        tip = task.error_raw or task.error or status
+        if changed('tip', tip):
+            self.status.setToolTip(tip)
+        if changed('role', theme.STATUS_ROLE.get(s, 'text2')):
+            restyle(self.status, 'st_' + seen['role'])
+        if changed('wide', s == core.FAILED):
+            self.status.setMaximumWidth(460 if s == core.FAILED else 16777215)
 
+        done = s in (core.DONE, core.EXISTS)
         b1 = {core.QUEUED: ('pause', '暂停'), core.RUNNING: ('pause', '暂停'), core.PAUSED: ('play', '继续'),
               core.FAILED: ('refresh', '重试'), core.CANCELED: ('refresh', '重试'),
               core.DONE: ('play_circle', '打开文件'), core.EXISTS: ('play_circle', '打开文件')}.get(s, ('pause', '暂停'))
-        self.b1.set_icon(*b1)
-        self.b1.color_role = 'ok' if s in (core.DONE, core.EXISTS) else None
-        self.b1.setEnabled(s != core.MERGING)
+        if changed('b1', (b1, done)):
+            self.b1.color_role = 'ok' if done else None
+            self.b1.set_icon(*b1)
+        if changed('b1_on', s != core.MERGING):
+            self.b1.setEnabled(s != core.MERGING)
         finished = s in (core.DONE, core.EXISTS, core.CANCELED, core.FAILED)
-        self.b2.set_icon('trash' if finished else 'x', '从列表移除' if finished else '取消')
-        self.b2.setEnabled(s != core.MERGING or task.stage.startswith('弹幕版'))   # 生成弹幕版时可以取消
+        if changed('b2', finished):
+            self.b2.set_icon('trash' if finished else 'x', '从列表移除' if finished else '取消')
+        b2_on = s != core.MERGING or task.stage.startswith('弹幕版')      # 生成弹幕版时可以取消
+        if changed('b2_on', b2_on):
+            self.b2.setEnabled(b2_on)
 
 
 class HistoryRow(QWidget):
@@ -405,7 +470,8 @@ class HistoryRow(QWidget):
         self.win, self.h = win, h
         self.setAttribute(Qt.WA_Hover)
         self.setFixedHeight(62)
-        exists = bool(h['filepath']) and os.path.exists(h['filepath'])
+        # 文件还在不在：历史页是后台线程查好放在 h['exists'] 里的（下载目录在机械盘 / 移动硬盘 / 网络位置时查起来慢）
+        exists = h['exists'] if 'exists' in h else (bool(h['filepath']) and os.path.exists(h['filepath']))
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 8, 10, 8)
         lay.setSpacing(12)
@@ -629,6 +695,12 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self._prev_status = {}           # task.id -> 上一次的状态（判断「刚完成」）
         self._batch_done = 0             # 本轮完成数，全部完成时提示
         self._hist_limit = 150
+        self._hist_gen = 0               # 历史页 / 侧边栏的数据在后台查：只用最后一次查询的结果
+        self._side_gen = 0
+        self._io = ThreadPoolExecutor(max_workers=1, thread_name_prefix='ui-io')    # 查数据库、看文件在不在
+        self._stale_views = set()        # 页面不可见时跳过刷新的任务：切回来时补一次
+        self._render_queue = []          # 等着画内容的解析卡片（一次加入很多链接时分批画）
+        self._greet_checked = 0.0
         self.page = 'parse'
         self.fresh = False               # 点了「解析新链接」：显示首页，之前的结果暂时收起
         self.settings_panel = None
@@ -654,6 +726,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self.bridge.core_ready.connect(self._on_core_ready)
         self.bridge.core_retry.connect(self._on_core_retry)
         self.bridge.parse_status.connect(self._on_parse_status)
+        self.bridge.ui_call.connect(lambda fn: fn())
         runtime_update.log = self.bridge.log.emit
         self.bridge.app_update.connect(self._on_app_update)
 
@@ -663,6 +736,12 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self._cloud_init()
         self._parse_timer = QTimer(self, singleShot=True, interval=400)     # 一次解析很多链接时合并刷新
         self._parse_timer.timeout.connect(self._after_history_change)
+        self._side_timer = QTimer(self, singleShot=True)                    # 侧边栏刷新：短时间内的多次合并成一次
+        self._side_timer.timeout.connect(self._load_sidebar)
+        self._render_timer = QTimer(self, singleShot=True)
+        self._render_timer.timeout.connect(self._render_batch)
+        self._res_label_timer = QTimer(self, singleShot=True)
+        self._res_label_timer.timeout.connect(self._do_update_res_label)
         self._build_ui()
         theme.signals.changed.connect(self._on_theme_changed)
         if self.settings.window_geometry:
@@ -773,7 +852,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         # 分区 + 最近下载（一起滚动）
         side = clear_widget()
         sl = QVBoxLayout(side)
-        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setContentsMargins(0, 0, 6, 0)      # 右边留一点：滚动条是浮在内容上的细条，别压住条目右边的数字
         sl.setSpacing(1)
         extra = self.settings.extra
         self.sec_headers, self.sec_boxes = {}, {}
@@ -811,6 +890,19 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self._update_account()
         return sb
 
+    def _bg(self, work, done=None, what=''):
+        """work() 放到后台线程里跑（查数据库、看文件还在不在、写历史——这些碰到慢盘会卡住界面），
+        跑完把结果交回界面线程：done(结果)。后台只有一条线程，先来的先做。"""
+        def run():
+            try:
+                res = work()
+            except Exception as e:  # noqa: BLE001
+                log.warning('%s失败: %s', what or '后台任务', e)
+                return
+            if done is not None:
+                self.bridge.ui_call.emit(lambda: done(res))
+        self._io.submit(run)
+
     def _set_collapsed(self, on, save=False):
         self.settings.sidebar_collapsed = on
         self.sidebar.setFixedWidth(60 if on else 260)
@@ -834,6 +926,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             n.setChecked(key == page)
         if page == 'history':
             self._refresh_history()
+        self._flush_stale()
         self._place_toast()
 
     def _new_parse(self):
@@ -877,65 +970,125 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self.cloud_watch_record(h['id'], n, n.set_badge)       # 上传到谷歌云盘时显示进度
         return n
 
-    def _refresh_sidebar(self):
-        """侧边栏的「分区」和「最近下载」（像 Claude 侧边栏的项目和最近对话）。"""
-        for box in self.sec_boxes.values():
-            self._clear_layout(box)
-        self._clear_layout(self.recent_box)
+    def _refresh_sidebar(self, delay=0):
+        """刷新侧边栏的「分区」和「最近下载」（像 Claude 侧边栏的项目和最近对话）。
+        delay 毫秒后才真正去查，期间再来的刷新合并成一次：一批任务同时完成时只刷新一次，不会闪。"""
+        left = self._side_timer.remainingTime() if self._side_timer.isActive() else None
+        if left is None or delay < left:
+            self._side_timer.start(delay)
+
+    def _load_sidebar(self):
+        """数据库在后台线程里查，查完交给 _apply_sidebar 增量更新。"""
         if not self.history:
             return
-        secs = self.history.sections()
+        self._side_gen += 1
+        gen = self._side_gen
+        opened = {kind: head.open for kind, head in self.sec_headers.items()}
+        expanded = set(self.expanded_sections)
+        recents_open = self.recent_header.open
+        h = self.history
+
+        def work():
+            secs = h.sections()
+            trees = {}
+            for sec in secs:
+                if sec['id'] in expanded and opened.get(sec['kind']):
+                    trees[sec['id']] = (h.recent('', limit=5, section=sec['id']) if sec['kind'] == VIDEO
+                                        else h.parses('', limit=8, section=sec['id']))
+            recents = h.recent('', limit=16, kind=VIDEO) if recents_open else []
+            more = recents_open and h.count(kind=VIDEO) > len(recents)
+            return secs, trees, recents, more
+
+        def done(res):
+            if gen == self._side_gen:          # 后面又触发了新的刷新：这次的结果已经过时
+                self._apply_sidebar(*res, opened, recents_open)
+        self._bg(work, done, '读取侧边栏')
+
+    def _apply_sidebar(self, secs, trees, recents, more, opened, recents_open):
+        """只增删改变化的条目（见 sync_layout），滚动位置保持不动。"""
         self.sections = {s['id']: s for s in secs}
-        for s in secs:
-            if not self.sec_headers[s['kind']].open:
-                continue
-            unit = '个下载好的视频' if s['kind'] == VIDEO else '个网盘分享（点开后点一下就重新解析）'
-            n = NavItem(s['name'], s['icon'], height=34, font_px=14)
-            n.setCheckable(False)
-            n.set_trailing(str(s['count']) if s['count'] else '')
-            n.setToolTip(f'{s["name"]}：{s["count"]} {unit}\n点击展开 / 收起，右键可以' +
-                         ('改名' if s['builtin'] else '编辑或删除'))
-            n.clicked.connect(lambda _=False, sid=s['id']: self._toggle_section(sid))
-            n.setContextMenuPolicy(Qt.CustomContextMenu)
-            n.customContextMenuRequested.connect(lambda pos, sec=s, w=n: self._section_menu(sec, w.mapToGlobal(pos)))
-            self.sec_boxes[s['kind']].addWidget(n)
-            if s['id'] in self.expanded_sections:
-                tree = ui.TreeBox()
-                tv = QVBoxLayout(tree)
-                tv.setContentsMargins(30, 0, 0, 4)
-                tv.setSpacing(0)
-                if s['kind'] == VIDEO:
-                    for h in self.history.recent('', limit=5, section=s['id']):
-                        tv.addWidget(self._record_row(h, 30))
-                else:
-                    for rec in self.history.parses('', limit=8, section=s['id']):
-                        tv.addWidget(self._parse_side_row(rec, 30))
-                more = NavItem(f'查看全部（{s["count"]}）' if s['count'] else
-                               ('还没有视频，右键视频可以移进来' if s['kind'] == VIDEO else '解析过的网盘分享会放进来'),
-                               height=30, font_px=13)
-                more.setCheckable(False)
-                more.muted = True
-                if not s['count']:
-                    more.setToolTip('在历史记录、最近下载或解析结果里右键视频，选「移至分区」，就会放进这个分区'
-                                    if s['kind'] == VIDEO else
-                                    '网盘分享解析后会自动放进对应网盘的分区；也可以在历史记录里右键一条记录，选「移至分区」')
-                more.clicked.connect(lambda _=False, sid=s['id']: self._show_section(sid))
-                tv.addWidget(more)
-                self.sec_boxes[s['kind']].addWidget(tree)
-        if self.recent_header.open:
-            recs = self.history.recent('', limit=16, kind=VIDEO)
-            for h in recs:
-                self.recent_box.addWidget(self._record_row(h))
-            if not recs:
-                empty = label('下载好的视频会出现在这里', 'meta')
-                empty.setContentsMargins(10, 4, 0, 0)
-                self.recent_box.addWidget(empty)
-            elif self.history.count(kind=VIDEO) > len(recs):
-                more = NavItem('查看全部下载好的视频', height=30, font_px=13)
-                more.setCheckable(False)
-                more.muted = True
-                more.clicked.connect(self._show_downloads)
-                self.recent_box.addWidget(more)
+        vbar = self.recent_scroll.verticalScrollBar()
+        pos = vbar.value()
+        for kind, box in self.sec_boxes.items():
+            desired = []
+            for sec in secs:
+                if sec['kind'] != kind or not opened.get(kind):
+                    continue
+                desired.append((('sec', sec['id']), (sec['name'], sec['icon'], sec['count'], sec['builtin']),
+                                lambda sec=sec: self._section_item(sec), None))
+                if sec['id'] in trees:
+                    kids = self._tree_items(sec, trees[sec['id']])
+                    desired.append((('tree', sec['id']), tuple((k, sig) for k, sig, _make, _upd in kids),
+                                    lambda kids=kids: self._tree_box(kids),
+                                    lambda w, kids=kids: sync_layout(w.layout(), kids)))
+            sync_layout(box, desired)
+        desired = [(('rec', h['id']), self._rec_sig(h), lambda h=h: self._record_row(h), None) for h in recents]
+        if recents_open and not recents:
+            desired.append((('empty',), 0, self._recent_empty, None))
+        elif more:
+            desired.append((('more',), 0, self._recent_more, None))
+        sync_layout(self.recent_box, desired)
+        if vbar.value() != pos:
+            QTimer.singleShot(0, lambda: vbar.setValue(min(pos, vbar.maximum())))
+
+    @staticmethod
+    def _rec_sig(h):
+        return (h['title'], h['quality'], h['filepath'], h.get('section_id'))
+
+    def _section_item(self, s):
+        unit = '个下载好的视频' if s['kind'] == VIDEO else '个网盘分享（点开后点一下就重新解析）'
+        n = NavItem(s['name'], s['icon'], height=34, font_px=14)
+        n.setCheckable(False)
+        n.set_trailing(str(s['count']) if s['count'] else '')
+        n.setToolTip(f'{s["name"]}：{s["count"]} {unit}\n点击展开 / 收起，右键可以' +
+                     ('改名' if s['builtin'] else '编辑或删除'))
+        n.clicked.connect(lambda _=False, sid=s['id']: self._toggle_section(sid))
+        n.setContextMenuPolicy(Qt.CustomContextMenu)
+        n.customContextMenuRequested.connect(lambda pos, sec=s, w=n: self._section_menu(sec, w.mapToGlobal(pos)))
+        return n
+
+    def _tree_items(self, s, recs):
+        """展开的分区里的条目（最近几条 + 「查看全部」），格式同 sync_layout 的 desired。"""
+        if s['kind'] == VIDEO:
+            kids = [(('rec', h['id']), self._rec_sig(h), lambda h=h: self._record_row(h, 30), None) for h in recs]
+        else:
+            kids = [(('parse', r['id']), (r['title'], r['url']), lambda r=r: self._parse_side_row(r, 30), None)
+                    for r in recs]
+        kids.append((('more',), (s['count'],), lambda s=s: self._section_more(s), None))
+        return kids
+
+    def _tree_box(self, kids):
+        tree = ui.TreeBox()
+        tv = QVBoxLayout(tree)
+        tv.setContentsMargins(30, 0, 0, 4)
+        tv.setSpacing(0)
+        sync_layout(tv, kids)
+        return tree
+
+    def _section_more(self, s):
+        more = NavItem(f'查看全部（{s["count"]}）' if s['count'] else
+                       ('还没有视频，右键视频可以移进来' if s['kind'] == VIDEO else '解析过的网盘分享会放进来'),
+                       height=30, font_px=13)
+        more.setCheckable(False)
+        more.muted = True
+        if not s['count']:
+            more.setToolTip('在历史记录、最近下载或解析结果里右键视频，选「移至分区」，就会放进这个分区'
+                            if s['kind'] == VIDEO else
+                            '网盘分享解析后会自动放进对应网盘的分区；也可以在历史记录里右键一条记录，选「移至分区」')
+        more.clicked.connect(lambda _=False, sid=s['id']: self._show_section(sid))
+        return more
+
+    def _recent_empty(self):
+        empty = label('下载好的视频会出现在这里', 'meta')
+        empty.setContentsMargins(10, 4, 0, 0)
+        return empty
+
+    def _recent_more(self):
+        more = NavItem('查看全部下载好的视频', height=30, font_px=13)
+        more.setCheckable(False)
+        more.muted = True
+        more.clicked.connect(self._show_downloads)
+        return more
 
     def _parse_side_row(self, rec, height=32):
         """侧边栏里的一条解析记录（网盘分区）：点一下重新解析。"""
@@ -1069,6 +1222,8 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         if not dlg.exec():
             return
         sid = self.history.create_section(dlg.name, dlg.icon, kind)
+        self.sections[sid] = {'id': sid, 'name': dlg.name, 'icon': dlg.icon, 'platform': None, 'builtin': 0,
+                              'count': 0, 'kind': kind}      # 侧边栏是后台刷新的：先记上，马上就能用
         if move:
             self.history.move([move['id']], sid)
         if move_parse:
@@ -1579,8 +1734,20 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         super().resizeEvent(e)
         self._place_toast()
 
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == QEvent.WindowStateChange and not self.isMinimized():
+            QTimer.singleShot(0, self._on_shown_again)
+
+    def _on_shown_again(self):
+        """从托盘 / 最小化回来：补上看不见时跳过的刷新，状态栏的定时器恢复正常频率。"""
+        self._flush_stale()
+        self._refresh_status()
+
     def showEvent(self, e):
         super().showEvent(e)
+        if getattr(self, '_shown_once', False):
+            QTimer.singleShot(0, self._on_shown_again)
         if not getattr(self, '_shown_once', False):
             self._shown_once = True
             ui.style_window(self, 'bg')
@@ -1611,7 +1778,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self.clip_icon.setPixmap(icons.pixmap('clipboard', c('text3'), 16))
         for tv in list(self.task_views.values()) + list(self.task_lines.values()):
             if shiboken6.isValid(tv):
-                tv.refresh()
+                tv.refresh(force=True)
         if self.page == 'history':
             self._refresh_history()
         for w in QApplication.allWidgets():
@@ -1719,9 +1886,27 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             if i >= 0:
                 idx = i + 1
         self.res_list.insertWidget(idx, row.card)
-        self._render_result(row)
+        row.card.setMinimumHeight(128)          # 内容还没画出来：先按大致的高度占好位置
+        self._render_queue.append(token)
+        if not self._render_timer.isActive():
+            self._render_timer.start(0)
         self._update_res_label()
         return token
+
+    def _render_batch(self):
+        """一次加入很多链接（从合集里选几百个视频）时，卡片内容分批画：每轮最多 20 张，界面不会卡住一大下。"""
+        n = 0
+        while self._render_queue and n < 20:
+            row = self.rows.get(self._render_queue.pop(0))
+            if row is None or not row.pending_render:
+                continue
+            row.pending_render = False
+            if shiboken6.isValid(row.card):
+                row.card.setMinimumHeight(0)
+                self._render_result(row)
+            n += 1
+        if self._render_queue:
+            self._render_timer.start(0)
 
     def _start_parse(self, token):
         row = self.rows[token]
@@ -1830,6 +2015,8 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self._choose_episodes(col)
 
     def _render_result(self, row):
+        if row.pending_render:          # 还在排队：轮到它时按那时候的状态画
+            return
         token = row.token
         body = clear_widget()
         h = QHBoxLayout(body)
@@ -1850,6 +2037,8 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             pm = self.thumbs.get(row.cover_url)
             if pm:
                 cover.set_pixmap(pm)
+            elif row.cover_url:             # 缩略图缓存有上限，被挤掉的重新要一次（原图在磁盘上，不用再下载）
+                self.thumbs.request(row.cover_url, v.info.get('webpage_url') or row.url)
             title = ElidedLabel(v.title, 'cardTitle')
             title.set_full_text(v.title, f'{v.title}\n{row.url}')
             col.addWidget(title)
@@ -1993,10 +2182,18 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
     def _clear_results(self):
         for token in list(self.rows):
             self._remove_result(token)
+        self._render_queue.clear()
         self._pan_clear_cards()
+        # 不再显示的封面缩略图马上释放（下载页里的任务还在用的留着）
+        self.thumbs.release(tv.cover_url for tv in self.task_views.values() if shiboken6.isValid(tv))
         self._update_res_label()
 
     def _update_res_label(self):
+        """更新「x / y 个视频」和首页 / 结果页的切换。一批解析结果一个个回来时合并成一次。"""
+        if not self._res_label_timer.isActive():
+            self._res_label_timer.start(0)
+
+    def _do_update_res_label(self):
         total = len(self.rows)
         ok = sum(1 for r in self.rows.values() if r.state == 'ok')
         busy = sum(1 for r in self.rows.values() if r.state == 'parsing')
@@ -2028,7 +2225,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         row = self.rows.get(token)
         if not row or not row.video:
             return
-        data = self.thumbs.raw.get(row.cover_url)
+        data = self.thumbs.raw_data(row.cover_url)
         if not data:
             return
         dlg = CoverDialog(data, row.video.title, self.settings.download_dir, self)
@@ -2040,7 +2237,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         if not row or not row.cover_url:
             return
         url = row.cover_url
-        if url in self.thumbs.raw:
+        if self.thumbs.has_raw(url):
             self._write_cover(url, row.video.title, self.settings.download_dir)
         elif url in self.thumbs.failed:
             self.notify('封面加载失败，无法保存', 'error')
@@ -2050,7 +2247,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             self.notify('正在获取封面…')
 
     def _write_cover(self, url, title, out_dir):
-        data = self.thumbs.raw.get(url)
+        data = self.thumbs.raw_data(url)
         if not data:
             self.notify('封面加载失败，无法保存', 'error')
             return
@@ -2111,7 +2308,9 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
                     self.notify('这个视频的该清晰度已经在下载列表里了')
                 return False
         overwrite = False
-        done_before = [h for h in self._history_of(row.video) if h['quality'] == option.tag and h['exists']]
+        # 「全部下载」时用后台查好的记录（几百张卡片逐个查数据库、看文件在不在会卡住界面）；单独点「下载」时现查
+        hist = row.hist if quiet else self._history_of(row.video)
+        done_before = [h for h in hist if h['quality'] == option.tag and h['exists']]
         if done_before:
             if quiet:
                 return False
@@ -2183,7 +2382,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             if self._download_row(token, quiet=True):
                 n += 1
             elif row.state == 'ok' and row.combo is not None and row.combo.currentData() is not None and any(
-                    h['quality'] == row.combo.currentData().tag and h['exists'] for h in self._history_of(row.video)):
+                    h['quality'] == row.combo.currentData().tag and h['exists'] for h in row.hist):
                 skipped += 1
         # 网盘分享：还没下载过、不需要先登录的，按卡片里勾选的文件下载
         for card in list(self.pan_cards.values()):
@@ -2219,13 +2418,30 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         if prev != s:
             self._prev_status[task.id] = s
             self._on_status_changed(task, prev)
-        for views in (self.task_views, self.task_lines):
+        # 看不见的不刷新（下载页的卡片只在「下载」页可见，卡片里的进度条只在解析结果页可见）：切回来时补一次
+        shown = self.isVisible() and not self.isMinimized()
+        for views, page in ((self.task_views, 'tasks'), (self.task_lines, 'parse')):
             v = views.get(task.id)
             if v is not None:
-                if shiboken6.isValid(v):
+                if not shiboken6.isValid(v):
+                    views.pop(task.id, None)
+                elif shown and self.page == page:
                     v.refresh()
                 else:
-                    views.pop(task.id, None)
+                    self._stale_views.add((page, task.id))
+
+    def _flush_stale(self):
+        """把刚才因为看不见而跳过的刷新补上（切到这一页、窗口重新显示时调用）。"""
+        if not self._stale_views or not self.isVisible() or self.isMinimized():
+            return
+        views = {'tasks': self.task_views, 'parse': self.task_lines}.get(self.page)
+        if views is None:
+            return
+        for key in [k for k in self._stale_views if k[0] == self.page]:
+            self._stale_views.discard(key)
+            v = views.get(key[1])
+            if v is not None and shiboken6.isValid(v):
+                v.refresh()
 
     def _task_primary(self, task):
         s = task.status
@@ -2320,10 +2536,21 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             return []
 
     def _update_badge(self, row):
+        """「已下载」标记：下载记录和文件还在不在放到后台线程去查（下载目录在慢盘上时不卡界面），查完再显示。"""
+        if row.video is None or not self.history:
+            return
+        video, token = row.video, row.token
+        self._bg(lambda: self._history_of(video), lambda recs: self._show_badge(token, recs), '查询下载记录')
+
+    def _show_badge(self, token, recs):
+        row = self.rows.get(token)
+        if row is None:
+            return
+        row.hist = recs
         badge = row.badge
         if badge is None or not shiboken6.isValid(badge):
             return
-        recs = [h for h in self._history_of(row.video) if h['exists']]
+        recs = [h for h in recs if h['exists']]
         if not recs:
             badge.hide()
             return
@@ -2338,16 +2565,8 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         s = task.status
         if s in (core.DONE, core.EXISTS) and prev not in (core.DONE, core.EXISTS):
             if self.history and task.filepath:
-                try:
-                    self.history.add(task)
-                except Exception as e:  # noqa: BLE001
-                    log.warning('写入下载历史失败: %s', e)
-                key_rows = [r for r in self.rows.values() if r.video and r.video.info.get('id') == task.video.info.get('id')]
-                for r in key_rows:
-                    self._update_badge(r)
-                self._refresh_sidebar()
-                if self.page == 'history':
-                    self._refresh_history()
+                # 写历史（要读文件大小、写数据库）放到后台，写完再更新「已下载」标记、侧边栏和历史页
+                self._bg(lambda: self.history.add(task), lambda _r: self._download_recorded(task), '写入下载历史')
             if getattr(task, 'cloud', False) and self.cloud_ready:
                 self.cloud_upload_task(task)
             if s == core.DONE:
@@ -2359,6 +2578,15 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
                 self._tray_message('下载失败', f'{task.video.title}\n{task.error}', QSystemTrayIcon.Warning)
         if s in (core.DONE, core.EXISTS, core.FAILED, core.CANCELED, core.PAUSED):
             self._check_all_done()
+
+    def _download_recorded(self, task):
+        key = video_key(task.video.info)
+        for r in self.rows.values():
+            if r.video and video_key(r.video.info) == key:
+                self._update_badge(r)
+        self._refresh_sidebar(300)          # 一批任务同时完成：合并成一次刷新
+        if self.page == 'history':
+            self._refresh_history()
 
     def _check_all_done(self):
         if any(t.status in (core.QUEUED, core.RUNNING, core.MERGING) for t in self.manager.tasks):
@@ -2381,9 +2609,42 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             self._open_dir()
 
     def _refresh_history(self, reset=False):
-        """历史记录页：解析记录（全部 / 视频 / 网盘 / 某个网盘分区），或者下载好的视频（全部 / 某个视频分区）。"""
+        """历史记录页：解析记录（全部 / 视频 / 网盘 / 某个网盘分区），或者下载好的视频（全部 / 某个视频分区）。
+        数据库和「文件还在不在」在后台线程里查，查完再画出来。"""
         if reset:
             self._hist_limit = 150
+        if not self.history:
+            self.hist_count.setText('历史记录不可用')
+            return
+        self._hist_gen += 1
+        gen = self._hist_gen
+        search = self.hist_search.text().strip()
+        section, mode, kind_sel, limit = self.hist_section, self.hist_mode, self.hist_kind, self._hist_limit
+        h = self.history
+
+        def work():
+            secs = {s['id']: s for s in h.sections()}
+            sec_id = section if section in secs else None
+            sec = secs.get(sec_id)
+            if mode == 'downloads':
+                recs = h.recent(search, limit=limit + 1, section=sec_id, kind=VIDEO)
+                total = h.count(sec_id, VIDEO)
+                for r in recs[:limit]:
+                    r['exists'] = bool(r['filepath']) and os.path.exists(r['filepath'])
+            else:
+                kind = None if sec else kind_sel
+                recs = h.parses(search, limit=limit + 1, kind=kind, section=sec_id)
+                total = h.parse_count(kind, sec_id)
+            counts = {None: h.parse_count(), VIDEO: h.parse_count(kind=VIDEO), PAN: h.parse_count(kind=PAN),
+                      'downloads': h.count(kind=VIDEO)}
+            return {'secs': secs, 'recs': recs, 'total': total, 'counts': counts, 'search': search, 'limit': limit}
+
+        def done(m):
+            if gen == self._hist_gen:          # 又换了筛选 / 搜索词：这次的结果已经过时
+                self._apply_history(m)
+        self._bg(work, done, '读取历史记录')
+
+    def _apply_history(self, m):
         lay = self.hist_list
         while lay.count() > 1:
             w = lay.takeAt(0).widget()
@@ -2391,26 +2652,23 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
                 w.hide()
                 w.setParent(None)
                 w.deleteLater()
-        if not self.history:
-            self.hist_count.setText('历史记录不可用')
-            return
-        self._refresh_hist_filters()
-        search = self.hist_search.text().strip()
+        self.sections = m['secs']
+        if self.hist_section not in self.sections:
+            self.hist_section = None
+        self._build_hist_filters(m['counts'])
+        search, limit = m['search'], m['limit']
         sec = self.sections.get(self.hist_section) if self.hist_section else None
         downloads = self.hist_mode == 'downloads'
+        recs, total = m['recs'], m['total']
         if downloads:
-            recs = self.history.recent(search, limit=self._hist_limit + 1, section=self.hist_section, kind=VIDEO)
-            total = self.history.count(self.hist_section, VIDEO)
             head = f'「{sec["name"]}」分区 {total} 个下载好的视频' if sec else f'下载好的视频 {total} 个'
         else:
             kind = None if sec else self.hist_kind
-            recs = self.history.parses(search, limit=self._hist_limit + 1, kind=kind, section=self.hist_section)
-            total = self.history.parse_count(kind, self.hist_section)
             what = {VIDEO: '视频', PAN: '网盘分享'}.get(kind, '')
             head = (f'「{sec["name"]}」分区 {total} 个网盘分享，点一下重新解析' if sec else
                     f'共 {total} 条{what}解析记录，点一下重新解析')
-        more = len(recs) > self._hist_limit
-        recs = recs[:self._hist_limit]
+        more = len(recs) > limit
+        recs = recs[:limit]
         self.hist_count.setText(head + (f'；找到 {len(recs)}{"+" if more else ""} 条' if search else ''))
         self.hist_clear_btn.setText('清空下载记录' if downloads else '清空历史')
         i = 0
@@ -2433,24 +2691,18 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
                 t, sub = '还没有解析记录', '解析过的视频和网盘分享会记录在这里，点一下就能重新解析'
             lay.insertWidget(0, self._empty_state(t, sub))
 
-    def _refresh_hist_filters(self):
+    def _build_hist_filters(self, counts):
         """历史记录页顶部的筛选：全部 / 视频 / 网盘 是解析记录，「已下载的视频」是下载好的视频；
-        选了网盘或已下载的视频后，再列出对应的分区。"""
+        选了网盘或已下载的视频后，再列出对应的分区。counts：各类记录的条数（后台查好的）。"""
         self._clear_layout(self.hist_filters)
-        if self.history:
-            self.sections = {s['id']: s for s in self.history.sections()}
-        if self.hist_section not in self.sections:
-            self.hist_section = None
         sec = self.sections.get(self.hist_section)
         downloads = self.hist_mode == 'downloads'
         kind = None if downloads else (sec['kind'] if sec else self.hist_kind)
-        h = self.history
-        n = (lambda **kw: h.parse_count(**kw)) if h else (lambda **kw: 0)
-        chips = [(f'全部 {n()}', 'list', not downloads and kind is None, lambda: self._filter_kind(None)),
-                 (f'视频 {n(kind=VIDEO)}', 'film', not downloads and kind == VIDEO, lambda: self._filter_kind(VIDEO)),
-                 (f'网盘 {n(kind=PAN)}', 'folder', not downloads and kind == PAN and sec is None,
+        chips = [(f'全部 {counts[None]}', 'list', not downloads and kind is None, lambda: self._filter_kind(None)),
+                 (f'视频 {counts[VIDEO]}', 'film', not downloads and kind == VIDEO, lambda: self._filter_kind(VIDEO)),
+                 (f'网盘 {counts[PAN]}', 'folder', not downloads and kind == PAN and sec is None,
                   lambda: self._filter_kind(PAN)),
-                 (f'已下载的视频 {h.count(kind=VIDEO) if h else 0}', 'download', downloads and sec is None,
+                 (f'已下载的视频 {counts["downloads"]}', 'download', downloads and sec is None,
                   self._show_downloads_here)]
         group = VIDEO if downloads else (PAN if kind == PAN else None)
         if group:
@@ -2791,7 +3043,7 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             m.addAction(ic('scissors'), '下载片段…', lambda: self._download_section(token))
             if row.cover_url:
                 m.addAction(ic('image'), '保存封面', lambda: self._save_cover(token))
-                if row.cover_url in self.thumbs.raw:
+                if self.thumbs.has_raw(row.cover_url):
                     m.addAction(ic('search'), '预览封面', lambda: self._preview_cover(token))
             m.addSeparator()
         m.addAction(ic('refresh'), '重新解析', lambda: self._start_parse(token))
@@ -3020,6 +3272,11 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
             names, core.imported_plain[:] = list(core.imported_plain), []
             self._append_log('info', '这些 cookies 文件已加密保存，明文文件已删除：' + '、'.join(names))
             self.notify(f'已把 {len(names)} 个 cookies 文件加密保存，明文文件已删除', 'ok')
+        # 窗口缩到托盘 / 最小化时没人看：每 3 秒统计一次就够了（只更新托盘提示），回来时恢复
+        hidden = not self.isVisible() or self.isMinimized()
+        want = 3000 if hidden else 600
+        if self.timer.interval() != want:
+            self.timer.setInterval(want)
         tasks = self.manager.tasks
         running = [t for t in tasks if t.status in (core.RUNNING, core.MERGING)]
         queued = sum(1 for t in tasks if t.status == core.QUEUED)
@@ -3034,6 +3291,14 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         failed += pc['failed']
         paused += pc['paused']
         speed += self.pan.total_speed or 0
+        if self.tray:
+            tip = APP_NAME + (f'\n下载中 {n_run} 个' + (f' · {fmt_speed(speed)}' if speed else '') +
+                              (f' · 等待 {queued} 个' if queued else '') if n_run + queued else '')
+            if tip != getattr(self, '_tray_tip', None):
+                self._tray_tip = tip
+                self.tray.setToolTip(tip)
+        if hidden:
+            return
         parts = [f'下载中 {n_run}', f'等待 {queued}', f'完成 {done}']
         if paused:
             parts.append(f'暂停 {paused}')
@@ -3044,7 +3309,10 @@ class MainWindow(CloudMixin, PanMixin, QMainWindow):
         self.tasks_status.set_full_text('  ·  '.join(parts) + f'　　保存到 {self.settings.download_dir}')
         active = n_run + queued
         self.nav_tasks.set_badge(str(active) if active else '')
-        self._refresh_greeting()
+        now = time.monotonic()
+        if now - self._greet_checked >= 60:      # 问候语：时段变了才换，一分钟看一次就够
+            self._greet_checked = now
+            self._refresh_greeting()
         self.parse_status.setText(f'下载中 {n_run} 个 · {fmt_speed(speed)}' if speed else
                                   (f'下载中 {n_run} 个' if n_run else ''))
 

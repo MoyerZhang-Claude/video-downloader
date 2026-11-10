@@ -14,24 +14,45 @@ import weakref
 
 import shiboken6
 from PySide6.QtCore import (
-    Property, QEasingCurve, QEvent, QObject, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal,
+    Property, QAbstractAnimation, QEasingCurve, QEvent, QObject, QPointF, QPropertyAnimation, QRectF, QSize, Qt,
+    QTimer, QVariantAnimation, Signal,
 )
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
-    QMenu, QPlainTextEdit, QPushButton, QSizePolicy, QStyledItemDelegate, QToolTip, QVBoxLayout, QWidget,
+    QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStyledItemDelegate, QToolTip, QVBoxLayout,
+    QWidget,
 )
 
 from . import icons, theme
 from .theme import PLATFORM_COLORS, P, c
 
 
+_font_cache = {}
+
+
 def px_font(size, weight=None, family=None):
-    f = QFont(family) if family else QFont(QApplication.font())
-    f.setPixelSize(size)
-    if weight:
-        f.setWeight(QFont.Weight(weight))
+    """按像素大小取界面字体。结果有缓存：自绘控件每次重画都要用字体，滚动时一帧会画几十个条目。"""
+    key = (size, weight, family)
+    f = _font_cache.get(key)
+    if f is None:
+        f = QFont(family) if family else QFont(QApplication.font())
+        f.setPixelSize(size)
+        if weight:
+            f.setWeight(QFont.Weight(weight))
+        _font_cache[key] = f
     return f
+
+
+_metrics_cache = {}
+
+
+def px_metrics(size, weight=None):
+    key = (size, weight)
+    fm = _metrics_cache.get(key)
+    if fm is None:
+        fm = _metrics_cache[key] = QFontMetrics(px_font(size, weight))
+    return fm
 
 
 # ---------------------------------------------------------------- 动画时钟（所有动画共用一个定时器）
@@ -343,6 +364,8 @@ class NavItem(_HoverButton):
         self.setCheckable(not special)
         self.setFixedHeight(height)
         self.setFont(px_font(font_px))
+        self._fm = px_metrics(font_px)
+        self._shown = None          # (文字, 可用宽度) -> 省略后的文字：不用每次重画都重新量
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def set_badge(self, text):
@@ -389,8 +412,7 @@ class NavItem(_HoverButton):
             icons.paint(p, self._icon, QRectF(x + 1, iy + 1, 18, 18), c('text' if on or hov else 'text2'))
         if self.badge:
             f = px_font(11, 600)
-            fm = QFontMetrics(f)
-            bw = max(18, fm.horizontalAdvance(self.badge) + 10)
+            bw = max(18, px_metrics(11, 600).horizontalAdvance(self.badge) + 10)
             if self.collapsed:
                 br = QRectF(self.width() - bw / 2 - 12, 2, bw, 16)
             else:
@@ -407,17 +429,19 @@ class NavItem(_HoverButton):
         tail = 0
         if self.trailing and not self.badge:
             f2 = px_font(12)
-            tail = QFontMetrics(f2).horizontalAdvance(self.trailing) + 14
+            tail = px_metrics(12).horizontalAdvance(self.trailing) + 14
             p.setFont(f2)
             p.setPen(c('text4'))
             p.drawText(QRectF(self.width() - tail, 0, tail - 8, self.height()), int(Qt.AlignVCenter | Qt.AlignRight),
                        self.trailing)
         p.setFont(self.font())
         p.setPen(c('text3' if self.muted and not hov else 'text' if on or self.special else 'text2'))
-        fm = QFontMetrics(self.font())
-        avail = self.width() - tx - (40 if self.badge else max(10, tail))
-        shown = fm.elidedText(self.text(), Qt.ElideRight, int(avail))
-        self._elided = shown != self.text()
+        avail = int(self.width() - tx - (40 if self.badge else max(10, tail)))
+        text = self.text()
+        if self._shown is None or self._shown[0] != (text, avail):
+            self._shown = ((text, avail), self._fm.elidedText(text, Qt.ElideRight, avail))
+        shown = self._shown[1]
+        self._elided = shown != text
         p.drawText(QRectF(tx, 0, avail, self.height()), int(Qt.AlignVCenter | Qt.AlignLeft), shown)
 
 
@@ -452,8 +476,7 @@ class SideHeader(_HoverButton):
         p.setFont(self.font())
         hov = self._hov()
         p.setPen(c('text2' if hov else 'text3'))
-        fm = QFontMetrics(self.font())
-        w = fm.horizontalAdvance(self.text())
+        w = px_metrics(12).horizontalAdvance(self.text())
         p.drawText(QRectF(10, 0, w + 4, self.height()), int(Qt.AlignVCenter | Qt.AlignLeft), self.text())
         icons.paint(p, 'chevron_down' if self.open else 'chevron_right',
                     QRectF(10 + w + 4, (self.height() - 12) / 2, 12, 12), c('text3'), 2.0)
@@ -704,6 +727,209 @@ class PlatformTag(QWidget):
         p.setPen(c('text2'))
         p.setFont(self.font())
         p.drawText(QRectF(19, 0, self.width() - 22, self.height()), int(Qt.AlignVCenter | Qt.AlignLeft), self.name)
+
+
+# ---------------------------------------------------------------- 平滑滚动
+
+class _OverlayBar(QWidget):
+    """细滚动条（6px 圆头）：平时看不见，滚动或鼠标移到右边缘时淡入，停一会儿淡出（和 Claude 侧边栏一样）。
+    浮在内容上面，不占宽度，所以出现 / 消失时内容不会左右跳。可以拖动，点空白处翻页。"""
+    W = 10
+
+    def __init__(self, area):
+        super().__init__(area)
+        self.area = area
+        self.bar = area.verticalScrollBar()
+        self._opacity = 0.0
+        self._hover = False
+        self._drag = None           # (按下时鼠标的 y, 按下时的滚动值)
+        self.setAttribute(Qt.WA_Hover)
+        self._anim = QPropertyAnimation(self, b'opacity', self)
+        self._anim.setDuration(160)
+        self._idle = QTimer(self)
+        self._idle.setSingleShot(True)
+        self._idle.setInterval(900)
+        self._idle.timeout.connect(lambda: self._fade(0.0))
+        self.bar.valueChanged.connect(self.flash)
+        self.bar.rangeChanged.connect(self._range_changed)
+        self._range_changed()
+
+    def _get(self):
+        return self._opacity
+
+    def _set(self, v):
+        self._opacity = v
+        self.update()
+
+    opacity = Property(float, _get, _set)
+
+    def _fade(self, target):
+        if self._hover or self._drag is not None:
+            target = 1.0
+        running = self._anim.state() == QAbstractAnimation.Running
+        if (running and self._anim.endValue() == target) or (not running and abs(target - self._opacity) < 0.01):
+            return          # 已经在往这个方向变了（滚动时每一帧都会来一次）：不要从头再来
+        self._anim.stop()
+        self._anim.setStartValue(self._opacity)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def flash(self, *_):
+        """滚动了：显示出来，停下约 1 秒后淡出。"""
+        if self.isVisible():
+            self._fade(1.0)
+            self._idle.start()
+            self.update()
+
+    def _range_changed(self, *_):
+        self.setVisible(self.bar.maximum() > self.bar.minimum())      # 内容不用滚动时整条隐藏，不挡鼠标
+        self.update()
+
+    def _handle(self):
+        """滑块的位置：(y, 高度)"""
+        lo, hi, page = self.bar.minimum(), self.bar.maximum(), self.bar.pageStep()
+        track = self.height()
+        if hi <= lo or track <= 0:
+            return 0.0, 0.0
+        length = max(32.0, track * page / (hi - lo + page))
+        return (track - length) * (self.bar.value() - lo) / (hi - lo), length
+
+    def paintEvent(self, e):
+        if self._opacity <= 0.01:
+            return
+        y, length = self._handle()
+        if length <= 0:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setOpacity(self._opacity)
+        active = self._hover or self._drag is not None
+        w = 8.0 if active else 6.0
+        p.setPen(Qt.NoPen)
+        p.setBrush(c('scroll_hover' if active else 'scroll'))
+        p.drawRoundedRect(QRectF(self.width() - w - 1, y, w, length), w / 2, w / 2)
+
+    def enterEvent(self, e):
+        self._hover = True
+        self._fade(1.0)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self._idle.start()
+        self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() != Qt.LeftButton:
+            return
+        y, length = self._handle()
+        pos = e.position().y()
+        if y <= pos <= y + length:
+            self._drag = (pos, self.bar.value())
+        else:       # 点滑块上面 / 下面的空白：翻一页
+            self.area.scroll_by(self.bar.pageStep() * (-0.9 if pos < y else 0.9))
+        self.update()
+
+    def mouseMoveEvent(self, e):
+        if self._drag is None:
+            return
+        _y, length = self._handle()
+        span = max(1.0, self.height() - length)
+        lo, hi = self.bar.minimum(), self.bar.maximum()
+        self.area.stop_scroll()
+        self.bar.setValue(round(self._drag[1] + (e.position().y() - self._drag[0]) / span * (hi - lo)))
+
+    def mouseReleaseEvent(self, e):
+        self._drag = None
+        self._idle.start()
+        self.update()
+
+
+class SmoothScrollArea(QScrollArea):
+    """滚轮带缓动动画的滚动区（原生 QScrollArea 每格直接跳几十像素，看起来一顿一顿的）。
+
+    - 普通滚轮：一格约 100px，用一个复用的动画从当前位置滑到目标位置（OutCubic，约 240ms）；
+      连续滚动时只是把目标往前推、从当前位置接着滑，不排队，速度是连续的；到头就停。
+    - 触控板 / 高精度滚轮（一次给的是很小的量）：直接跟手滚动，不加动画。
+    - 滚动条换成浮在内容上的细条（_OverlayBar）。
+    """
+    STEP = 100
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(240)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._anim.valueChanged.connect(self._apply)
+        self._target = 0.0
+        self._moving = False        # 正在由动画设置滚动值（区别于别处直接改滚动位置）
+        self._rest = 0.0            # 触控板滚动时不足 1 像素的零头
+        vbar = self.verticalScrollBar()
+        vbar.valueChanged.connect(self._value_changed)
+        self.overlay = _OverlayBar(self)
+
+    def _apply(self, v):
+        self._moving = True
+        try:
+            self.verticalScrollBar().setValue(round(v))
+        finally:
+            self._moving = False
+
+    def _value_changed(self, _v):
+        if not self._moving:        # 别处直接设了滚动位置（拖动、跳到某张卡片、回到顶部）：动画让路
+            self._anim.stop()
+
+    def stop_scroll(self):
+        self._anim.stop()
+
+    def scroll_by(self, dy):
+        """动画滚动 dy 像素（正数向下）。"""
+        vbar = self.verticalScrollBar()
+        running = self._anim.state() == QAbstractAnimation.Running
+        base = self._target if running else float(vbar.value())
+        target = max(float(vbar.minimum()), min(float(vbar.maximum()), base + dy))
+        self._target = target
+        if abs(target - vbar.value()) < 0.5:
+            self._anim.stop()
+            return
+        self._anim.stop()
+        self._anim.setStartValue(float(vbar.value()))
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def wheelEvent(self, e):
+        vbar = self.verticalScrollBar()
+        dy, pd = e.angleDelta().y(), e.pixelDelta()
+        if vbar.maximum() <= vbar.minimum():
+            hbar = self.horizontalScrollBar()
+            if hbar.maximum() > hbar.minimum() and dy:      # 只能横着滚的（历史记录页的筛选条）：滚轮横向滚
+                hbar.setValue(hbar.value() - round(dy / 120 * 60))
+                e.accept()
+                return
+            super().wheelEvent(e)
+            return
+        if e.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier) or (dy == 0 and pd.y() == 0):
+            super().wheelEvent(e)
+            return
+        if not pd.isNull() or dy % 120:
+            # 触控板 / 高精度滚轮：量很小、很密，直接跟手
+            self._anim.stop()
+            delta = (pd.y() if not pd.isNull() else dy / 120 * self.STEP) + self._rest
+            whole = int(delta)
+            self._rest = delta - whole
+            vbar.setValue(vbar.value() - whole)
+            e.accept()
+            return
+        lines = QApplication.wheelScrollLines() or 3
+        step = max(40.0, min(self.STEP * lines / 3, vbar.pageStep() * 0.9))
+        self.scroll_by(-dy / 120 * step)
+        e.accept()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        w = _OverlayBar.W
+        self.overlay.setGeometry(self.width() - w, 3, w, max(0, self.height() - 6))
+        self.overlay.raise_()
 
 
 class Combo(QComboBox):

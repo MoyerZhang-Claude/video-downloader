@@ -1,12 +1,16 @@
 """自定义控件：单行省略文本、封面缩略图（含后台加载）、封面预览窗口。"""
+import hashlib
 import os
 import re
+import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QObject, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
+from .config import DATA
 from .theme import c
 
 UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -28,9 +32,13 @@ class ElidedLabel(QLabel):
         self.set_full_text(text)
 
     def set_full_text(self, text, tooltip=None):
-        self._full = text or ''
-        self.setText(self._full)
-        self.setToolTip(tooltip if tooltip is not None else self._full)
+        text = text or ''
+        tip = tooltip if tooltip is not None else text
+        if text == self._full and tip == self.toolTip():      # 没变就不动（状态栏每秒会设好几次同样的文字）
+            return
+        self._full = text
+        self.setText(text)
+        self.setToolTip(tip)
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -113,24 +121,38 @@ def compose_thumb(img, w=THUMB_W, h=THUMB_H):
     return out
 
 
+MAX_THUMBS = 300                        # 内存里最多留多少张缩略图（最久没用的先丢）
+MAX_COVER_BYTES = 20 * 1024 * 1024      # 单张封面超过 20 MB 直接放弃
+COVER_CACHE = os.path.join(DATA, 'cache', 'covers')
+MAX_CACHE_FILES, MAX_CACHE_BYTES = 300, 200 * 1024 * 1024
+
+
 class ThumbLoader(QObject):
-    """后台下载并缩放封面，主线程只做 QImage→QPixmap 的转换，界面不卡。"""
+    """后台下载并缩放封面，主线程只做 QImage→QPixmap 的转换，界面不卡。
+
+    内存里只留缩略图（256×144），而且有上限；封面原图（几百 KB 到几 MB 一张）不常驻内存，
+    存在数据目录的 cache\\covers 里，预览 / 保存封面时再读，磁盘上也有数量和总大小的上限。
+    """
     loaded = Signal(str)          # url
 
     def __init__(self, get_proxy, parent=None):
         super().__init__(parent)
         self.get_proxy = get_proxy
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='thumb')
-        self.raw = {}            # url -> 原图字节（保存封面用）
-        self.pixmaps = {}        # url -> 缩略图
+        self.pixmaps = OrderedDict()     # url -> 缩略图（最近用过的在后面）
         self.failed = set()
         self._pending = set()
         self._images = {}
+        self._writes = 0
         self._signal = _ThumbSignal()
         self._signal.done.connect(self._on_done)
+        self.pool.submit(self._trim_cache)
 
     def get(self, url):
-        return self.pixmaps.get(url)
+        pm = self.pixmaps.get(url)
+        if pm is not None:
+            self.pixmaps.move_to_end(url)
+        return pm
 
     def request(self, url, referer=''):
         if not url or url in self.pixmaps or url in self._pending or url in self.failed:
@@ -138,22 +160,94 @@ class ThumbLoader(QObject):
         self._pending.add(url)
         self.pool.submit(self._fetch, url, referer)
 
+    def release(self, keep=()):
+        """清空解析结果时：不再显示的缩略图马上释放（keep：还在用的地址）。"""
+        keep = set(keep)
+        for url in [u for u in self.pixmaps if u not in keep]:
+            del self.pixmaps[url]
+        if len(self.failed) > 2000:
+            self.failed.clear()
+
+    # 封面原图（磁盘缓存） ------------------------------------------------
+    @staticmethod
+    def _raw_path(url):
+        return os.path.join(COVER_CACHE, hashlib.sha1(url.encode('utf-8', 'replace')).hexdigest() + '.img')
+
+    def has_raw(self, url):
+        return bool(url) and os.path.isfile(self._raw_path(url))
+
+    def raw_data(self, url):
+        """封面原图的字节；没有缓存返回 None。"""
+        try:
+            with open(self._raw_path(url), 'rb') as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def _store_raw(self, url, data):
+        try:
+            os.makedirs(COVER_CACHE, exist_ok=True)
+            path = self._raw_path(url)
+            with open(path + '.tmp', 'wb') as f:
+                f.write(data)
+            os.replace(path + '.tmp', path)
+        except OSError:
+            return
+        self._writes += 1
+        if self._writes % 50 == 0:
+            self._trim_cache()
+
+    _trim_lock = threading.Lock()
+
+    def _trim_cache(self):
+        """磁盘上的封面缓存：只留最近的 300 张 / 200 MB。"""
+        with self._trim_lock:
+            try:
+                files = [(e.stat().st_mtime, e.stat().st_size, e.path) for e in os.scandir(COVER_CACHE) if e.is_file()]
+            except OSError:
+                return
+            files.sort(reverse=True)
+            total = 0
+            for i, (_mtime, size, path) in enumerate(files):
+                total += size
+                if i >= MAX_CACHE_FILES or total > MAX_CACHE_BYTES or path.endswith('.tmp'):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+
+    def _download(self, url, referer, timeout=15):
+        """下载封面原图（最多 20 MB，超过就放弃）。"""
+        import requests
+        proxy = (self.get_proxy() or '').strip()
+        headers = {'User-Agent': UA}
+        if referer:
+            headers['Referer'] = referer
+        with requests.get(url, headers=headers, timeout=timeout, stream=True,
+                          proxies={'http': proxy, 'https': proxy} if proxy else None) as r:
+            r.raise_for_status()
+            if int(r.headers.get('Content-Length') or 0) > MAX_COVER_BYTES:
+                raise ValueError('封面图片太大')
+            chunks, size = [], 0
+            for chunk in r.iter_content(256 * 1024):
+                size += len(chunk)
+                if size > MAX_COVER_BYTES:
+                    raise ValueError('封面图片太大')
+                chunks.append(chunk)
+        return b''.join(chunks)
+
     def _fetch(self, url, referer):
         try:
-            import requests
-            proxy = (self.get_proxy() or '').strip()
-            headers = {'User-Agent': UA}
-            if referer:
-                headers['Referer'] = referer
-            r = requests.get(url, headers=headers, timeout=15,
-                             proxies={'http': proxy, 'https': proxy} if proxy else None)
-            r.raise_for_status()
-            data = r.content
+            data = self.raw_data(url)           # 缩略图被挤出内存后再要：直接读磁盘上的原图，不重新下载
+            fresh = data is None
+            if fresh:
+                data = self._download(url, referer)
             img = QImage.fromData(data)
             if img.isNull():
                 raise ValueError('无法识别的图片格式')
             self._images[url] = compose_thumb(img)
-            self.raw[url] = data
+            if fresh:
+                self._store_raw(url, data)
             self._signal.done.emit(url, True)
         except Exception:  # noqa: BLE001 - 封面失败不影响下载
             self._signal.done.emit(url, False)
@@ -165,20 +259,17 @@ class ThumbLoader(QObject):
             pm = QPixmap.fromImage(img)
             pm.setDevicePixelRatio(2.0)
             self.pixmaps[url] = pm
+            while len(self.pixmaps) > MAX_THUMBS:
+                self.pixmaps.popitem(last=False)
         else:
             self.failed.add(url)
         self.loaded.emit(url)
 
     def fetch_raw_sync(self, url, referer=''):
         """缩略图还没加载完时，保存封面直接同步下载一次。"""
-        import requests
-        proxy = (self.get_proxy() or '').strip()
-        headers = {'User-Agent': UA, **({'Referer': referer} if referer else {})}
-        r = requests.get(url, headers=headers, timeout=20,
-                         proxies={'http': proxy, 'https': proxy} if proxy else None)
-        r.raise_for_status()
-        self.raw[url] = r.content
-        return r.content
+        data = self._download(url, referer, timeout=20)
+        self._store_raw(url, data)
+        return data
 
 
 class _ThumbSignal(QObject):

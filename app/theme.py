@@ -245,6 +245,9 @@ def _make_icons():
 def stylesheet():
     p = P
     ic = _make_icons()
+    # 任务状态文字的颜色：换状态时只改控件的名字（st_ok、st_err…），不用每次刷新进度都重设样式表
+    status_rules = ''.join(f'QLabel#st_{r} {{ font-size: 12px; color: {p[r]}; }}\n'
+                           for r in ('brand', 'info', 'ok', 'err', 'text2', 'text3', 'text4'))
     return f"""
 QWidget {{ font-size: 13px; color: {p['text']}; }}
 QMainWindow, QDialog, QMessageBox {{ background: {p['bg']}; }}
@@ -268,7 +271,7 @@ QLabel#metaStrong {{ font-size: 12px; color: {p['text2']}; }}
 QLabel#metaError {{ font-size: 12px; color: {p['err']}; }}
 QLabel#metaOk {{ font-size: 12px; color: {p['ok']}; }}
 QLabel#metaBusy {{ font-size: 12px; color: {p['brand']}; }}
-QLabel#sideSection {{ font-size: 12px; color: {p['text3']}; padding-left: 10px; }}
+{status_rules}QLabel#sideSection {{ font-size: 12px; color: {p['text3']}; padding-left: 10px; }}
 QLabel#tagOk {{ background: {p['tint_ok']}; color: {p['ok']}; border-radius: 6px; padding: 1px 7px; font-size: 12px; }}
 QLabel#tagInfo {{ background: {p['tint_info']}; color: {p['info']}; border-radius: 6px; padding: 1px 7px; font-size: 12px; }}
 QLabel#tagAccent {{ background: {p['tint_accent']}; color: {p['accent']}; border-radius: 6px; padding: 1px 7px; font-size: 12px; }}
