@@ -52,10 +52,10 @@ def _migrate_old():
         if not os.path.isfile(old):
             continue
         try:
-            if os.path.isfile(COOKIE_PATH):
-                os.remove(old)
-            else:
+            if _newer_than_encrypted(old):
                 secure_store.import_plain_cookies(old, COOKIE_PATH)
+            else:
+                os.remove(old)
         except OSError:
             pass
     if os.path.isfile(_OLD_META):
@@ -68,14 +68,23 @@ def _migrate_old():
             pass
 
 
+def _newer_than_encrypted(path):
+    """明文文件比已有的加密登录信息新（或者还没有加密的）：应该导入它。
+    加密文件保留了导入时明文文件的修改时间，所以直接比时间就行。"""
+    try:
+        return not os.path.isfile(COOKIE_PATH) or os.path.getmtime(path) > os.path.getmtime(COOKIE_PATH) + 1
+    except OSError:
+        return False
+
+
 def adopt_plain(path):
-    """别处找到的明文 B站登录文件（很早的版本放在 cookies 文件夹里）：还没有加密的登录信息就导入，然后删掉明文。"""
+    """别处找到的明文 B站登录文件（很早的版本放在 cookies 文件夹里）：比已有的登录信息新就导入，然后删掉明文。"""
     with _lock:
         try:
-            if os.path.isfile(COOKIE_PATH):
-                os.remove(path)
-            else:
+            if _newer_than_encrypted(path):
                 secure_store.import_plain_cookies(path, COOKIE_PATH)
+            else:
+                os.remove(path)
         except OSError:
             pass
 
