@@ -1583,7 +1583,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         m = ui.popup_menu(self)
         m.addAction(icons.icon('clipboard', c('text2')), '粘贴剪贴板里的链接并解析', self._paste_and_parse)
         m.addAction(icons.icon('file_text', c('text2')), '从文本文件导入链接…', self._import_links)
-        m.addAction(icons.icon('globe', c('text2')), '打开网页嗅探视频…', lambda: self.sniff_prompt())
+        m.addAction(icons.icon('globe', c('text2')), '从网页里找视频…', lambda: self.sniff_prompt())
         m.addSeparator()
         m.addAction(icons.icon('settings', c('text2')), '下载选项…', lambda: self._open_settings('download'))
         m.addAction(icons.icon('user', c('text2')), '网盘账号…', lambda: self._open_settings('network'))
@@ -1944,6 +1944,13 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         row = self.rows.get(token)
         if row is None:
             return
+        if row.extra is None and msg.startswith('暂不支持') and row.url.startswith(('http://', 'https://')):
+            # 没有专门解析器的网站：不报错，直接转去网页里找视频（读网页源码，必要时后台打开网页播放一下）
+            at = self.res_list.indexOf(row.card) if row.card is not None and shiboken6.isValid(row.card) else 0
+            self._append_log('info', f'{row.url} 没有专门的解析器，改为从网页里找视频')
+            self._remove_result(token)
+            self.sniff_start(row.url, at=max(0, at))
+            return
         row.state, row.error, row.error_raw = 'error', msg, raw
         row.outdated = core.looks_outdated(raw)
         row.login = core.needs_login(raw) or msg.startswith(core.LOGIN_EXPIRED)
@@ -2050,10 +2057,10 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
                 t = label('字幕 ' + '/'.join(names), 'tagInfo')
                 t.setToolTip(f'将下载：{"、".join(names)}\n该视频共有 {len(all_langs)} 种人工字幕')
                 line.addWidget(t)
-            if v.platform == '网页' and row.extra is None and os.name == 'nt':
-                sb = Chip('用浏览器打开并嗅探', 'globe', height=24, font_px=12,
+            if v.platform == '网页' and row.extra is None:
+                sb = Chip('找网页里的其它视频', 'globe', height=24, font_px=12,
                           tip='这个网站没有专门的解析器，这里是从网页里直接找到的视频，可能不全。\n'
-                              '可以在内置浏览器里打开网页并播放，让软件把播放时请求的视频地址抓出来')
+                              '点这里读网页源码、必要时在后台打开网页播放一下，把里面的视频地址都找出来（不会弹出窗口）')
                 sb.clicked.connect(lambda: self.sniff_start(row.url))
                 line.addWidget(sb)
             colinfo = v.collection
@@ -2159,16 +2166,17 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
                 act.addStretch(1)
                 act.addWidget(button('移除', lambda: self._remove_result(token), 'ghost'))
                 act.addWidget(button('重试', lambda: self._start_parse(token), icon='refresh'))
-                if row.error.startswith('暂不支持') and os.name == 'nt':
-                    act.addWidget(button('用浏览器打开并嗅探', lambda: self.sniff_start(row.url), 'primary',
-                                         '在内置浏览器里打开这个网页并播放视频，软件把视频地址抓出来', 'globe'))
+                if row.extra is None and row.url.startswith(('http://', 'https://')) and not row.login:
+                    act.addWidget(button('从网页里找视频', lambda: self.sniff_start(row.url), '',
+                                         '读这个网页的源码、必要时在后台打开网页播放一下，把里面的视频地址找出来（不会弹出窗口）',
+                                         'globe'))
                 if row.login:
                     bili = 'bilibili.com' in row.url or 'b23.tv' in row.url
                     again = row.error.startswith(core.LOGIN_EXPIRED)
                     act.addWidget(button('扫码登录 B站' if bili else '重新登录' if again else '去登录',
                                          lambda: self._login_for_row(token), 'primary',
                                          'B站用扫码登录（左下角头像菜单里也有）' if bili else
-                                         '在内置浏览器里登录这个网站，登录好以后自动重新解析', 'user'))
+                                         '打开浏览器窗口登录这个网站，登录好以后自动重新解析', 'user'))
                 if row.outdated and self._core_new:
                     act.addWidget(button('更新内核后重试', self._update_core_and_retry, 'primary',
                                          f'解析内核有新版本 {self._core_new}：更新后自动重启软件，并重新解析这个链接', 'refresh'))
@@ -3127,8 +3135,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         m.addAction(ic('refresh'), '重新解析', lambda: self._start_parse(token))
         m.addAction(ic('copy'), '复制链接', lambda: QGuiApplication.clipboard().setText(row.url))
         m.addAction(ic('external'), '在浏览器中打开', lambda: QDesktopServices.openUrl(QUrl(row.url)))
-        if row.extra is None and os.name == 'nt':
-            m.addAction(ic('globe'), '用浏览器打开并嗅探', lambda: self.sniff_start(row.url))
+        if row.extra is None:
+            m.addAction(ic('globe'), '从网页里找视频', lambda: self.sniff_start(row.url))
         if row.state == 'error':
             m.addAction(ic('copy'), '复制错误信息', lambda: QGuiApplication.clipboard().setText(row.error_raw or row.error))
         m.addSeparator()

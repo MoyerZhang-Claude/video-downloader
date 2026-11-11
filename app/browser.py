@@ -244,6 +244,68 @@ class Browser:
             pass
 
 
+# ---------------------------------------------------------------- 登录用的普通窗口（不带调试端口）
+# 带着调试端口（CDP）启动的浏览器会被谷歌、X、TikTok 认成「被程序控制的浏览器」，拒绝登录
+# （「此浏览器或应用可能不安全」）。所以登录时用最普通的方式打开浏览器：只指定软件自己的配置目录。
+# 这样打开的浏览器会锁住自己的 Cookie 数据库，开着的时候读不了：等用户登录好、关掉窗口（或者点「完成」由软件替他关），
+# 再像平时刷新登录那样在后台无界面地启动一下、通过调试端口读出 Cookie（那时没有网页要打开，不影响登录）。
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+
+
+def profile_processes():
+    """用这个配置目录运行着的浏览器进程：[(进程号, 是不是主进程)]。"""
+    needle = PROFILE_DIR.replace("'", "''")
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' OR Name='chrome.exe'\" | "
+          f"Where-Object {{ $_.CommandLine -and $_.CommandLine.Contains('{needle}') }} | "
+          "ForEach-Object { '{0} {1}' -f $_.ProcessId, ($(if ($_.CommandLine -match '--type=') { 0 } else { 1 })) }")
+    try:
+        out = subprocess.run(['powershell', '-NoProfile', '-Command', ps], capture_output=True, text=True,
+                             timeout=20, creationflags=_NO_WINDOW).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows = []
+    for line in out.split('\n'):
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit():
+            rows.append((int(parts[0]), parts[1] == '1'))
+    return rows
+
+
+def open_plain(url):
+    """用普通方式（没有调试端口、没有自动化标记）在软件自己的配置里打开一个浏览器窗口。"""
+    exe, _name = find_browser()
+    if not exe:
+        raise BrowserError('没有找到 Edge 或 Chrome 浏览器')
+    close_window()                      # 这个配置目录同一时间只能有一个浏览器：先关掉嗅探 / 刷新开着的
+    if profile_processes():
+        close_plain()
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    subprocess.Popen([exe, f'--user-data-dir={PROFILE_DIR}', '--no-first-run', '--no-default-browser-check',
+                      '--disable-background-mode', url],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def plain_open():
+    """登录用的浏览器窗口还开着吗。"""
+    return any(main for _pid, main in profile_processes())
+
+
+def close_plain(timeout=10):
+    """关掉登录用的浏览器：先像点窗口的 × 一样正常关闭（这样 Cookie 会写回磁盘），关不掉再强制结束。"""
+    procs = profile_processes()
+    for pid, main in procs:
+        if main:
+            subprocess.run(['taskkill', '/PID', str(pid)], capture_output=True, creationflags=_NO_WINDOW)
+    t0 = time.monotonic()
+    while procs and time.monotonic() - t0 < timeout:
+        time.sleep(0.5)
+        procs = profile_processes()
+    for pid, _main in procs:
+        subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True, creationflags=_NO_WINDOW)
+    if procs:
+        time.sleep(1)
+
+
 # ---------------------------------------------------------------- 全局只有一个（同一个配置目录不能同时开两个浏览器）
 _lock = threading.RLock()
 _window = None          # 用户看得见的那个浏览器窗口（登录 / 嗅探时开着）
@@ -298,8 +360,8 @@ def read_cookies():
             b.close(wait=3)
 
 
-def shutdown():
-    """软件退出时调用。"""
+def shutdown(plain=False):
+    """软件退出时调用。plain：登录用的普通窗口也关掉（正在登录时退出软件）。"""
     global _window
     with _lock:
         b, _window = _window, None
@@ -308,3 +370,5 @@ def shutdown():
             b.close(wait=2)
         except Exception:  # noqa: BLE001
             b.kill()
+    if plain:
+        close_plain(timeout=4)

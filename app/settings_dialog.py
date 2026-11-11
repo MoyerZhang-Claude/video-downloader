@@ -469,7 +469,7 @@ class SettingsPanel(ui.Overlay):
         self.site_other_btn = _btn('登录', self._site_other)
         obox.addWidget(self.site_other_btn)
         self._fresh_section = False
-        self.site_other_desc = self._row(lay, '其它网址', '需要登录才能看的其它网站：填网址，在内置浏览器里登录', obox)
+        self.site_other_desc = self._row(lay, '其它网址', '需要登录才能看的其它网站：填网址，在打开的浏览器窗口里登录', obox)
         self._section(lay, 'B站账号')
         self.bili_box = QHBoxLayout()
         self.bili_box.setSpacing(6)
@@ -486,7 +486,7 @@ class SettingsPanel(ui.Overlay):
         mode = self._combo('cookie_mode', COOKIE_MODES.items(), 220)
         mode.currentIndexChanged.connect(self._sync_cookie_widgets)
         self.cookie_mode = mode
-        self._row(lay, '额外的 cookies 来源', '一般不需要：用上面的内置浏览器登录就够了', mode)
+        self._row(lay, '额外的 cookies 来源', '一般不需要：用上面的「网站登录」就够了', mode)
         self.browser = Combo()
         self.browser.addItems(BROWSERS)
         if self.s.cookie_browser in BROWSERS:
@@ -532,7 +532,7 @@ class SettingsPanel(ui.Overlay):
                 relogin.setEnabled(have)
                 btns.addWidget(relogin)
                 btns.addWidget(_btn('退出登录', lambda _=False, x=site: self._site_logout(x), 'danger'))
-                desc = f'已登录 · {fmt_ago(info.get("saved") or 0)}从内置浏览器读取（用之前会自动刷新）'
+                desc = f'已登录 · {fmt_ago(info.get("saved") or 0)}读取（用之前会自动刷新）'
             else:
                 b = _btn('登录', lambda _=False, x=site: self._site_login(x), 'primary')
                 b.setEnabled(have)
@@ -542,10 +542,10 @@ class SettingsPanel(ui.Overlay):
         self._fresh_section = False
         self.site_other.setEnabled(have)
         self.site_other_btn.setEnabled(have)
-        self.site_other_desc.set_tip(f'需要登录才能看的其它网站：填网址，在内置浏览器（{name}）里登录' if have else '')
+        self.site_other_desc.set_tip(f'需要登录才能看的其它网站：填网址，在打开的 {name} 窗口里登录' if have else '')
         self.site_other_desc.set_status(
             '登录信息加密保存在本机' if have else
-            '没有找到 Edge 或 Chrome，内置浏览器登录用不了：可以用下面「高级」里的 cookies 文件夹导入 cookies.txt')
+            '没有找到 Edge 或 Chrome，网站登录用不了：可以用下面「高级」里的 cookies 文件夹导入 cookies.txt')
 
     def _site_login(self, site):
         from . import login_ui
