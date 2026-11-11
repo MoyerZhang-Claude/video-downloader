@@ -10,6 +10,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
@@ -42,6 +43,24 @@ val LOGIN_SITES = listOf(
     LoginSite("vimeo.com", "Vimeo", "https://vimeo.com/log_in", listOf("vimeo.com"), listOf("vimeo")),
 )
 
+/**
+ * 登录页用的 WebViewClient：网页链接都在本页打开；「打开 App」一类的 intent:// / snssdk:// 等链接 WebView 打不开
+ * （会变成一个错误页），直接忽略，用户留在登录页上。
+ */
+open class InAppClient : WebViewClient() {
+    override fun shouldOverrideUrlLoading(view: WebView, request: android.webkit.WebResourceRequest): Boolean {
+        val scheme = request.url.scheme?.lowercase() ?: return false
+        return scheme != "http" && scheme != "https" && scheme != "about" && scheme != "data" && scheme != "blob"
+    }
+}
+
+/** 撑满父布局。WebView 默认「按内容自适应高度」时，网页里的 100vh / 100dvh 会算成 0，
+ * X、TikTok 的登录框用它限制高度，结果被压成 0 高、整页空白。 */
+fun WebView.fillParent() {
+    layoutParams = android.view.ViewGroup.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+        android.view.ViewGroup.LayoutParams.MATCH_PARENT)
+}
+
 /** 用户填的网址 → 网站（不在常用列表里的按主域名算）；不像网址返回 null */
 fun loginSiteFor(text: String): LoginSite? {
     val t = text.trim()
@@ -72,6 +91,8 @@ class SiteLoginActivity : ComponentActivity() {
 
     private lateinit var site: LoginSite
     private var saving = false
+    private var web: WebView? = null
+    private var canGoBack by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -91,13 +112,17 @@ class SiteLoginActivity : ComponentActivity() {
             }
             VdTheme(mode, prefs.getBoolean("dark_oled", false)) {
                 var status by remember { mutableStateOf(
-                    if (site.names.isEmpty()) "在下面登录，登录好以后点右上角的「完成」" else "在下面登录，登录好以后会自动保存；没有反应就点右上角的「完成」") }
+                    (if (site.names.isEmpty()) "在下面登录，登录好以后点右上角的「完成」" else "在下面登录，登录好以后会自动保存；没有反应就点右上角的「完成」") +
+                        "。请用这个网站自己的账号密码登录：谷歌不允许在 App 里登录谷歌账号（「使用 Google 继续」会被拒绝），" +
+                        "要用谷歌账号的话请在电脑版上登录") }
                 Column(Modifier.fillMaxSize().background(P.bg).systemBarsPadding()) {
                     TopBar("登录 ${site.name}", { finish() }) {
                         TextButton(onClick = { save(manual = true) { status = it } }) { Text("完成", color = P.accent, fontSize = 15.sp) }
                     }
                     Text(status, fontSize = 12.sp, color = P.text3, modifier = Modifier.padding(16.dp, 4.dp, 16.dp, 8.dp))
                     WebPage()
+                    // 返回键先在网页里后退（比如点了网页上的「打开 App」跳到了别的页面），退到头才关闭登录页
+                    BackHandler(enabled = canGoBack) { web?.goBack() }
                 }
                 // 登录成功后页面不一定跳转：每秒看一次有没有出现登录 Cookie
                 LaunchedEffect(Unit) {
@@ -120,10 +145,22 @@ class SiteLoginActivity : ComponentActivity() {
     private fun WebPage() {
         AndroidView(modifier = Modifier.fillMaxSize(), factory = { ctx ->
             WebView(ctx).apply {
+                fillParent()
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
+                @Suppress("DEPRECATION")
+                settings.databaseEnabled = true
+                settings.useWideViewPort = true
+                settings.loadWithOverviewMode = true
+                settings.javaScriptCanOpenWindowsAutomatically = true
+                settings.mediaPlaybackRequiresUserGesture = false
                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                webViewClient = WebViewClient()         // 链接都在这个页面里打开，不跳到外面的浏览器
+                webViewClient = object : InAppClient() {
+                    override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+                        canGoBack = view.canGoBack()
+                    }
+                }                                       // 链接都在这个页面里打开，不跳到外面的浏览器
+                web = this
                 loadUrl(site.url)
             }
         })

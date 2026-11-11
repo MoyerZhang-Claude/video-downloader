@@ -188,6 +188,7 @@ class BiliLoginActivity : ComponentActivity() {
             Text(status, fontSize = 12.sp, color = P.text3, modifier = Modifier.padding(16.dp, 8.dp))
             AndroidView(modifier = Modifier.fillMaxSize(), factory = { ctx ->
                 WebView(ctx).apply {
+                    fillParent()
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
