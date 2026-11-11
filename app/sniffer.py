@@ -1,4 +1,6 @@
-"""网页资源嗅探：在内置浏览器里打开网页，页面真正播放视频时监听它的网络请求，把视频地址找出来。
+"""网页资源嗅探：在浏览器里打开网页（默认后台无界面，不弹窗口），自动静音播放网页里的视频，
+监听它的网络请求，把视频地址找出来。网页源码里直接写着地址的情况由 page_sniff.sniff_static 先处理，
+找不到才用到这里。
 
 和链接解析互补：链接解析靠 yt-dlp 针对网站写的解析器，没有解析器的网站只能静态分析网页，
 而很多网站的视频地址是播放器脚本运行后才去请求的，只有在浏览器里播放时才看得到。
@@ -46,6 +48,7 @@ class Resource:
     size: int = 0
     duration: float = 0.0
     heights: list = field(default_factory=list)     # 有哪些清晰度（短边 / 高度，像素）
+    codec: str = ''             # 视频编码（H.264 / H.265 / AV1…），知道的话
     live: bool = False
     protected: bool = False     # DRM：不能下载
     small: bool = False
@@ -107,12 +110,35 @@ def parse_mpd(text):
     return out
 
 
+# 自动播放：网页里的 <video> 静音后播放；再点一下常见播放器的「播放」按钮（不点会跳到别的网页的链接）
+_AUTOPLAY_JS = r"""(() => {
+  let n = 0;
+  document.querySelectorAll('video,audio').forEach(v => {
+    try { v.muted = true; v.volume = 0; const p = v.play(); if (p && p.catch) p.catch(() => {}); n++; } catch (e) {}
+  });
+  const sel = '.dplayer-play-icon,.dplayer-mobile-play,.vjs-big-play-button,.plyr__control--overlaid,.jw-icon-display,' +
+    '.xgplayer-start,.prism-big-play-btn,.art-control-play,.fp-play,.mejs__overlay-button,.ckplayer-play,' +
+    '[class*="play-btn"],[class*="playBtn"],[class*="btn-play"],[class*="big-play"],[aria-label="Play"],[aria-label="播放"]';
+  document.querySelectorAll(sel).forEach(b => {
+    if (b.dataset.vdClicked) return;
+    b.dataset.vdClicked = '1';
+    const a = b.closest('a[href]');
+    if (a && !/^(#|javascript:)/i.test(a.getAttribute('href') || '')) return;
+    try { b.click(); } catch (e) {}
+  });
+  return n;
+})()"""
+
+
 class Sniffer:
-    """一次嗅探：打开浏览器窗口 → 监听 → resources 里是找到的资源。
+    """一次嗅探：打开浏览器 → 监听 → resources 里是找到的资源。
+    headless=True：后台无界面地打开（不弹窗口，自己的浏览器进程，stop() 时关掉）；False：用看得见的浏览器窗口。
     on_change() 在有新发现 / 标题变了时调用，on_closed() 在浏览器被关掉时调用（都在后台线程里，界面要自己转回界面线程）。"""
 
-    def __init__(self, url, on_change=None, on_closed=None):
+    def __init__(self, url, on_change=None, on_closed=None, headless=False):
         self.url = url
+        self.headless = headless
+        self._own = None            # headless 时自己启动的浏览器
         self.on_change = on_change or (lambda: None)
         self.on_closed = on_closed or (lambda: None)
         self.resources = []         # 按发现的先后
@@ -136,7 +162,12 @@ class Sniffer:
     # ------------------------------------------------------------ 开始 / 结束
     def start(self):
         """打开浏览器并开始监听（要等浏览器启动，放在后台线程里调用）。失败抛 BrowserError。"""
-        b, tid = browser.window('about:blank')
+        if self.headless:
+            b = self._own = browser.Browser(headless=True)
+            pages = b.pages()
+            tid = pages[0]['targetId'] if pages else b.cdp.call('Target.createTarget', {'url': 'about:blank'})['targetId']
+        else:
+            b, tid = browser.window('about:blank')
         self._b = b
         cdp = b.cdp
         for name, fn in (('Target.attachedToTarget', self._on_attached), ('Target.targetInfoChanged', self._on_info),
@@ -185,9 +216,29 @@ class Sniffer:
             for name, fn in self._handlers:
                 b.cdp.off(name, fn)
         self._handlers = []
-        if close_browser and browser.current_window() is b:
+        if self._own is not None:
+            own, self._own = self._own, None
+            own.close(wait=3)
+        elif close_browser and browser.current_window() is b:
             browser.close_window()
         return was
+
+    def autoplay(self):
+        """让网页里的视频播放起来（静音），播放器才会去请求视频地址。返回找到了几个 <video>。"""
+        b = self._b
+        if b is None or not self.running:
+            return 0
+        with self._lock:
+            sessions = list(self._root)
+        n = 0
+        for session in sessions:
+            try:
+                r = b.cdp.call('Runtime.evaluate', {'expression': _AUTOPLAY_JS, 'returnByValue': True},
+                               session=session, timeout=5)
+                n += int(((r.get('result') or {}).get('value')) or 0)
+            except (browser.BrowserError, ValueError, TypeError):
+                continue
+        return n
 
     # ------------------------------------------------------------ CDP 事件（读线程里）
     def _on_attached(self, params, parent):

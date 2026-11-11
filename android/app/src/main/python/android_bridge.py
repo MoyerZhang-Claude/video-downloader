@@ -254,9 +254,14 @@ def parse(url, probe=True):
             raw_info = ydl.sanitize_info(ydl.extract_info(url, download=False))
     except Exception as e:  # noqa: BLE001
         msg, raw = core.friendly_error(e)
-        # outdated：报错像是解析内核过期了（界面据此马上查一次新内核）；login：要登录才能看
-        return json.dumps({'error': msg, 'raw': raw[:500], 'outdated': core.looks_outdated(raw),
-                           'login': core.needs_login(raw)}, ensure_ascii=False)
+        # 没有专门解析器的网站：读网页源码找视频地址（网页嗅探），找到了就当成这个链接的解析结果
+        raw_info = _sniff_page(url, opts) if msg.startswith('暂不支持') and url.startswith(('http://', 'https://')) else None
+        if raw_info is None:
+            if msg.startswith('暂不支持'):
+                msg = '暂不支持这个网站，网页里也没有找到视频地址（视频可能要登录才能看，或者在别的页面里）'
+            # outdated：报错像是解析内核过期了（界面据此马上查一次新内核）；login：要登录才能看
+            return json.dumps({'error': msg, 'raw': raw[:500], 'outdated': core.looks_outdated(raw),
+                               'login': core.needs_login(raw)}, ensure_ascii=False)
     if raw_info.get('_type') == 'playlist':
         # 注意：sanitize_info(…, True) 会删掉 entries，所以播放列表要在清理前处理
         from app import collection
@@ -314,6 +319,34 @@ def parse(url, probe=True):
         'options': [{'label': o.label, 'tag': o.tag, 'kind': o.kind, 'size': o.size, 'res': o.res,
                      'streams': len(o.streams)} for o in options],
     }, ensure_ascii=False)
+
+
+def _sniff_page(url, opts):
+    """网页嗅探（手机版只读网页源码，不开浏览器）：找到视频地址后带着这个网页的 Referer 再解析一次。
+    同一个网页有好几个版本时，优先 H.264（手机合并、播放都更稳），其次有清晰度信息的。找不到返回 None。"""
+    from app import page_sniff
+    try:
+        title, found = page_sniff.sniff_static(url)
+    except Exception:  # noqa: BLE001
+        return None
+    cands = [r for r in page_sniff.ordered(found) if not r.protected and not r.small]
+    cands.sort(key=lambda r: r.codec == 'H.265')
+    core = _core
+    for res in cands[:3]:
+        o = dict(opts, http_headers=dict(res.headers))
+        o.pop('extract_flat', None)
+        try:
+            with core.new_ydl(o) as ydl:
+                info = ydl.sanitize_info(ydl.extract_info(res.url, download=False))
+        except Exception:  # noqa: BLE001
+            continue
+        if info.get('_type') == 'playlist':
+            continue
+        info = dict(info, title=title or res.host, id=res.stable_id(), webpage_url=res.page_url,
+                    extractor_key='Generic')
+        core._apply_sniff_hint(info, {'codec': res.codec, 'height': res.heights[0] if len(res.heights) == 1 else 0})
+        return info
+    return None
 
 
 def collection_entries(key):

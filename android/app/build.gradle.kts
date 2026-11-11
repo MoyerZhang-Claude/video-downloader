@@ -96,7 +96,8 @@ val ytDlpEjsVersion = "0.8.0"
 val syncPythonCore = tasks.register<Sync>("syncPythonCore") {
     from(rootProject.file("../app")) {
         include("__init__.py", "core.py", "extractors.py", "collection.py", "bilibili.py", "danmaku.py", "config.py",
-            "history.py", "fastdl.py", "core_update.py", "app_update.py", "gdrive.py", "cloud_guide.py", "secure_store.py", "runtime_update.py")
+            "history.py", "fastdl.py", "core_update.py", "app_update.py", "gdrive.py", "cloud_guide.py", "secure_store.py", "runtime_update.py",
+            "page_sniff.py", "sniffer.py", "browser.py")
     }
     into(layout.buildDirectory.dir("pycore/app"))
     // 内置内核的版本号：App 里在线更新内核时，只有比它新才会使用下载的版本

@@ -458,6 +458,22 @@ def codec_family(vcodec):
     return None
 
 
+_HINT_VCODEC = {'H.265': 'hvc1', 'H.264': 'avc1', 'AV1': 'av01', 'VP9': 'vp09'}
+
+
+def _apply_sniff_hint(info, extra):
+    """网页嗅探时从播放列表 / 初始化段读到的编码和分辨率：yt-dlp 自己看不出来时（只有一个没写分辨率的格式）补上。"""
+    formats = info.get('formats') or []
+    if len(formats) != 1:
+        return
+    f = formats[0]
+    if extra.get('height') and not (f.get('height') or f.get('width')):
+        f['height'] = int(extra['height'])
+    codec = _HINT_VCODEC.get(extra.get('codec') or '')
+    if codec and f.get('vcodec') in (None, '', 'unknown'):
+        f['vcodec'] = codec
+
+
 def short_side(f):
     w, h = f.get('width'), f.get('height')
     s = min(w, h) if w and h else (h or w or 0)
@@ -611,8 +627,11 @@ def build_options(info, codec_pref='compat', merge_audio=None, hdr=True):
         res = short_side(f)
         note = f.get('format_note') if f.get('format_note') in ('原画',) else ''
         note_raw = f.get('format_note') or ''
+        fid_txt = f.get('format_id') or ''
+        if not fid_txt or fid_txt.isdigit() or fid_txt.startswith(('hls', 'dash', 'http')):
+            fid_txt = '原画质'           # 看不出分辨率的（如网页嗅探到的单一播放列表）：yt-dlp 给的编号没有意义
         res_txt = f'{res}p{fps_tag or ""}' if res else (
-            '带水印版' if 'watermark' in note_raw.lower() else (note_raw or f.get('format_id') or '默认'))
+            '带水印版' if 'watermark' in note_raw.lower() else (note_raw or fid_txt))
         if dr:
             res_txt += ' HDR' if dr == 'HDR10' else f' {dr}'      # HDR10 / HLG / DV（杜比视界）
         tag = f'原画 {res_txt}' if note else res_txt
@@ -819,6 +838,7 @@ class Parser:
             # 直接给地址解析出来的标题是文件名（index、master…），ID 也容易撞：换成页面标题和按地址算的稳定 ID
             info = dict(info, **{k: v for k, v in (('title', extra.get('title')), ('id', extra.get('id')),
                                                  ('webpage_url', extra.get('page'))) if v})
+            _apply_sniff_hint(info, extra)
         video = self._make(url, yt().YoutubeDL.sanitize_info(info, True), settings, logger.locked_formats)
         if not settings.show_hdr and not any(o.kind == 'video' for o in video.options) and hdr_only(video.info):
             on_error(url, HDR_ONLY_MSG, '')
