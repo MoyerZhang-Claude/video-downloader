@@ -314,6 +314,7 @@ def parse(url, probe=True):
         'locked': logger.locked_formats,
         'subs': subs,
         'danmaku': core.has_danmaku(info),
+        'comment_count': info.get('comment_count') or 0,
         'history': hist,
         'collection': _col_summary(col),
         'options': [{'label': o.label, 'tag': o.tag, 'kind': o.kind, 'size': o.size, 'res': o.res,
@@ -1078,6 +1079,55 @@ def app_check(current):
     except Exception as e:  # noqa: BLE001
         return json.dumps({'ok': False, 'error': _net_error(e)})
     return json.dumps({'ok': True, **(rel or {'version': ''})})
+
+
+def comments_fetch(url, opts_json, out_root, callback):
+    """抓评论区并导出到 out_root（App 缓存目录）；Kotlin 端再把文件存进「下载/链接解析下载器/评论」。
+    网页把图片、头像、表情嵌在里面（只有一个文件，手机上打开、发给别人都能看到图）。
+    callback（Kotlin 对象）：on_progress(json 字符串)、is_cancelled()。
+    返回 {ok, folder, out_dir, files: {html/xlsx/csv: 文件名}, pics: [图片的相对路径], title, n_main, n_sub, n_pics,
+         stopped, notes} 或 {error}"""
+    from app import comments
+    try:
+        o = comments.Options.from_dict(json.loads(opts_json or '{}'))
+    except ValueError:
+        o = comments.Options()
+    o.out_root = out_root
+    o.embed = True
+    os.makedirs(out_root, exist_ok=True)
+    cancel, done = threading.Event(), threading.Event()
+
+    def watch():                     # 「停止」：Kotlin 端点了以后最多 0.3 秒就停下
+        while not done.wait(0.3):
+            try:
+                if callback.is_cancelled():
+                    cancel.set()
+                    return
+            except Exception:  # noqa: BLE001
+                return
+
+    def progress(d):
+        try:
+            callback.on_progress(json.dumps(d, ensure_ascii=False))
+        except Exception:  # noqa: BLE001 - 进度显示失败不影响抓取
+            pass
+
+    threading.Thread(target=watch, daemon=True).start()
+    try:
+        r = comments.Fetcher(o, '', progress, cancel).fetch(url)
+    except comments.CommentError as e:
+        return json.dumps({'error': str(e)}, ensure_ascii=False)
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({'error': _net_error(e)}, ensure_ascii=False)
+    finally:
+        done.set()
+    return json.dumps({
+        'ok': True, 'out_dir': r.out_dir, 'folder': os.path.basename(r.out_dir),
+        'files': {k: os.path.basename(v) for k, v in r.files.items()},
+        'pics': sorted({rel for rel in r.media.values() if rel.startswith('图片/')}),
+        'title': r.meta.get('title') or '', 'n_main': r.n_main, 'n_sub': r.n_sub, 'n_pics': r.n_pics,
+        'stopped': r.stopped, 'notes': [n for n in r.notes if not n.startswith('没有登录')],
+    }, ensure_ascii=False)
 
 
 def _net_error(e):

@@ -64,6 +64,7 @@ class VideoItem(val id: Long, val url: String) {
     var history by mutableStateOf(listOf<HistoryHit>())
     var collection by mutableStateOf<CollectionInfo?>(null)
     var danmaku by mutableStateOf(false)           // B站 视频有弹幕（可以生成弹幕版）
+    var commentCount by mutableStateOf(0)          // B站显示的评论数（可以抓取评论区）
     var outdated by mutableStateOf(false)          // 解析失败，报错像是解析内核过期了
     var key = ""
     var fromCollection = false
@@ -898,6 +899,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 o.optInt("res"), o.optInt("streams", 1))
         }
         item.danmaku = r.optBoolean("danmaku")
+        item.commentCount = r.optInt("comment_count")
         item.subs = r.optJSONArray("subs")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList()
         item.history = r.optJSONArray("history")?.let { a ->
             List(a.length()) { a.getJSONObject(it).let { h -> HistoryHit(h.getString("quality"), h.getString("uri"), h.getDouble("ts")) } }
@@ -1246,4 +1248,71 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 网盘分享、网盘下载、网盘账号（引擎在这里启动） */
     val pan = PanModel(this, app)
+
+    // ------------------------------------------------------------ 抓评论（见 CommentUi.kt）
+    var commentOpts by mutableStateOf(CommentOpts.fromJson(prefs.getString("comment_opts", null)))
+        private set
+    var commentJob by mutableStateOf<CommentJob?>(null)
+        private set
+
+    /** 打开「抓取评论」窗口；已经有一个在抓：把它打开（同时只抓一个，免得被 B站限流） */
+    fun openComments(url: String, title: String, count: Int = 0) {
+        val j = commentJob
+        if (j != null && j.running) {
+            j.shown = true
+            if (j.url != url) toast("「${j.title.take(16)}」的评论还在抓，抓完再开始新的")
+            return
+        }
+        commentJob = CommentJob(url, title, count)
+    }
+
+    /** 关窗口：还在抓就在后台继续，抓完提示 */
+    fun closeComments() {
+        val j = commentJob ?: return
+        if (j.running) {
+            j.shown = false
+            toast("评论在后台继续抓，抓完会提示你")
+        } else commentJob = null
+    }
+
+    fun stopComments(job: CommentJob) {
+        job.stopping = true
+        job.cb?.cancelled = true
+    }
+
+    fun startComments(job: CommentJob, opts: CommentOpts) {
+        commentOpts = opts
+        prefs.edit().putString("comment_opts", opts.toJson()).apply()
+        job.running = true; job.stopping = false; job.error = ""; job.result = null
+        job.status = "正在获取视频信息…"; job.frac = 0f
+        val cb = CommentCallback { d -> viewModelScope.launch(Dispatchers.Main) { if (job.running) job.apply(d) } }
+        job.cb = cb
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val stage = java.io.File(app.cacheDir, "comments").apply { deleteRecursively(); mkdirs() }
+            val r = runCatching { PyBridge.commentsFetch(job.url, opts.toJson(), stage.absolutePath, cb) }
+                .getOrElse { JSONObject().put("error", it.message ?: "出错了") }
+            val saved = if (r.has("error")) null else runCatching {
+                withContext(Dispatchers.Main) { job.status = "正在存到「下载」文件夹…"; job.frac = 0.98f }
+                saveCommentFiles(app, r)
+            }
+            stage.deleteRecursively()
+            withContext(Dispatchers.Main) {
+                job.running = false
+                job.stopping = false
+                val res = saved?.getOrNull()
+                when {
+                    res != null -> {
+                        job.result = res
+                        job.frac = 1f
+                        if (!job.shown) { toast("「${res.title.take(16)}」的评论已保存，在「下载/链接解析下载器/评论」"); job.shown = true }
+                    }
+                    else -> {
+                        job.error = r.optString("error").ifEmpty { "保存文件失败：" + (saved?.exceptionOrNull()?.message ?: "") }
+                        if (!job.shown) { toast("评论没抓到：${job.error}"); job.shown = true }
+                    }
+                }
+            }
+        }
+    }
 }

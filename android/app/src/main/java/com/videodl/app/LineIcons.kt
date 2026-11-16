@@ -12,7 +12,6 @@ import androidx.compose.ui.unit.dp
 
 /** 24×24 圆头细线图标（和电脑版同一套），用 Icon(LineIcons.Download, null, tint = …) 着色。 */
 object LineIcons {
-    val CloudUp by lazy { build("cloud_up", listOf("M7.2 18.5h9.9a4.1 4.1 0 0 0 .7-8.15 5.9 5.9 0 0 0-11.3 1.4A3.4 3.4 0 0 0 7.2 18.5z", "M12 16v-5.2M9.8 12.8 12 10.6l2.2 2.2"), listOf()) }
     val Plus by lazy { build("plus", listOf("M12 5v14M5 12h14"), listOf()) }
     val Menu by lazy { build("menu", listOf("M4 7h16M4 12h16M4 17h10"), listOf()) }
     val ArrowLeft by lazy { build("arrow_left", listOf("M19 12H5.5M11.5 5.8 5.3 12l6.2 6.2"), listOf()) }
@@ -20,7 +19,10 @@ object LineIcons {
     val ArrowDown by lazy { build("arrow_down", listOf("M12 5v13.5M5.8 12.5 12 18.7l6.2-6.2"), listOf()) }
     val Folder by lazy { build("folder", listOf("M3.5 7A1.5 1.5 0 0 1 5 5.5h4l2 2.2h8A1.5 1.5 0 0 1 20.5 9.2v8.8a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18z"), listOf()) }
     val Clock by lazy { build("clock", listOf("M3.5,12a8.5,8.5 0 1,0 17,0a8.5,8.5 0 1,0 -17,0Z", "M12 7.5V12l3 2"), listOf()) }
+    val EyeOff by lazy { build("eye_off", listOf("M3.5 3.5l17 17M10.6 10.7a2 2 0 0 0 2.7 2.7M9.5 5.7A9 9 0 0 1 12 5.3c4.3 0 7.6 3 8.7 6.7a11 11 0 0 1-2.4 3.9M6.6 6.8A11 11 0 0 0 3.3 12c1.1 3.7 4.4 6.7 8.7 6.7a9 9 0 0 0 4.1-1"), listOf()) }
     val Download by lazy { build("download", listOf("M12 4.5v10.5M7.2 10.5 12 15.3l4.8-4.8M5 19.5h14"), listOf()) }
+    val Cloud by lazy { build("cloud", listOf("M7.2 18.5h9.9a4.1 4.1 0 0 0 .7-8.15 5.9 5.9 0 0 0-11.3 1.4A3.4 3.4 0 0 0 7.2 18.5z"), listOf()) }
+    val CloudUp by lazy { build("cloud_up", listOf("M7.2 18.5h9.9a4.1 4.1 0 0 0 .7-8.15 5.9 5.9 0 0 0-11.3 1.4A3.4 3.4 0 0 0 7.2 18.5z", "M12 16v-5.2M9.8 12.8 12 10.6l2.2 2.2"), listOf()) }
     val Settings by lazy { build("settings", listOf("M12.00,5.00L13.79,2.98L15.52,3.50L15.89,6.18L16.95,7.05L19.65,6.89L20.50,8.48L18.87,10.63L19.00,12.00L21.02,13.79L20.50,15.52L17.82,15.89L16.95,16.95L17.11,19.65L15.52,20.50L13.37,18.87L12.00,19.00L10.21,21.02L8.48,20.50L8.11,17.82L7.05,16.95L4.35,17.11L3.50,15.52L5.13,13.37L5.00,12.00L2.98,10.21L3.50,8.48L6.18,8.11L7.05,7.05L6.89,4.35L8.48,3.50L10.63,5.13Z", "M9,12a3,3 0 1,0 6,0a3,3 0 1,0 -6,0Z"), listOf()) }
     val Search by lazy { build("search", listOf("M4.5,11a6.5,6.5 0 1,0 13,0a6.5,6.5 0 1,0 -13,0Z", "m16 16 4 4"), listOf()) }
     val ZoomIn by lazy { build("zoom_in", listOf("M4.5,11a6.5,6.5 0 1,0 13,0a6.5,6.5 0 1,0 -13,0Z", "m16 16 4 4M8.4 11h5.2M11 8.4v5.2"), listOf()) }
@@ -60,11 +62,13 @@ object LineIcons {
     val Bell by lazy { build("bell", listOf("M6.5 16.5V11a5.5 5.5 0 0 1 11 0v5.5l1.5 1.5H5zM10.2 20.5a2 2 0 0 0 3.6 0"), listOf()) }
     val Cube by lazy { build("cube", listOf("M12 3.5 19.5 7.5v9L12 20.5 4.5 16.5v-9z", "M4.5 7.5 12 11.5l7.5-4M12 11.5v9"), listOf()) }
     val User by lazy { build("user", listOf("M8.5,8.5a3.5,3.5 0 1,0 7,0a3.5,3.5 0 1,0 -7,0Z", "M5.5 19.5a6.5 6.5 0 0 1 13 0"), listOf()) }
+    val Lock by lazy { build("lock", listOf("M7.7,10.5h8.6a2.2,2.2 0 0 1 2.2,2.2v5.1a2.2,2.2 0 0 1 -2.2,2.2h-8.6a2.2,2.2 0 0 1 -2.2,-2.2v-5.1a2.2,2.2 0 0 1 2.2,-2.2Z", "M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"), listOf()) }
     val Link by lazy { build("link", listOf("M10 14a4 4 0 0 0 5.7 0l2.8-2.8a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-2.8 2.8a4 4 0 0 0 5.7 5.7l1-1"), listOf()) }
     val Film by lazy { build("film", listOf("M6,4.5h12a2.5,2.5 0 0 1 2.5,2.5v10a2.5,2.5 0 0 1 -2.5,2.5h-12a2.5,2.5 0 0 1 -2.5,-2.5v-10a2.5,2.5 0 0 1 2.5,-2.5Z", "M7.5 4.5v15M16.5 4.5v15M3.5 9.5h4M3.5 14.5h4M16.5 9.5h4M16.5 14.5h4"), listOf()) }
     val Tv by lazy { build("tv", listOf("M6.5,7h11a3,3 0 0 1 3,3v6.5a3,3 0 0 1 -3,3h-11a3,3 0 0 1 -3,-3v-6.5a3,3 0 0 1 3,-3Z", "M8.5 3.5 11 7M15.5 3.5 13 7M9 12v2M15 12v2"), listOf()) }
     val Keyboard by lazy { build("keyboard", listOf("M5.5,6h13a2.5,2.5 0 0 1 2.5,2.5v7a2.5,2.5 0 0 1 -2.5,2.5h-13a2.5,2.5 0 0 1 -2.5,-2.5v-7a2.5,2.5 0 0 1 2.5,-2.5Z", "M7 10h.5M10.5 10h.5M14 10h.5M17 10h.5M8 14h8"), listOf()) }
     val Type by lazy { build("type", listOf("M5 7V5.5h14V7M12 5.5v13M9.5 18.5h5"), listOf()) }
+    val Chat by lazy { build("chat", listOf("M5 6.5h14a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5h-7l-4.5 3v-3H5A1.5 1.5 0 0 1 3.5 16V8A1.5 1.5 0 0 1 5 6.5z"), listOf()) }
     val Heart by lazy { build("heart", listOf("M12 19.5s-7.5-4.4-7.5-9.6A4.2 4.2 0 0 1 12 7.6a4.2 4.2 0 0 1 7.5 2.3c0 5.2-7.5 9.6-7.5 9.6z"), listOf()) }
     val Github by lazy { build("github", listOf("M9 19.5c-4 1.2-4-2-5.5-2.5M14.5 21v-3.4a3 3 0 0 0-.8-2.3c2.7-.3 5.5-1.3 5.5-6a4.7 4.7 0 0 0-1.3-3.2 4.4 4.4 0 0 0-.1-3.2s-1-.3-3.4 1.3a11.6 11.6 0 0 0-6 0C6 2.6 5 2.9 5 2.9a4.4 4.4 0 0 0-.1 3.2A4.7 4.7 0 0 0 3.6 9.3c0 4.7 2.8 5.7 5.5 6a3 3 0 0 0-.8 2.3V21"), listOf()) }
     val Edit by lazy { build("edit", listOf("M14.5 5.5l4 4M4 20l1-4.5L15.8 4.7a2 2 0 0 1 2.9 0l.6.6a2 2 0 0 1 0 2.9L8.5 19z"), listOf()) }
@@ -118,7 +122,10 @@ object LineIcons {
         "arrow_down" to { ArrowDown },
         "folder" to { Folder },
         "clock" to { Clock },
+        "eye_off" to { EyeOff },
         "download" to { Download },
+        "cloud" to { Cloud },
+        "cloud_up" to { CloudUp },
         "settings" to { Settings },
         "search" to { Search },
         "zoom_in" to { ZoomIn },
@@ -158,11 +165,13 @@ object LineIcons {
         "bell" to { Bell },
         "cube" to { Cube },
         "user" to { User },
+        "lock" to { Lock },
         "link" to { Link },
         "film" to { Film },
         "tv" to { Tv },
         "keyboard" to { Keyboard },
         "type" to { Type },
+        "chat" to { Chat },
         "heart" to { Heart },
         "github" to { Github },
         "edit" to { Edit },

@@ -97,7 +97,9 @@ val syncPythonCore = tasks.register<Sync>("syncPythonCore") {
     from(rootProject.file("../app")) {
         include("__init__.py", "core.py", "extractors.py", "collection.py", "bilibili.py", "danmaku.py", "config.py",
             "history.py", "fastdl.py", "core_update.py", "app_update.py", "gdrive.py", "cloud_guide.py", "secure_store.py", "runtime_update.py",
-            "page_sniff.py", "sniffer.py", "browser.py")
+            "page_sniff.py", "sniffer.py", "browser.py", "comments.py", "comment_page.py",
+            "fonts/VDSans-Regular.ttf", "fonts/VDSans-SemiBold.ttf", "fonts/VDSerif-Regular.ttf", "fonts/VDSerif-SemiBold.ttf",
+            "fonts/OFL.txt")       // 评论存档网页里嵌的英文字体（SIL OFL）
     }
     into(layout.buildDirectory.dir("pycore/app"))
     // 内置内核的版本号：App 里在线更新内核时，只有比它新才会使用下载的版本

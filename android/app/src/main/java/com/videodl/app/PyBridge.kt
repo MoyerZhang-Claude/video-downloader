@@ -34,6 +34,10 @@ object PyBridge {
     fun download(key: String, index: Int, outDir: String, cb: DownloadCallback, wantSubs: Boolean): JSONObject =
         JSONObject(module.callAttr("download", key, index, outDir, cb, wantSubs).toString())
 
+    /** 抓评论区并导出到 outRoot（见 android_bridge.comments_fetch） */
+    fun commentsFetch(url: String, opts: String, outRoot: String, cb: CommentCallback): JSONObject =
+        JSONObject(module.callAttr("comments_fetch", url, opts, outRoot, cb).toString())
+
     /** 下载封面原图到 outDir：{path, ext} 或 {error} */
     fun cover(key: String, outDir: String): JSONObject = JSONObject(module.callAttr("cover", key, outDir).toString())
 

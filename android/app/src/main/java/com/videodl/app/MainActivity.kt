@@ -114,6 +114,9 @@ fun openUri(ctx: Context, uri: Uri, mime: String, vm: MainViewModel) {
     }.onFailure { vm.toast("没有能打开这个文件的应用") }
 }
 
+/** 12345 → 1.2万 */
+fun fmtCount(n: Int): String = if (n >= 10000) String.format(Locale.CHINA, "%.1f万", n / 10000.0).replace(".0万", "万") else n.toString()
+
 fun openWeb(ctx: Context, url: String) {
     runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
 }
@@ -206,6 +209,7 @@ fun App(vm: MainViewModel, activity: ComponentActivity) {
         vm.avatarEdit?.let { AvatarEditorScreen(it, onCancel = { vm.avatarEdit = null }, onPickOther = chooseAvatar,
             onSave = vm::saveAvatar) }
         vm.episodeSheet?.let { EpisodeDialog(it, vm) }
+        vm.commentJob?.takeIf { it.shown }?.let { CommentScreen(it, vm) }
         vm.duplicate?.let { (item, hit) -> DuplicateDialog(item, hit, vm) }
         vm.coverItem?.let { CoverDialog(it, vm) }
         if (vm.askBattery) BatteryDialog(vm)
@@ -332,6 +336,7 @@ private fun RecordMenu(h: HistoryRecord, vm: MainViewModel, expanded: Boolean, o
         MenuItem(LineIcons.Edit, "重命名") { onDismiss(); vm.renaming = h }
         MenuItem(LineIcons.FolderMove, "移至分区") { onDismiss(); vm.moving = h }
         if (h.url.isNotEmpty()) MenuItem(LineIcons.Refresh, "重新解析") { onDismiss(); vm.submitUrls(listOf(h.url)); goHome() }
+        if (commentSupported(h.url)) MenuItem(LineIcons.Chat, "抓取评论") { onDismiss(); vm.openComments(h.url, h.title) }
         if (expanded && vm.cloud.loggedIn) {
             val fileId = remember(h.id) { vm.cloud.uploadedId(h.uri) }
             if (fileId.isNotEmpty()) MenuItem(LineIcons.CloudUp, "在谷歌云盘中查看") {
@@ -671,7 +676,8 @@ private fun VideoCard(item: VideoItem, vm: MainViewModel) {
             }
         }
         if (item.state == "ok") {
-            val hasChips = item.history.isNotEmpty() || item.subs.isNotEmpty() || item.collection != null || item.danmaku
+            val canComments = item.platform.startsWith("B站") && commentSupported(item.url)
+            val hasChips = item.history.isNotEmpty() || item.subs.isNotEmpty() || item.collection != null || item.danmaku || canComments
             if (hasChips) FlowRow(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (item.history.isNotEmpty()) Tag("✓ 已下载 " + item.history.joinToString("、") { it.quality }, P.tintOk, P.ok)
@@ -679,6 +685,12 @@ private fun VideoCard(item: VideoItem, vm: MainViewModel) {
                 if (item.danmaku) Tag(if (vm.wantDanmaku) "弹幕版" else "有弹幕", P.tintAccent, P.accent) {
                     vm.toast(if (vm.wantDanmaku) "将生成弹幕版（只保存弹幕版）。不想要可以在输入框的选项里关掉"
                              else "这个视频有弹幕。在输入框的选项里打开「B站弹幕版」可以下载弹幕版")
+                }
+                if (canComments) Row(Modifier.clip(RoundedCornerShape(6.dp)).border(1.dp, P.borderStrong, RoundedCornerShape(6.dp))
+                    .clickable { vm.openComments(item.url, item.title, item.commentCount) }.padding(horizontal = 7.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    LIcon(LineIcons.Chat, P.text2, 13.dp)
+                    Text(" 评论" + if (item.commentCount > 0) " " + fmtCount(item.commentCount) else "", fontSize = 12.sp, color = P.text2)
                 }
                 item.collection?.let { c ->
                     val pos = when {
@@ -1014,6 +1026,7 @@ private fun ParseMenu(r: ParseRecord, vm: MainViewModel, expanded: Boolean, onDi
     val ctx = LocalContext.current
     DropdownMenu(expanded, onDismiss, containerColor = P.surface, shape = RoundedCornerShape(14.dp)) {
         MenuItem(LineIcons.Refresh, "重新解析") { onDismiss(); vm.reparse(r.url); goHome() }
+        if (r.kind != "pan" && commentSupported(r.url)) MenuItem(LineIcons.Chat, "抓取评论") { onDismiss(); vm.openComments(r.url, r.title) }
         MenuItem(LineIcons.Edit, "重命名") { onDismiss(); vm.renamingParse = r }
         if (r.kind == "pan") MenuItem(LineIcons.FolderMove, "移至分区") { onDismiss(); vm.movingParse = r }
         MenuItem(LineIcons.Copy, "复制链接") {

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import (
+    comments,
     APP_NAME, APP_VERSION, avatar, bilibili, core, core_update, greetings, icons, pan, proc_job, runtime_update,
     logsafe, task_store, theme, ui,
 )
@@ -1181,6 +1182,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         m.addSeparator()
         m.addAction(ic('refresh'), '重新解析', lambda: self._reparse_url(h['url']))
         m.addAction(ic('copy'), '复制原链接', lambda: QGuiApplication.clipboard().setText(h['url']))
+        if comments.supported(h['url']):
+            m.addAction(ic('chat'), '抓取评论…', lambda: self.open_comments(h['url'], h.get('title') or ''))
         self.cloud_menu(m, [h['filepath']], lambda: self.cloud_upload_record(h))
         m.addSeparator()
         m.addAction(ic('trash'), '从历史中删除', lambda: self._delete_history(h['id']))
@@ -1194,6 +1197,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         ic = lambda name: icons.icon(name, c('text2'))   # noqa: E731
         m.addAction(ic('refresh'), '重新解析', lambda: self._reparse_record(rec))
         m.addAction(ic('copy'), '复制链接', lambda: QGuiApplication.clipboard().setText(rec['url']))
+        if rec['kind'] != PAN and comments.supported(rec['url']):
+            m.addAction(ic('chat'), '抓取评论…', lambda: self.open_comments(rec['url'], rec.get('title') or ''))
         m.addSeparator()
         m.addAction(ic('edit'), '重命名…', lambda: self._rename_parse(rec))
         if rec['kind'] == PAN:
@@ -2139,6 +2144,12 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
                 t = label('弹幕', 'tagAccent')
                 t.setToolTip('B站弹幕，可转成 ASS 字幕或生成「弹幕版」视频')
                 line.addWidget(t)
+            if v.platform.startswith('B站') and comments.supported(row.url):
+                n = v.info.get('comment_count') or 0
+                cm = Chip((f'评论 {n / 10000:.1f}万'.replace('.0万', '万') if n >= 10000 else f'评论 {n}') if n else '评论', 'chat', height=24, font_px=12,
+                          tip='抓取这个视频的评论区（可以选条数、楼中楼、图片），导出成网页 / Excel / CSV')
+                cm.clicked.connect(lambda: self.open_comments(row.url, v.title, v.info.get('comment_count') or 0))
+                line.addWidget(cm)
             human, autos = core.pick_subtitles(v.info, self.settings.sub_langs)
             if human or autos:
                 names = [core.sub_name(x) for x in human] + [core.sub_name(x, True) for x in autos]
@@ -3209,6 +3220,21 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             self.tray.showMessage(title, text, icon, 5000)
 
     # ------------------------------------------------------------ 右键菜单
+    def open_comments(self, url, title='', count=0):
+        """「抓取评论」窗口（不挡主界面；同一个视频已经开着就把它提到前面）"""
+        from .comment_ui import CommentDialog
+        jobs = self.__dict__.setdefault('_comment_dialogs', [])
+        jobs[:] = [d for d in jobs if shiboken6.isValid(d) and (d.isVisible() or d.running)]
+        for d in jobs:
+            if d.url == url and d.isVisible():
+                d.raise_()
+                d.activateWindow()
+                return
+        dlg = CommentDialog(self, url, title, count)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, False)
+        jobs.append(dlg)
+        dlg.show()
+
     def _result_menu(self, token, pos):
         row = self.rows.get(token)
         if not row:
@@ -3222,6 +3248,9 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
                 m.addAction(ic('image'), '保存封面', lambda: self._save_cover(token))
                 if self.thumbs.has_raw(row.cover_url):
                     m.addAction(ic('search'), '预览封面', lambda: self._preview_cover(token))
+            if comments.supported(row.url):
+                v = row.video
+                m.addAction(ic('chat'), '抓取评论…', lambda: self.open_comments(row.url, v.title, v.info.get('comment_count') or 0))
             m.addSeparator()
         m.addAction(ic('refresh'), '重新解析', lambda: self._start_parse(token))
         m.addAction(ic('copy'), '复制链接', lambda: QGuiApplication.clipboard().setText(row.url))
