@@ -18,7 +18,7 @@ import time
 from .config import DATA
 
 DB_PATH = os.path.join(DATA, 'history.db')
-SCHEMA = 3
+SCHEMA = 4
 VIDEO, PAN = 'video', 'pan'
 
 # 内置分区：(平台键, 名称, 图标, 类别)；记录里的平台名 → 平台键
@@ -71,8 +71,11 @@ class History:
         self.conn.execute('''CREATE TABLE IF NOT EXISTS sections (
             id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, icon TEXT, platform TEXT,
             builtin INTEGER DEFAULT 0, sort INTEGER DEFAULT 0, ts REAL)''')
-        if 'kind' not in {r[1] for r in self.conn.execute('PRAGMA table_info(sections)')}:
+        sec_cols = {r[1] for r in self.conn.execute('PRAGMA table_info(sections)')}
+        if 'kind' not in sec_cols:
             self.conn.execute("ALTER TABLE sections ADD COLUMN kind TEXT DEFAULT 'video'")
+        if 'hidden' not in sec_cols:        # 4：内置分区可以从侧边栏隐藏（不用抖音、快手的人）
+            self.conn.execute('ALTER TABLE sections ADD COLUMN hidden INTEGER DEFAULT 0')
         self.conn.execute('''CREATE TABLE IF NOT EXISTS pan_batches (
             id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT, share_id TEXT, title TEXT, url TEXT, save_dir TEXT,
             task_ids TEXT, ts REAL, state TEXT DEFAULT 'active', record_id INTEGER)''')
@@ -232,19 +235,26 @@ class History:
 
     # ------------------------------------------------------------ 分区
     def sections(self, kind=None):
-        """[{id, name, icon, platform, builtin, count, kind}]，内置分区在前，自建的按创建先后。kind 为空 = 两类都要。
+        """[{id, name, icon, platform, builtin, count, kind, hidden}]，内置分区在前，自建的按创建先后。kind 为空 = 两类都要。
         count：视频分区是下载好的视频数，网盘分区是网盘分享的解析记录数。"""
         sql = ('SELECT s.id, s.name, s.icon, s.platform, s.builtin, '
                '(SELECT COUNT(*) FROM downloads d WHERE d.section_id=s.id) + '
-               "(SELECT COUNT(*) FROM parses p WHERE p.section_id=s.id), COALESCE(s.kind, 'video') FROM sections s")
+               "(SELECT COUNT(*) FROM parses p WHERE p.section_id=s.id), COALESCE(s.kind, 'video'), "
+               'COALESCE(s.hidden, 0) FROM sections s')
         args = []
         if kind:
             sql += " WHERE COALESCE(s.kind, 'video')=?"
             args.append(kind)
         with self._lock:
             rows = self.conn.execute(sql + ' ORDER BY s.builtin DESC, s.sort, s.id', args).fetchall()
-        keys = ('id', 'name', 'icon', 'platform', 'builtin', 'count', 'kind')
+        keys = ('id', 'name', 'icon', 'platform', 'builtin', 'count', 'kind', 'hidden')
         return [dict(zip(keys, r)) for r in rows]
+
+    def set_section_hidden(self, section_id, hidden=True):
+        """从侧边栏隐藏 / 找回一个分区。只是不显示，里面的记录都还在，以后同平台的下载照样放进去。"""
+        with self._lock:
+            self.conn.execute('UPDATE sections SET hidden=? WHERE id=?', (1 if hidden else 0, int(section_id)))
+            self.conn.commit()
 
     def create_section(self, name, icon='folder', kind=VIDEO):
         with self._lock:

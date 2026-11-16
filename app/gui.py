@@ -588,12 +588,28 @@ class ParseRow(QWidget):
             p.drawRoundedRect(QRectF(self.rect()), 10, 10)
 
 
+class _NavFilter(QObject):
+    """鼠标侧键：后退 / 前进（在主窗口里，没有弹出菜单、对话框的时候）"""
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+
+    def eventFilter(self, obj, ev):
+        if (ev.type() == QEvent.MouseButtonPress and ev.button() in (Qt.BackButton, Qt.ForwardButton)
+                and isinstance(obj, QWidget) and obj.window() is self.win
+                and QApplication.activePopupWidget() is None and QApplication.activeModalWidget() is None):
+            self.win.nav_step(-1 if ev.button() == Qt.BackButton else 1)
+            return True
+        return False
+
+
 class AccountButton(ui._HoverButton):
     """侧边栏左下角：头像 + 名字 + B站状态，点击弹出菜单（像 Claude 的账号菜单）。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(52)
+        self.setFixedHeight(ui.side_h(52))
         self.avatar = ui.Avatar(32, self)
         self.avatar.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.name, self.sub = '', ''
@@ -623,15 +639,17 @@ class AccountButton(ui._HoverButton):
         if self.collapsed:
             return
         x, w = 50, self.width() - 50 - 30
-        f = ui.px_font(13, 600)
+        f = ui.px_font(13, 600, area='side')
+        f2 = ui.px_font(12, area='side')
+        h1, h2 = QFontMetrics(f).height(), QFontMetrics(f2).height()      # 字号调大时两行一起往中间排
+        top = (self.height() - h1 - h2 - 2) / 2
         p.setFont(f)
         p.setPen(c('text'))
-        p.drawText(QRectF(x, 7, w, 20), int(Qt.AlignLeft | Qt.AlignVCenter),
+        p.drawText(QRectF(x, top, w, h1), int(Qt.AlignLeft | Qt.AlignVCenter),
                    QFontMetrics(f).elidedText(self.name, Qt.ElideRight, w))
-        f2 = ui.px_font(12)
         p.setFont(f2)
         p.setPen(c('text3'))
-        p.drawText(QRectF(x, 26, w, 18), int(Qt.AlignLeft | Qt.AlignVCenter),
+        p.drawText(QRectF(x, top + h1 + 2, w, h2), int(Qt.AlignLeft | Qt.AlignVCenter),
                    QFontMetrics(f2).elidedText(self.sub, Qt.ElideRight, w))
         icons.paint(p, 'chevron_down', QRectF(self.width() - 26, 18, 16, 16), c('text3'))
 
@@ -683,6 +701,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self.hist_section = None         # 历史记录页只看某个分区（None = 全部）
         self.hist_kind = None            # 历史记录页只看视频 / 网盘（None = 两类都看）
         self.hist_mode = 'parses'        # 历史记录页：parses 解析记录 / downloads 下载好的视频
+        self._nav_hist, self._nav_pos = [], -1     # 去过的页面（鼠标侧键后退 / 前进）
         self.sections = {}
         try:
             self.history = History()
@@ -782,6 +801,10 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         self.notice = ui.NoticeBar(central)
         self.frameless = Frameless(self)          # 去掉系统标题栏，右上角自己画窗口按钮
         QShortcut(QKeySequence('Ctrl+,'), self, activated=self._open_settings)
+        QShortcut(QKeySequence('Alt+Left'), self, activated=lambda: self.nav_step(-1))
+        QShortcut(QKeySequence('Alt+Right'), self, activated=lambda: self.nav_step(1))
+        self._nav_filter = _NavFilter(self)
+        QApplication.instance().installEventFilter(self._nav_filter)
         QShortcut(QKeySequence('Ctrl+L'), self, activated=self._new_parse)
         QShortcut(QKeySequence('Ctrl+K'), self, activated=self._open_search)
         self._set_collapsed(self.settings.sidebar_collapsed)
@@ -837,6 +860,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             head = ui.SideHeader(title, extra.get(key, True), '新建' + title)
             head.toggled_open.connect(lambda on, k=key: self._toggle_side(k, on))
             head.plus.clicked.connect(lambda _=False, k=kind: self._new_section(kind=k))
+            head.setContextMenuPolicy(Qt.CustomContextMenu)
+            head.customContextMenuRequested.connect(lambda pos, k=kind, h=head: self._side_header_menu(k, h.mapToGlobal(pos)))
             sl.addWidget(head)
             sec = clear_widget()
             box = QVBoxLayout(sec)
@@ -888,7 +913,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
 
     def _set_collapsed(self, on, save=False):
         self.settings.sidebar_collapsed = on
-        self.sidebar.setFixedWidth(60 if on else 260)
+        # 侧边栏字号调大时跟着变宽（最多宽 40%），标题、分区名不会被切掉
+        self.sidebar.setFixedWidth(ui.side_h(60) if on else round(260 * min(1.4, max(1.0, theme.font_factor('side')))))
         for w in (self.brand, self.side_spark, self.recent_scroll):
             w.setVisible(not on)
         self.side_fill.setVisible(on)
@@ -901,7 +927,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         if save:
             self._save_settings()
 
-    def _go(self, page):
+    def _go(self, page, _nav=False):
         if self.settings_panel is not None and self.settings_panel.isVisible():
             self.settings_panel.close_panel()
         self.page = page
@@ -912,6 +938,40 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             self._refresh_history()
         self._flush_stale()
         self._place_toast()
+        if not _nav:
+            self._nav_push()
+
+    # ------------------------------------------------------------ 后退 / 前进（鼠标侧键、Alt+← / Alt+→）
+    def _nav_state(self):
+        """现在看的是哪一页（历史记录页还要记住看的是哪个分区、哪一类）"""
+        hist = (self.hist_mode, self.hist_kind, self.hist_section) if self.page == 'history' else None
+        return (self.page, self.fresh if self.page == 'parse' else None, hist)
+
+    def _nav_push(self):
+        st = self._nav_state()
+        if self._nav_hist and self._nav_hist[self._nav_pos] == st:
+            return
+        del self._nav_hist[self._nav_pos + 1:]
+        self._nav_hist.append(st)
+        del self._nav_hist[:-50]
+        self._nav_pos = len(self._nav_hist) - 1
+
+    def nav_step(self, step):
+        """step = -1 后退，+1 前进。设置面板开着时，后退先把它关掉。"""
+        if step < 0 and self.settings_panel is not None and self.settings_panel.isVisible():
+            self.settings_panel.close_panel()
+            return
+        pos = self._nav_pos + step
+        if not 0 <= pos < len(self._nav_hist):
+            return
+        self._nav_pos = pos
+        page, fresh, hist = self._nav_hist[pos]
+        if page == 'parse' and fresh is not None and fresh != self.fresh:
+            self.fresh = fresh
+            self._update_parse_mode()
+        if hist is not None:
+            self.hist_mode, self.hist_kind, self.hist_section = hist
+        self._go(page, _nav=True)
 
     def _new_parse(self):
         """像 Claude 的「新建」：回到首页（问候语 + 居中输入框）。
@@ -996,7 +1056,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         for kind, box in self.sec_boxes.items():
             desired = []
             for sec in secs:
-                if sec['kind'] != kind or not opened.get(kind):
+                if sec['kind'] != kind or not opened.get(kind) or sec.get('hidden'):
                     continue
                 desired.append((('sec', sec['id']), (sec['name'], sec['icon'], sec['count'], sec['builtin']),
                                 lambda sec=sec: self._section_item(sec), None))
@@ -1204,7 +1264,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
 
     def _new_section(self, move=None, kind=VIDEO, move_parse=None):
         what = '视频' if kind == VIDEO else '网盘'
-        dlg = FolderDialog(self, f'新建{what}分区')
+        hidden = [s for s in self.sections.values() if s['kind'] == kind and s.get('hidden')]
+        dlg = FolderDialog(self, f'新建{what}分区', hidden=hidden, on_restore=self._unhide_section)
         if not dlg.exec():
             return
         sid = self.history.create_section(dlg.name, dlg.icon, kind)
@@ -1230,6 +1291,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         m.addSeparator()
         if s['builtin']:
             m.addAction(ic('edit'), '重命名分区…', lambda: self._edit_section(s))
+            m.addAction(ic('eye_off'), '从侧边栏移除', lambda: self._hide_section(s))
             hint = m.addAction(f'{s["name"]} 的视频下载后会自动放进来' if s['kind'] == VIDEO
                                else f'解析过的{s["name"]}分享会自动放进来')
             hint.setEnabled(False)
@@ -1237,6 +1299,33 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
             m.addAction(ic('edit'), '编辑分区…', lambda: self._edit_section(s))
             m.addAction(ic('trash'), '删除分区', lambda: self._delete_section(s))
         m.exec(pos)
+
+    def _hide_section(self, s):
+        """内置分区不能删（同平台的下载会自动放进去），但可以不在侧边栏显示"""
+        self.history.set_section_hidden(s['id'], True)
+        self._after_history_change()
+        title = '视频分区' if s['kind'] == VIDEO else '网盘分区'
+        self.notify(f'已从侧边栏移除「{s["name"]}」，里面的记录还在。想找回：点「{title}」右边的 +，再点「已移除」')
+
+    def _side_header_menu(self, kind, pos):
+        """「视频分区 / 网盘分区」标题的右键菜单：新建分区、找回移除的分区"""
+        m = ui.popup_menu(self)
+        ic = lambda name: icons.icon(name, c('text2'))   # noqa: E731
+        title = '视频分区' if kind == VIDEO else '网盘分区'
+        m.addAction(ic('folder_plus'), f'新建{title}…', lambda: self._new_section(kind=kind))
+        hidden = [s for s in self.sections.values() if s['kind'] == kind and s.get('hidden')]
+        if hidden:
+            m.addSeparator()
+            head = m.addAction('移除过的分区（点一下放回侧边栏）')
+            head.setEnabled(False)
+            for s in hidden:
+                m.addAction(ic(s['icon']), s['name'], lambda s=s: self._unhide_section(s))
+        m.exec(pos)
+
+    def _unhide_section(self, s):
+        self.history.set_section_hidden(s['id'], False)
+        self._after_history_change()
+        self.notify(f'「{s["name"]}」已放回侧边栏')
 
     def _edit_section(self, s):
         dlg = FolderDialog(self, '编辑分区', s['name'], s['icon'], icon_editable=not s['builtin'])
@@ -2665,6 +2754,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
     def _refresh_history(self, reset=False):
         """历史记录页：解析记录（全部 / 视频 / 网盘 / 某个网盘分区），或者下载好的视频（全部 / 某个视频分区）。
         数据库和「文件还在不在」在后台线程里查，查完再画出来。"""
+        if self.page == 'history':
+            self._nav_push()             # 在历史记录页里换了分区 / 类别：也能后退回去
         if reset:
             self._hist_limit = 150
         if not self.history:
@@ -3475,10 +3566,12 @@ def setup_app(argv):
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setStyle('Fusion')
+    _fs = Settings.load()
+    theme.set_font_prefs(_fs.font_scale, _fs.side_font_scale, _fs.font_latin, _fs.font_cjk, _fs.font_serif)
     theme.load_fonts()
     f = QFont()
-    f.setFamilies(theme.ui_families())      # 英文 VDSans，中文微软雅黑（和 Claude 一样）
-    f.setPixelSize(13)
+    f.setFamilies(theme.ui_families())      # 英文 VDSans，中文微软雅黑（和 Claude 一样）；设置 → 字体 里可以换
+    f.setPixelSize(theme.fs(13))
     f.setHintingPreference(QFont.PreferNoHinting)
     app.setFont(f)
     _s = Settings.load()

@@ -158,7 +158,7 @@ fun App(vm: MainViewModel, activity: ComponentActivity) {
                     else SystemBarStyle.light(AColor.TRANSPARENT, AColor.TRANSPARENT)
         activity.enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
     }
-    VdTheme(vm.themeMode, vm.darkOled) { CompositionLocalProvider(LocalShowTips provides vm.showTips) {
+    VdTheme(vm.themeMode, vm.darkOled, vm.fontScale / 100f) { CompositionLocalProvider(LocalShowTips provides vm.showTips) {
         var page by rememberSaveable { mutableStateOf("home") }
         val drawer = rememberDrawerState(DrawerValue.Closed)
         val scope = rememberCoroutineScope()
@@ -183,11 +183,11 @@ fun App(vm: MainViewModel, activity: ComponentActivity) {
             gesturesEnabled = page == "home" || drawer.isOpen,
             scrimColor = Color.Transparent,         // 侧边栏占满整个屏幕，不需要遮罩
             drawerContent = {
-                Drawer(vm, page, onNavigate = ::go, onNew = {
+                ScaledText(vm.sideFontScale / 100f) { Drawer(vm, page, onNavigate = ::go, onNew = {
                     vm.newSession()          // 像 Claude 的「新建」：回到首页
                     go("home")
                     runCatching { focus.requestFocus() }
-                }, onSection = openSection, goHome = goHome)
+                }, onSection = openSection, goHome = goHome) }
             },
         ) {
             Box(Modifier.fillMaxSize().background(P.bg)) {
@@ -254,7 +254,7 @@ private fun Drawer(vm: MainViewModel, page: String, onNavigate: (String) -> Unit
                             RoundIcon(LineIcons.Plus, { vm.sectionEditor = SectionEdit(null, null, kind) }, size = 38.dp, iconSize = 19.dp)
                         }
                     }
-                    items(vm.sections.filter { it.kind == kind }, key = { "s${it.id}" }) { s ->
+                    items(vm.sections.filter { it.kind == kind && !it.hidden }, key = { "s${it.id}" }) { s ->
                         DrawerItem(LineIcons.named(s.icon), s.name, page == "history" && vm.historySection == s.id,
                             trailing = if (s.count > 0) "${s.count}" else "",
                             onLongClick = { vm.sectionEditor = SectionEdit(s, null, s.kind) }) {
@@ -536,6 +536,53 @@ private fun DownloadOptionRows(vm: MainViewModel) {
         SettingsRow(null, "弹幕版编码", if (vm.danmakuHevc) "手机的 H.264 编码器跑不了时改用 H.265（如 4K 120 帧）；很老的电视、电脑可能放不了 H.265"
                 else "只用 H.264，任何设备都能放", subtitleIsTip = true, divider = false) {
             Choice(listOf(false to "兼容优先", true to "允许 H.265"), vm.danmakuHevc) { vm.chooseDanmakuHevc(it) }
+        }
+    }
+}
+
+/** 设置 → 个人与外观 → 字号与字体 */
+@Composable
+private fun FontRows(vm: MainViewModel) {
+    var picking by remember { mutableStateOf("latin") }
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.importFont(picking, uri)
+    }
+    SettingsRow(null, "整体字号", "整个 App 的文字在系统字号的基础上再放大 / 缩小，改了马上生效") {
+        Stepper(vm.fontScale) { vm.changeFontScale(it) }
+    }
+    SettingsRow(null, "侧边栏字号", "在整体字号的基础上，再单独调侧边栏（分区、最近下载）") {
+        Stepper(vm.sideFontScale) { vm.changeSideFontScale(it) }
+    }
+    for ((kind, title, desc) in listOf(Triple("latin", "英文字体", "界面里的英文和数字用它，中文仍用手机系统字体"),
+                                       Triple("serif", "标题字体", "首页问候语等标题的英文部分用它"))) {
+        val name = vm.fontNames[kind].orEmpty()
+        SettingsRow(null, title, (if (name.isEmpty()) "默认（自带的开源字体）" else name) +
+                (if (LocalShowTips.current) "\n点一下导入手机里的 .ttf / .otf 字体；$desc" else ""),
+            divider = kind == "latin", onClick = {
+                picking = kind
+                pick.launch(arrayOf("font/ttf", "font/otf", "font/*", "application/x-font-ttf", "application/vnd.ms-opentype",
+                    "application/octet-stream"))
+            }) {
+            if (name.isNotEmpty()) TextButton(onClick = { vm.resetFont(kind) }) { Text("恢复默认", color = P.text2) }
+            else LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
+        }
+    }
+}
+
+/** 字号：A− 百分比 A+（每次 10%，80% ～ 160%） */
+@Composable
+private fun Stepper(value: Int, onChange: (Int) -> Unit) {
+    Row(Modifier.clip(RoundedCornerShape(10.dp)).background(P.subtle).padding(3.dp), verticalAlignment = Alignment.CenterVertically) {
+        for ((label, delta) in listOf("A−" to -10, "" to 0, "A+" to 10)) {
+            if (delta == 0) {
+                Text("$value%", fontSize = 13.sp, color = P.text, modifier = Modifier.padding(horizontal = 8.dp))
+                continue
+            }
+            val enabled = (value + delta) in 80..160
+            Box(Modifier.clip(RoundedCornerShape(8.dp)).clickable(enabled = enabled) { onChange(value + delta) }
+                .padding(horizontal = 10.dp, vertical = 6.dp)) {
+                Text(label, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = if (enabled) P.text else P.text4)
+            }
         }
     }
 }
@@ -1222,8 +1269,26 @@ private fun SectionDialog(edit: SectionEdit, vm: MainViewModel) {
     var icon by remember(edit) { mutableStateOf(s?.icon?.takeIf { it in LineIcons.sectionIcons } ?: "folder") }
     var confirmDelete by remember { mutableStateOf(false) }
     AlertDialog(onDismissRequest = { vm.sectionEditor = null }, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
-        title = { Text(if (s == null) (if (edit.kind == "pan") "新建网盘分区" else "新建视频分区") else if (s.builtin) "重命名分区" else "编辑分区",
-            color = P.text, fontSize = 18.sp) },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(if (s == null) (if (edit.kind == "pan") "新建网盘分区" else "新建视频分区") else if (s.builtin) "重命名分区" else "编辑分区",
+                    color = P.text, fontSize = 18.sp, maxLines = 1, softWrap = false)
+                // 新建时：标题右边「已移除 N」，点开把从侧边栏移除过的分区放回来
+                val hidden = if (s == null) vm.sections.filter { it.kind == edit.kind && it.hidden } else emptyList()
+                if (hidden.isNotEmpty()) {
+                    var restore by remember { mutableStateOf(false) }
+                    Spacer(Modifier.weight(1f))
+                    Box {
+                        TextButton(onClick = { restore = true }) { Text("已移除 ${hidden.size}", fontSize = 14.sp, color = P.text3) }
+                        DropdownMenu(restore, { restore = false }, containerColor = P.surface, shape = RoundedCornerShape(14.dp)) {
+                            Text("点一下放回侧边栏", fontSize = 12.sp, color = P.text3,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
+                            hidden.forEach { h -> MenuItem(LineIcons.named(h.icon), h.name) { restore = false; vm.hideSection(h, false) } }
+                        }
+                    }
+                }
+            }
+        },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 OutlinedTextField(name, { name = it.take(20) }, singleLine = true, shape = RoundedCornerShape(12.dp),
@@ -1232,6 +1297,10 @@ private fun SectionDialog(edit: SectionEdit, vm: MainViewModel) {
                     Spacer(Modifier.height(10.dp))
                     Text(if (s.kind == "pan") "解析过的${s.name}分享会自动放进这个分区。" else "${s.name} 的视频下载后会自动放进这个分区。",
                         fontSize = 13.sp, color = P.text3)
+                    TextButton(onClick = { vm.hideSection(s); vm.sectionEditor = null; if (vm.historySection == s.id) vm.showSection(-1) },
+                        modifier = Modifier.padding(top = 6.dp)) {
+                        Text("从侧边栏移除（不用这个平台时）", color = P.err)
+                    }
                 } else {
                     Spacer(Modifier.height(14.dp))
                     Text("图标", fontSize = 13.sp, color = P.text3)
@@ -1280,7 +1349,7 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
     var section by rememberSaveable { mutableStateOf<String?>(null) }
     BackHandler(enabled = section != null) { section = null }
     val sections = listOf(
-        Triple("personal", "个人与外观", LineIcons.User) to "头像、称呼、浅色 / 深色",
+        Triple("personal", "个人与外观", LineIcons.User) to "头像、称呼、浅色 / 深色、字号与字体",
         Triple("download", "下载", LineIcons.Download) to "清晰度偏好、HDR、字幕、封面、弹幕版",
         Triple("pan", "网盘", LineIcons.Folder) to "百度、夸克、123 云盘账号，网盘下载速度",
         Triple("cloud", "谷歌云盘", LineIcons.CloudUp) to "把下载的文件备份到谷歌云盘",
@@ -1377,6 +1446,7 @@ private fun SettingsScreen(vm: MainViewModel, chooseAvatar: () -> Unit, back: ()
                     Switch(vm.showTips, { vm.changeShowTips(it) })
                 }
             }
+            SettingsGroup("字号与字体") { FontRows(vm) }
             }
             if (section == "download") SettingsGroup { DownloadOptionRows(vm) }
             if (section == "pan") {

@@ -166,6 +166,11 @@ class Settings:
     skip_app_version: str = ''      # 用户选了「跳过这个版本」的版本号
     save_subs: bool = True        # 字幕（B站 CC / YouTube 等）
     sub_langs: str = 'zh_orig'
+    font_scale: int = 100         # 设置 → 字体：整体字号（%）
+    side_font_scale: int = 100    # 侧边栏字号（在整体字号的基础上，%）
+    font_latin: str = ''          # 英文用的字体（空 = 自带的 VDSans）
+    font_cjk: str = ''            # 中文用的字体（空 = 微软雅黑）
+    font_serif: str = ''          # 标题用的衬线字体（空 = 自带的 VDSerif）
     dark_oled: bool = False       # 深色时用纯黑（OLED）
     theme: str = 'system'         # 外观：system 跟随系统 / light / dark
     nickname: str = ''            # 首页问候语里的称呼

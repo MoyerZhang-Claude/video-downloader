@@ -39,7 +39,8 @@ data class HistoryRecord(val id: Long, val title: String, val platform: String, 
 
 /** 分区（和电脑版共用 app/history.py）：icon 是图标名，如 "star"、"brand_bilibili"。
  *  kind：video 视频分区（放下载好的视频）/ pan 网盘分区（放网盘分享的解析记录） */
-data class Section(val id: Long, val name: String, val icon: String, val builtin: Boolean, val count: Int, val kind: String = "video")
+data class Section(val id: Long, val name: String, val icon: String, val builtin: Boolean, val count: Int, val kind: String = "video",
+                   val hidden: Boolean = false)
 
 /** 正在新建（section = null）或编辑的分区；moveIn / moveParse：新建后把这条记录移进去 */
 data class SectionEdit(val section: Section?, val moveIn: HistoryRecord?, val kind: String = "video", val moveParse: ParseRecord? = null)
@@ -120,6 +121,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var darkOled by mutableStateOf(false)            // 深色时用纯黑（OLED）
         private set
+    var fontScale by mutableStateOf(100)            // 整体字号（%，在系统字号的基础上）
+        private set
+    var sideFontScale by mutableStateOf(100)        // 侧边栏字号（%，在整体字号的基础上）
+        private set
+    var fontNames by mutableStateOf(mapOf("latin" to "", "serif" to ""))    // 导入的字体的文件名；空 = 默认
+        private set
     /** 首页问候语里的称呼 */
     var nickname by mutableStateOf("")
         private set
@@ -180,6 +187,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         danmakuPreferFps = prefs.getBoolean("danmaku_prefer_fps", false)
         themeMode = prefs.getString("theme", "system") ?: "system"
         darkOled = prefs.getBoolean("dark_oled", false)
+        fontScale = prefs.getInt("font_scale", 100)
+        sideFontScale = prefs.getInt("side_font_scale", 100)
+        fontNames = mapOf("latin" to (prefs.getString("font_latin_name", "") ?: ""), "serif" to (prefs.getString("font_serif_name", "") ?: ""))
+        AppFonts.apply(app)
         nickname = prefs.getString("nickname", "") ?: ""
         codecPref = prefs.getString("codec_pref", "compat").let { if (it == "quality" || it == "best") it else "compat" }
         showHdr = prefs.getBoolean("show_hdr", true)
@@ -432,6 +443,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun changeTheme(mode: String) {
         themeMode = mode
         prefs.edit().putString("theme", mode).apply()
+    }
+
+    // ------------------------------------------------------------ 字号、字体（设置 → 个人与外观）
+
+    fun changeFontScale(v: Int) {
+        fontScale = v.coerceIn(80, 160)
+        prefs.edit().putInt("font_scale", fontScale).apply()
+    }
+
+    fun changeSideFontScale(v: Int) {
+        sideFontScale = v.coerceIn(80, 160)
+        prefs.edit().putInt("side_font_scale", sideFontScale).apply()
+    }
+
+    /** 导入字体文件（.ttf / .otf）：复制到 App 私有目录，检查是有效字体后立即用上 */
+    fun importFont(kind: String, uri: Uri) {
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val name = runCatching {
+                app.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { if (it.moveToFirst()) it.getString(0) else null }
+            }.getOrNull() ?: "自选字体"
+            val tmp = java.io.File(app.cacheDir, "font_import")
+            val ok = runCatching {
+                app.contentResolver.openInputStream(uri)!!.use { input -> tmp.outputStream().use { input.copyTo(it) } }
+                AppFonts.fromFile(tmp) != null
+            }.getOrDefault(false)
+            if (ok) tmp.copyTo(AppFonts.file(app, kind), overwrite = true)
+            tmp.delete()
+            withContext(Dispatchers.Main) {
+                if (!ok) { toast("这不是可用的字体文件（请选 .ttf 或 .otf）"); return@withContext }
+                prefs.edit().putString("font_${kind}_name", name).apply()
+                fontNames = fontNames + (kind to name)
+                AppFonts.apply(app)
+                toast("已换成「$name」")
+            }
+        }
+    }
+
+    fun resetFont(kind: String) {
+        val app = getApplication<Application>()
+        AppFonts.file(app, kind).delete()
+        prefs.edit().remove("font_${kind}_name").apply()
+        fontNames = fontNames + (kind to "")
+        AppFonts.apply(app)
+        toast("已恢复默认字体")
     }
 
     /** 深色时用纯黑（OLED） */
@@ -1025,7 +1082,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val secs = runCatching { PyBridge.sections() }.getOrNull()?.let { a ->
                 List(a.length()) { i -> a.getJSONObject(i).let {
                     Section(it.getLong("id"), it.optString("name"), it.optString("icon"), it.optInt("builtin") == 1, it.optInt("count"),
-                        it.optString("kind", "video"))
+                        it.optString("kind", "video"), it.optInt("hidden") == 1)
                 } }
             }
             val c = runCatching { PyBridge.parseCounts() }.getOrNull()
@@ -1157,6 +1214,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun updateSection(s: Section, name: String, icon: String) {
         viewModelScope.launch(Dispatchers.IO) { PyBridge.sectionUpdate(s.id, name.trim(), if (s.builtin) "" else icon); afterChange() }
+    }
+
+    /** 内置分区不能删，但可以从侧边栏移除（里面的记录都还在）；hidden = false 放回来 */
+    fun hideSection(s: Section, hidden: Boolean = true) {
+        viewModelScope.launch(Dispatchers.IO) {
+            PyBridge.sectionHidden(s.id, hidden)
+            afterChange()
+            withContext(Dispatchers.Main) {
+                toast(if (hidden) "已从侧边栏移除「${s.name}」，记录还在。想找回：点分区标题右边的 +，再点「已移除」" else "「${s.name}」已放回侧边栏")
+            }
+        }
     }
 
     fun deleteSection(s: Section) {

@@ -718,6 +718,11 @@ def section_update(section_id, name, icon):
     _history.update_section(int(section_id), name or None, icon or None)
 
 
+def section_hidden(section_id, hidden):
+    """从侧边栏移除 / 放回一个分区（内置分区不能删，可以不显示）"""
+    _history.set_section_hidden(int(section_id), bool(hidden))
+
+
 def section_delete(section_id):
     return bool(_history.delete_section(int(section_id)))
 

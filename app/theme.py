@@ -5,6 +5,7 @@
 - 带透明度的颜色写成 Qt 的 #AARRGGBB，样式表和 QColor 都认。
 """
 import os
+import re
 import sys
 import tempfile
 
@@ -97,6 +98,39 @@ SERIF = 'VDSerif'
 LATIN = 'VDSans'
 SANS = 'Microsoft YaHei UI'
 
+# 字体设置（设置 → 字体）：整体字号、侧边栏字号（在整体的基础上再调）、自选字体。启动时由 set_font_prefs 设好，改了要重启。
+FONT = {'scale': 1.0, 'side': 1.0, 'latin': '', 'cjk': '', 'serif': ''}
+# 这些样式规则属于侧边栏，字号用侧边栏的比例
+_SIDE_SELECTORS = ('brandName', '#sidebar', 'sideHint', 'accountName', 'accountSub')
+
+
+def set_font_prefs(scale=100, side=100, latin='', cjk='', serif=''):
+    """scale / side 是百分比（80～160）；latin / cjk / serif 是字体名，空 = 用默认（VDSans / 微软雅黑 / VDSerif）。"""
+    FONT['scale'] = min(1.6, max(0.8, (scale or 100) / 100))
+    FONT['side'] = min(1.6, max(0.8, (side or 100) / 100))
+    FONT.update(latin=latin or '', cjk=cjk or '', serif=serif or '')
+
+
+def font_factor(area='main'):
+    return FONT['scale'] * (FONT['side'] if area == 'side' else 1.0)
+
+
+def fs(px, area='main'):
+    """按字体设置缩放后的像素字号"""
+    return max(8, round(px * font_factor(area)))
+
+
+def _scale_qss(qss):
+    """样式表里的 font-size: Npx 按字号设置缩放；侧边栏的规则用侧边栏的比例"""
+    if FONT['scale'] == 1.0 and FONT['side'] == 1.0:
+        return qss
+
+    def rule(m):
+        area = 'side' if any(k in m.group(1) for k in _SIDE_SELECTORS) else 'main'
+        body = re.sub(r'font-size:\s*(\d+)px', lambda f: f'font-size: {fs(int(f.group(1)), area)}px', m.group(2))
+        return m.group(1) + '{' + body + '}'
+    return re.sub(r'([^{}]+)\{([^{}]*)\}', rule, qss)
+
 
 class _Signals(QObject):
     changed = Signal()
@@ -157,6 +191,15 @@ def load_fonts():
         SERIF = 'Georgia'
     if 'VDSans' not in fams:
         LATIN = 'Segoe UI'
+    # 设置里选了电脑上装的字体（比如自己装的 Anthropic Sans）：装了才用，卸掉了就退回默认
+    global SANS
+    installed = set(QFontDatabase.families())
+    if FONT['latin'] in installed:
+        LATIN = FONT['latin']
+    if FONT['serif'] in installed:
+        SERIF = FONT['serif']
+    if FONT['cjk'] in installed:
+        SANS = FONT['cjk']
 
 
 def ui_families():
@@ -243,6 +286,10 @@ def _make_icons():
 
 
 def stylesheet():
+    return _scale_qss(_stylesheet())
+
+
+def _stylesheet():
     p = P
     ic = _make_icons()
     # 任务状态文字的颜色：换状态时只改控件的名字（st_ok、st_err…），不用每次刷新进度都重设样式表

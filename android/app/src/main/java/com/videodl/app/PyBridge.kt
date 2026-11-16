@@ -71,6 +71,7 @@ object PyBridge {
     fun parseClear(kind: String = "") { module.callAttr("parse_clear", kind) }
     fun sectionUpdate(id: Long, name: String, icon: String) { module.callAttr("section_update", id, name, icon) }
     fun sectionDelete(id: Long) { module.callAttr("section_delete", id) }
+    fun sectionHidden(id: Long, hidden: Boolean) { module.callAttr("section_hidden", id, hidden) }
     /** sectionId < 0 = 移出分区 */
     fun historyMove(id: Long, sectionId: Long) { module.callAttr("history_move", id, sectionId) }
     fun historyRename(id: Long, title: String) { module.callAttr("history_rename", id, title) }

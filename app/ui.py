@@ -31,13 +31,14 @@ from .theme import PLATFORM_COLORS, P, c
 _font_cache = {}
 
 
-def px_font(size, weight=None, family=None):
-    """按像素大小取界面字体。结果有缓存：自绘控件每次重画都要用字体，滚动时一帧会画几十个条目。"""
-    key = (size, weight, family)
+def px_font(size, weight=None, family=None, area='main'):
+    """按像素大小取界面字体（按「设置 → 字体」的字号缩放；area='side' 用侧边栏的比例）。
+    结果有缓存：自绘控件每次重画都要用字体，滚动时一帧会画几十个条目。"""
+    key = (size, weight, family, area)
     f = _font_cache.get(key)
     if f is None:
         f = QFont(family) if family else QFont(QApplication.font())
-        f.setPixelSize(size)
+        f.setPixelSize(theme.fs(size, area))
         if weight:
             f.setWeight(QFont.Weight(weight))
         _font_cache[key] = f
@@ -47,12 +48,17 @@ def px_font(size, weight=None, family=None):
 _metrics_cache = {}
 
 
-def px_metrics(size, weight=None):
-    key = (size, weight)
+def px_metrics(size, weight=None, area='main'):
+    key = (size, weight, area)
     fm = _metrics_cache.get(key)
     if fm is None:
-        fm = _metrics_cache[key] = QFontMetrics(px_font(size, weight))
+        fm = _metrics_cache[key] = QFontMetrics(px_font(size, weight, area=area))
     return fm
+
+
+def side_h(h):
+    """侧边栏条目的高度：字号调大时跟着变高，免得字被切掉"""
+    return round(h * max(1.0, theme.font_factor('side')))
 
 
 def sync_layout(lay, desired):
@@ -431,9 +437,9 @@ class NavItem(_HoverButton):
         self.collapsed = False
         self._elided = False        # 文字太长被省略成「…」时，鼠标停留显示完整文字
         self.setCheckable(not special)
-        self.setFixedHeight(height)
-        self.setFont(px_font(font_px))
-        self._fm = px_metrics(font_px)
+        self.setFixedHeight(side_h(height))
+        self.setFont(px_font(font_px, area='side'))
+        self._fm = px_metrics(font_px, area='side')
         self._shown = None          # (文字, 可用宽度) -> 省略后的文字：不用每次重画都重新量
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -480,8 +486,8 @@ class NavItem(_HoverButton):
         elif self._icon:
             icons.paint(p, self._icon, QRectF(x + 1, iy + 1, 18, 18), c('text' if on or hov else 'text2'))
         if self.badge:
-            f = px_font(11, 600)
-            bw = max(18, px_metrics(11, 600).horizontalAdvance(self.badge) + 10)
+            f = px_font(11, 600, area='side')
+            bw = max(18, px_metrics(11, 600, 'side').horizontalAdvance(self.badge) + 10)
             if self.collapsed:
                 br = QRectF(self.width() - bw / 2 - 12, 2, bw, 16)
             else:
@@ -497,8 +503,8 @@ class NavItem(_HoverButton):
         tx = x + (30 if (self._icon or self.special) else 1)
         tail = 0
         if self.trailing and not self.badge:
-            f2 = px_font(12)
-            tail = px_metrics(12).horizontalAdvance(self.trailing) + 14
+            f2 = px_font(12, area='side')
+            tail = px_metrics(12, area='side').horizontalAdvance(self.trailing) + 14
             p.setFont(f2)
             p.setPen(c('text4'))
             p.drawText(QRectF(self.width() - tail, 0, tail - 8, self.height()), int(Qt.AlignVCenter | Qt.AlignRight),
@@ -522,8 +528,8 @@ class SideHeader(_HoverButton):
         super().__init__(parent)
         self.setText(text)
         self.open = open_
-        self.setFixedHeight(30)
-        self.setFont(px_font(12))
+        self.setFixedHeight(side_h(30))
+        self.setFont(px_font(12, area='side'))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.clicked.connect(self._flip)
         self.plus = None
@@ -545,7 +551,7 @@ class SideHeader(_HoverButton):
         p.setFont(self.font())
         hov = self._hov()
         p.setPen(c('text2' if hov else 'text3'))
-        w = px_metrics(12).horizontalAdvance(self.text())
+        w = px_metrics(12, area='side').horizontalAdvance(self.text())
         p.drawText(QRectF(10, 0, w + 4, self.height()), int(Qt.AlignVCenter | Qt.AlignLeft), self.text())
         icons.paint(p, 'chevron_down' if self.open else 'chevron_right',
                     QRectF(10 + w + 4, (self.height() - 12) / 2, 12, 12), c('text3'), 2.0)
@@ -1250,7 +1256,7 @@ class NoticeBar(Card):
         h.addWidget(Spark(18, self))
         self.label = QLabel()
         self.label.setObjectName('rowLabel')
-        self.label.setStyleSheet('font-size: 13px;')
+        self.label.setStyleSheet(f'font-size: {theme.fs(13)}px;')
         h.addWidget(self.label)
         h.addSpacing(6)
         self.btn = QPushButton()
@@ -1512,7 +1518,14 @@ def round_popup(w):
 class ChromeFilter(QObject):
     """全局：新弹出的菜单、下拉列表、提示气泡加圆角；对话框标题栏配色。"""
 
+    _MOUSE = (QEvent.MouseButtonPress, QEvent.MouseButtonRelease, QEvent.MouseButtonDblClick)
+
     def eventFilter(self, obj, ev):
+        # 弹出菜单、下拉列表只认鼠标左键：鼠标侧键、右键、中键按在某一项上不会打开它
+        if ev.type() in self._MOUSE and ev.button() != Qt.LeftButton and isinstance(obj, QWidget):
+            win = obj.window()
+            if isinstance(win, QMenu) or win.inherits('QComboBoxPrivateContainer'):
+                return True
         if ev.type() == QEvent.Show and isinstance(obj, QWidget) and obj.isWindow():
             if isinstance(obj, QMenu) or obj.inherits('QComboBoxPrivateContainer') or obj.inherits('QTipLabel'):
                 round_popup(obj)

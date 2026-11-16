@@ -13,14 +13,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import APP_NAME, APP_VERSION, avatar, bilibili, core_update, hotkey, pan, ui
+from . import APP_NAME, APP_VERSION, avatar, bilibili, core_update, hotkey, pan, theme, ui
 from .config import (
     BROWSERS, CODEC_PREFERENCES, COOKIE_MODES, DATA, FILENAME_TEMPLATES, PENDING, ROOT, SUB_LANG_MODES,
     SUBFOLDER_MODES, has_legacy_data, import_legacy,
 )
 from .ui import Combo, HLine, IconButton, NavItem, Segmented, Toggle
 
-PAGES = [('general', '常规', 'settings'), ('download', '下载', 'download'), ('danmaku', '字幕与弹幕', 'subtitles'),
+PAGES = [('general', '常规', 'settings'), ('fonts', '字体', 'type'), ('download', '下载', 'download'), ('danmaku', '字幕与弹幕', 'subtitles'),
          ('notify', '通知', 'bell'), ('network', '网络与登录', 'globe'), ('core', '解析内核', 'cube'),
          ('about', '关于', 'info')]
 
@@ -303,6 +303,76 @@ class SettingsPanel(ui.Overlay):
                                      self.hotkey_edit)
         self._row(lay, '剪贴板提示', '复制了新链接、切回本窗口时，在输入框上方提示是否解析',
                   self._toggle('auto_parse_clipboard'))
+
+    # ------------------------------------------------------------ 字体
+    _SCALES = [(80, '80%（更小）'), (90, '90%'), (100, '100%（默认）'), (110, '110%'), (120, '120%'), (130, '130%'),
+               (140, '140%'), (150, '150%'), (160, '160%（最大）')]
+
+    def _page_fonts(self, lay):
+        from PySide6.QtGui import QFontDatabase
+        self._section(lay, '字号', first=True)
+        self._row(lay, '整体字号', '整个软件的文字大小（侧边栏、解析结果、设置、菜单……），按钮和列表会跟着变大',
+                  self._font_combo('font_scale', self._SCALES, 200))
+        self._row(lay, '侧边栏字号', '在整体字号的基础上，再单独调侧边栏（分区、最近下载、左下角头像）',
+                  self._font_combo('side_font_scale', self._SCALES, 200))
+        self._section(lay, '字体')
+        fams = sorted(QFontDatabase.families())
+        cjk = [f for f in fams if QFontDatabase.WritingSystem.SimplifiedChinese in QFontDatabase.writingSystems(f)]
+        latin = [f for f in fams if not f.startswith('@')]
+        self._row(lay, '英文字体', '界面里的英文和数字用这个字体；中文不受影响。可以选电脑上已经安装的任何字体',
+                  self._font_combo('font_latin', [('', '默认（VDSans，开源）')] + [(f, f) for f in latin], 260))
+        self._row(lay, '中文字体', '界面里的中文用这个字体', self._font_combo('font_cjk', [('', '默认（微软雅黑）')] +
+                                                                [(f, f) for f in cjk if f != 'Microsoft YaHei UI'], 260))
+        self._row(lay, '标题字体', '首页问候语、页面标题等用的衬线字体（英文部分）',
+                  self._font_combo('font_serif', [('', '默认（VDSerif，开源）')] + [(f, f) for f in latin], 260))
+        self._section(lay, '预览')
+        self.font_preview = _label('', 'rowLabel', wrap=True)
+        self.font_preview_title = _label('', 'pageTitle', wrap=True)
+        lay.addSpacing(6)
+        lay.addWidget(self.font_preview_title)
+        lay.addSpacing(4)
+        lay.addWidget(self.font_preview)
+        lay.addSpacing(10)
+        lay.addWidget(_label('改了字号或字体后，重启软件才会完全生效（窗口底部会出现「立即重启」）。'
+                             '字体文件不会随软件分发：选的是你自己电脑上装好的字体。', 'rowDesc', wrap=True))
+        self._update_font_preview()
+
+    def _font_combo(self, key, items, width):
+        cb = Combo()
+        for k, name in items:
+            cb.addItem(name, k)
+        cur = getattr(self.s, key)
+        i = cb.findData(cur)
+        if i < 0 and cur:
+            # 字号：不在列表里的（配置文件里手改的）照样列出来；字体：选过的字体被卸掉了，标明没装
+            cb.addItem(f'{cur}%' if isinstance(cur, int) else f'{cur}（没有安装，正在用默认）', cur)
+            i = cb.count() - 1
+        cb.setCurrentIndex(max(0, i))
+        cb.setFixedWidth(width)
+        cb.setMaxVisibleItems(16)
+
+        def changed():
+            setattr(self.s, key, cb.currentData())
+            self.win.setting_changed(key)
+            self._update_font_preview()
+            self.win.notice.show_notice('字体设置重启后完全生效', '立即重启', self.win._restart)
+        cb.currentIndexChanged.connect(changed)
+        return cb
+
+    def _update_font_preview(self):
+        """按现在选的字号、字体画一段示例文字（不用重启就能看效果）"""
+        if not hasattr(self, 'font_preview'):
+            return
+        s = self.s
+        scale = (s.font_scale or 100) / 100
+        latin = s.font_latin or theme.LATIN
+        cjk = s.font_cjk or theme.SANS
+        serif = s.font_serif or theme.SERIF
+        self.font_preview_title.setText('今天想下载点什么？ What shall we download?')
+        self.font_preview_title.setStyleSheet(f'font-family: "{serif}", "{cjk}"; font-size: {round(26 * scale)}px;')
+        self.font_preview.setText('解析结果 · 2160p60 HDR · VP9 · 28.8 Mbps · 885.8 MB\n'
+                                  'The quick brown fox jumps over the lazy dog. 0123456789')
+        self.font_preview.setStyleSheet(f'font-family: "{latin}", "{cjk}"; font-size: {round(14 * scale)}px;')
 
     def refresh_avatar(self):
         img = avatar.image()
@@ -916,7 +986,7 @@ class SettingsPanel(ui.Overlay):
                       '网盘支持 百度网盘、夸克网盘、123云盘、Mega 的分享。\n\n'
                       '这个软件的代码几乎全部由 Claude 编写。图标「星芒落点」和界面风格都是向 Claude 应用致敬的原创设计，'
                       '不是 Anthropic 的官方作品，本项目与 Anthropic 没有任何官方关系。', 'rowDesc', wrap=True)
-        text.setStyleSheet('font-size: 13px;')
+        text.setStyleSheet(f'font-size: {theme.fs(13)}px;')
         lay.addWidget(text)
         self._section(lay, '致谢')
         for name, desc in (('yt-dlp', '视频解析核心（Unlicense）'), ('FFmpeg', '音视频合并与转换（GPL）'),

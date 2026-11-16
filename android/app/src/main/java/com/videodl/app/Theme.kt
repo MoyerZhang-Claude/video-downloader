@@ -1,6 +1,15 @@
 package com.videodl.app
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontVariation
+import androidx.compose.ui.text.ExperimentalTextApi
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
+import java.io.File
+import android.content.Context
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -82,9 +91,38 @@ val LocalPalette = staticCompositionLocalOf { LightPalette }
  * 字体和 Claude 应用一样：中文用手机系统字体；英文正文 VDSans（Hanken Grotesk）、标题 VDSerif（Source Serif 4），
  * 都是最接近 Claude 字体的开源字体（SIL OFL 1.1，见 assets/licenses/fonts-OFL.txt）。字体里没有中文，中文自动用系统字体。
  */
-val Serif = FontFamily(Font(R.font.vdserif_regular, FontWeight.Normal), Font(R.font.vdserif_semibold, FontWeight.SemiBold))
-val Sans = FontFamily(Font(R.font.vdsans_regular, FontWeight.Normal), Font(R.font.vdsans_medium, FontWeight.Medium),
+private val DefaultSerif = FontFamily(Font(R.font.vdserif_regular, FontWeight.Normal), Font(R.font.vdserif_semibold, FontWeight.SemiBold))
+private val DefaultSans = FontFamily(Font(R.font.vdsans_regular, FontWeight.Normal), Font(R.font.vdsans_medium, FontWeight.Medium),
     Font(R.font.vdsans_semibold, FontWeight.SemiBold), Font(R.font.vdsans_semibold, FontWeight.Bold))
+
+/** 界面英文字体 / 标题字体：默认是自带的开源字体；设置 → 个人与外观 里可以导入自己的字体文件（只存在 App 目录里，换了立即生效） */
+var Serif: FontFamily by mutableStateOf(DefaultSerif)
+var Sans: FontFamily by mutableStateOf(DefaultSans)
+
+/** 自选字体（设置 → 个人与外观 → 英文字体 / 标题字体）。文件放在 App 私有目录 files/fonts/，不随 App 分发。
+ *  导入的字体里没有中文时，中文自动用手机系统字体。 */
+object AppFonts {
+    private fun dir(ctx: Context) = File(ctx.filesDir, "fonts").apply { mkdirs() }
+    fun file(ctx: Context, kind: String) = File(dir(ctx), kind)          // kind：latin / serif
+
+    /** 启动时、导入 / 恢复默认后调用 */
+    fun apply(ctx: Context) {
+        Sans = fromFile(file(ctx, "latin")) ?: DefaultSans
+        Serif = fromFile(file(ctx, "serif")) ?: DefaultSerif
+    }
+
+    /** 字体文件 → FontFamily；可变字体（如 300–800 可调粗细）按常规 / 中等 / 半粗 / 粗四档取；不是有效字体返回 null */
+    @OptIn(ExperimentalTextApi::class)
+    fun fromFile(f: File): FontFamily? {
+        if (!f.isFile || f.length() == 0L) return null
+        if (runCatching { android.graphics.Typeface.Builder(f).build() }.getOrNull() == null) return null
+        return runCatching {
+            FontFamily(listOf(FontWeight.Normal, FontWeight.Medium, FontWeight.SemiBold, FontWeight.Bold).map { w ->
+                Font(f, w, variationSettings = FontVariation.Settings(FontVariation.weight(w.weight)))
+            })
+        }.getOrNull()
+    }
+}
 
 private fun typography(): Typography {
     val t = Typography()
@@ -113,7 +151,7 @@ fun isDarkMode(mode: String) = when (mode) {
 }
 
 @Composable
-fun VdTheme(mode: String, oled: Boolean = false, content: @Composable () -> Unit) {
+fun VdTheme(mode: String, oled: Boolean = false, fontScale: Float = 1f, content: @Composable () -> Unit) {
     val p = if (isDarkMode(mode)) (if (oled) OledPalette else DarkPalette) else LightPalette
     val base = if (p.dark) darkColorScheme() else lightColorScheme()
     val scheme = base.copy(
@@ -127,6 +165,14 @@ fun VdTheme(mode: String, oled: Boolean = false, content: @Composable () -> Unit
         outline = p.borderStrong, outlineVariant = p.border, error = p.err, scrim = p.scrim,
     )
     MaterialTheme(colorScheme = scheme, typography = typography()) {
-        CompositionLocalProvider(LocalPalette provides p, content = content)
+        ScaledText(fontScale) { CompositionLocalProvider(LocalPalette provides p, content = content) }
     }
+}
+
+/** 在系统字号的基础上再放大 / 缩小一点（设置 → 个人与外观 → 整体字号、侧边栏字号）。只影响文字，不影响图标、间距 */
+@Composable
+fun ScaledText(scale: Float, content: @Composable () -> Unit) {
+    // 不论比例是多少都走同一条路：不然 100% ↔ 其他比例时整棵界面重建，正在看的页面会丢
+    val d = LocalDensity.current
+    CompositionLocalProvider(LocalDensity provides Density(d.density, d.fontScale * scale), content = content)
 }
