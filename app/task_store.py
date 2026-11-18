@@ -68,14 +68,27 @@ def _snapshot(tasks):
 
 
 _file_lock = threading.Lock()
-_latest = None              # 等着写的最新一份；写的过程中又有新的，只写最后那份
+_latest = None              # 等着写的最新一份 (序号, 内容)；写的过程中又有新的，只写最后那份
 _latest_lock = threading.Lock()
 _writer = None
+_seq = 0                    # 每份快照的序号（越新越大）
+_written = 0                # 已经写进文件的那份的序号：更旧的快照不能再覆盖它
 
 
-def _write(items):
+def _next_seq():
+    global _seq
+    with _latest_lock:
+        _seq += 1
+        return _seq
+
+
+def _write(items, seq):
+    global _written
     tmp = PATH + '.tmp'
     with _file_lock:
+        if seq <= _written:     # 后台线程拿着旧快照等锁时，退出保存已经写了新的：旧的作废
+            return
+        _written = seq
         if not items:
             for p in (PATH, tmp):
                 try:
@@ -92,12 +105,12 @@ def _drain():
     global _latest, _writer
     while True:
         with _latest_lock:
-            items, _latest = _latest, None
-            if items is None:
+            job, _latest = _latest, None
+            if job is None:
                 _writer = None
                 return
         try:
-            _write(items)
+            _write(job[1], job[0])
         except (OSError, TypeError, ValueError):
             pass
 
@@ -106,9 +119,10 @@ def save(tasks):
     """立即保存（退出软件时用）。返回保存了几个任务。"""
     global _latest
     items = _snapshot(tasks)
+    seq = _next_seq()
     with _latest_lock:
         _latest = None          # 后台还没写的旧内容作废
-    _write(items)
+    _write(items, seq)
     return len(items)
 
 
@@ -116,8 +130,10 @@ def save_async(tasks):
     """在后台线程里保存（任务状态变化时用），界面线程只负责收集要写的内容。"""
     global _latest, _writer
     items = _snapshot(tasks)
+    seq = _next_seq()
     with _latest_lock:
-        _latest = items
+        if _latest is None or _latest[0] < seq:
+            _latest = (seq, items)
         if _writer is None:
             _writer = threading.Thread(target=_drain, daemon=True, name='tasks-save')
             _writer.start()
