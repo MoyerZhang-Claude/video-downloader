@@ -59,6 +59,13 @@ const maxUniqueTries = 10000
 // 查文件时遇到“不存在 / 已存在”以外的错误（没有权限、磁盘出错……）直接返回错误：
 // 换名字也解决不了，一直试下去会卡死调用方（调用方通常拿着队列锁）。
 func UniquePath(dir, name string, taken func(string) bool) (string, error) {
+	// 先确认保存位置是个能访问的文件夹：Windows 把「上一级其实是文件」报成「不存在」，
+	// 不先查的话会拿到一个根本建不出来的路径
+	if st, err := os.Stat(dir); err != nil {
+		return "", fmt.Errorf("无法访问保存位置 %s：%w", dir, err)
+	} else if !st.IsDir() {
+		return "", fmt.Errorf("保存位置 %s 不是文件夹", dir)
+	}
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
 	for i := 0; i < maxUniqueTries; i++ {
