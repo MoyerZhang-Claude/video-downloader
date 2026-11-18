@@ -209,21 +209,52 @@ def _cookies_for(url, cookies):
 
 
 _REDIRECTS = (301, 302, 303, 307, 308)
+_CHARSET = re.compile(rb'charset\s*=\s*["\x27]?([\w.:-]+)', re.I)
+
+
+def _read(r, limit):
+    """流式读最多 limit 字节就关掉连接：网址实际是几百 MB 的视频、服务器又不理 Range 时，也不会整个读进内存"""
+    data = bytearray()
+    try:
+        for chunk in r.iter_content(64 * 1024):
+            if chunk:
+                data += chunk
+            if len(data) >= limit:
+                break
+    finally:
+        try:
+            r.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return bytes(data[:limit])
+
+
+def _text(r, limit):
+    """读最多 limit 字节并解码：编码按响应头 → 网页里的 <meta charset> → UTF-8 的顺序认"""
+    data = _read(r, limit)
+    m = _CHARSET.search((r.headers.get('Content-Type') or '').encode('latin-1', 'replace')) or _CHARSET.search(data[:4096])
+    enc = m.group(1).decode('ascii', 'replace') if m else 'utf-8'
+    try:
+        return data.decode(enc, errors='replace')
+    except LookupError:
+        return data.decode('utf-8', errors='replace')
 
 
 def _fetch(session, url, referer=None, cookies=None, timeout=20):
+    """只拿响应头（stream），正文由 _text / _read 按上限读"""
     headers = {'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8', 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.6'}
     if referer:
         headers['Referer'] = referer
     if not cookies:
-        return session.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        return session.get(url, headers=headers, timeout=timeout, allow_redirects=True, stream=True)
     # 带登录 Cookie 时自己跟重定向：每一跳重新挑 Cookie，跳到别的网站就不会带上这个网站的登录信息
     for _ in range(8):
         r = session.get(url, headers=headers, cookies=_cookies_for(url, cookies), timeout=timeout,
-                        allow_redirects=False)
+                        allow_redirects=False, stream=True)
         loc = r.headers.get('Location')
         if r.status_code not in _REDIRECTS or not loc:
             return r
+        r.close()
         url = urljoin(str(r.url or url), loc)
     return r
 
@@ -241,10 +272,11 @@ def _probe(session, res, timeout=12):
             if ctype.startswith(('text/', 'image/')):
                 return False
             return True
-        r = session.get(res.url, headers=res.headers, timeout=timeout)
+        r = session.get(res.url, headers=res.headers, timeout=timeout, stream=True)
         if r.status_code >= 400:
+            r.close()
             return True
-        body = r.text[:2_000_000]
+        body = _text(r, 2_000_000)
         if res.kind == 'hls':
             if '#EXTM3U' not in body[:2000]:
                 return True             # 地址没有后缀、配置里写着 hls：内容不像播放列表也先留着
@@ -255,8 +287,8 @@ def _probe(session, res, timeout=12):
                 # 主列表本身没有时长：读第一个子列表补上
                 if info['variants']:
                     try:
-                        sub = session.get(info['variants'][0][1], headers=res.headers, timeout=timeout)
-                        si = parse_m3u8(sub.text[:2_000_000], str(sub.url))
+                        sub = session.get(info['variants'][0][1], headers=res.headers, timeout=timeout, stream=True)
+                        si = parse_m3u8(_text(sub, 2_000_000), str(sub.url))
                         res.duration, res.live = si['duration'], si['live']
                         res.protected = res.protected or si['protected']
                     except Exception:  # noqa: BLE001
@@ -268,9 +300,11 @@ def _probe(session, res, timeout=12):
                 if m:
                     try:
                         init = session.get(urljoin(str(r.url), m.group(1)),
-                                           headers=dict(res.headers, Range='bytes=0-65535'), timeout=timeout)
+                                           headers=dict(res.headers, Range='bytes=0-65535'), timeout=timeout, stream=True)
                         if init.status_code < 400:
-                            codec, height = _init_info(init.content[:65536])
+                            codec, height = _init_info(_read(init, 65536))       # 服务器不理 Range 也只读 64 KB
+                        else:
+                            init.close()
                             res.codec = res.codec or codec
                             if height and not res.heights:
                                 res.heights = [height]
@@ -293,12 +327,14 @@ def sniff_static(url, cookies=None, log=None, timeout=20):
     except Exception as e:  # noqa: BLE001
         raise SniffError(f'网页打不开：{e}') from e
     if r.status_code >= 400:
+        r.close()
         raise SniffError(f'网页打不开（HTTP {r.status_code}）')
     page = str(r.url)
     ctype = (r.headers.get('Content-Type') or '').lower()
     if 'html' not in ctype and 'text' not in ctype and 'json' not in ctype and 'javascript' not in ctype:
+        r.close()                       # 只看了响应头就断开：不是网页（比如直接是视频文件）就不读内容
         raise SniffError('这个地址不是网页')
-    text = r.text[:6_000_000]
+    text = _text(r, 6_000_000)
     title = page_title(text)
     found = find_in_html(text, page)
     if not found:
@@ -309,7 +345,9 @@ def sniff_static(url, cookies=None, log=None, timeout=20):
             try:
                 fr = _fetch(session, f, referer=page, cookies=cookies, timeout=timeout)
                 if fr.status_code < 400:
-                    found += find_in_html(fr.text[:3_000_000], str(fr.url))
+                    found += find_in_html(_text(fr, 3_000_000), str(fr.url))
+                else:
+                    fr.close()
             except Exception:  # noqa: BLE001
                 continue
     origin = f'{urlparse(page).scheme}://{urlparse(page).netloc}'

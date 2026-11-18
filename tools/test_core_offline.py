@@ -421,5 +421,114 @@ class YoutubeCommentTest(unittest.TestCase):
         self.assertEqual(comments.platform_of('https://example.com/a'), '')
 
 
+class DriveTokenTest(unittest.TestCase):
+    """谷歌云盘令牌：手机上以前是明文 JSON，现在和 B站登录一样加密；旧文件读出来就换成新格式"""
+
+    def setUp(self):
+        from app import secure_store
+        self.ss = secure_store
+        self.saved = (gdrive.TOKEN_PATH, gdrive.DIR, secure_store._backend)
+        d = tempfile.mkdtemp(dir=_TMP)
+        gdrive.DIR, gdrive.TOKEN_PATH = d, os.path.join(d, 'token.bin')
+        # 假的 Keystore：按位取反，能看出来确实不是明文
+        secure_store.set_backend(lambda b: bytes(x ^ 0xFF for x in b), lambda b: bytes(x ^ 0xFF for x in b))
+
+    def tearDown(self):
+        gdrive.TOKEN_PATH, gdrive.DIR, self.ss._backend = self.saved
+
+    def _raw(self):
+        with open(gdrive.TOKEN_PATH, 'rb') as f:
+            return f.read()
+
+    def test_old_plaintext_token_is_migrated(self):
+        with open(gdrive.TOKEN_PATH, 'w', encoding='utf-8') as f:
+            json.dump({'refresh_token': 'r-secret', 'email': 'a@b.c'}, f)
+        self.assertEqual(gdrive.Auth._load_token(), ('r-secret', 'a@b.c'))
+        raw = self._raw()
+        self.assertTrue(raw.startswith(self.ss.MAGIC))
+        self.assertNotIn(b'r-secret', raw)
+        self.assertEqual(gdrive.Auth._load_token(), ('r-secret', 'a@b.c'))      # 新格式能读回来
+
+    def test_new_token_is_encrypted_and_logout_removes_it(self):
+        auth = gdrive.Auth.__new__(gdrive.Auth)
+        auth._lock, auth._session = threading.Lock(), (lambda: None)
+        auth.refresh_token, auth.email, auth._access, auth._expires = 'tok-2', 'x@y.z', None, 0
+        auth._save_token()
+        self.assertNotIn(b'tok-2', self._raw())
+        self.assertEqual(gdrive.Auth._load_token(), ('tok-2', 'x@y.z'))
+        auth.refresh_token = None                 # 不去谷歌那边撤销（离线）
+        auth.logout()
+        self.assertFalse(os.path.exists(gdrive.TOKEN_PATH))
+
+    @unittest.skipUnless(os.name == 'nt', '旧的 Windows 令牌是 DPAPI 密文')
+    def test_old_windows_dpapi_token_is_migrated(self):
+        self.ss._backend = None
+        with open(gdrive.TOKEN_PATH, 'wb') as f:
+            f.write(self.ss.dpapi(json.dumps({'refresh_token': 'w-tok', 'email': ''}).encode(), True))
+        self.assertEqual(gdrive.Auth._load_token(), ('w-tok', ''))
+        self.assertTrue(self._raw().startswith(self.ss.MAGIC))
+        self.assertEqual(gdrive.Auth._load_token(), ('w-tok', ''))
+
+
+class SniffReadLimitTest(unittest.TestCase):
+    """网页嗅探读内容有上限：服务器不理 Range、一直发几十 MB 时，读到上限就断开，不整个读进内存"""
+
+    def _serve(self, ctype, total):
+        sent = [0]
+
+        def handle(h, n):
+            h.send_response(200)
+            h.send_header('Content-Type', ctype)
+            h.send_header('Content-Length', str(total))
+            h.end_headers()
+            block = b'<p>' + b'x' * 65530 + b'\n'
+            try:
+                while sent[0] < total:
+                    h.wfile.write(block)
+                    sent[0] += len(block)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+        return _Server(handle), sent
+
+    def test_huge_page_is_cut_at_limit(self):
+        srv, sent = self._serve('text/html', 40 << 20)
+        try:
+            import requests
+            r = page_sniff._fetch(requests.Session(), f'http://127.0.0.1:{srv.port}/big')
+            text = page_sniff._text(r, 1 << 20)
+            self.assertEqual(len(text.encode()), 1 << 20)
+            threading.Event().wait(0.5)
+            self.assertLess(sent[0], 20 << 20)           # 远没发完 40 MB 就被断开了
+        finally:
+            srv.close()
+
+    def test_video_url_is_not_read_at_all(self):
+        srv, sent = self._serve('video/mp4', 40 << 20)
+        orig = page_sniff._session
+        try:
+            page_sniff._session = lambda: (__import__('requests').Session(), False)
+            with self.assertRaises(page_sniff.SniffError):
+                page_sniff.sniff_static(f'http://127.0.0.1:{srv.port}/v.mp4')
+            threading.Event().wait(0.5)
+            self.assertLess(sent[0], 20 << 20)
+        finally:
+            page_sniff._session = orig
+            srv.close()
+
+    def test_charset_from_meta(self):
+        def handle(h, n):
+            h.send_response(200)
+            h.send_header('Content-Type', 'text/html')
+            h.end_headers()
+            h.wfile.write('<meta charset="gbk"><title>中文标题</title>'.encode('gbk'))
+        srv = _Server(handle)
+        try:
+            import requests
+            r = page_sniff._fetch(requests.Session(), f'http://127.0.0.1:{srv.port}/')
+            self.assertIn('中文标题', page_sniff._text(r, 1 << 20))
+        finally:
+            srv.close()
+
+
 if __name__ == '__main__':
     unittest.main()
