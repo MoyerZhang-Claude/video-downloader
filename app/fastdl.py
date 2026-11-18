@@ -36,6 +36,19 @@ def _header(resp, name):
     return (h.get(name) if h is not None else None) or ''
 
 
+_CONTENT_RANGE = re.compile(r'bytes\s+(\d+)-(\d+)/(\d+|\*)', re.I)
+
+
+def _check_range(resp, start, total):
+    """206 回来的是不是要的那一段：起点和文件总大小都要对上，不然写进去的是别的位置（大小对、内容错）。
+    没有 Content-Range 或格式看不懂时不拦（个别服务器不规范）。"""
+    m = _CONTENT_RANGE.search(_header(resp, 'Content-Range'))
+    if not m:
+        return
+    if int(m.group(1)) != start or (m.group(3) != '*' and total and int(m.group(3)) != total):
+        raise DownloadFailed(f'服务器返回的分段位置不对（要 {start} 起，给的是 {m.group(0)}）')
+
+
 def _http_code(err):
     for attr in ('status', 'code'):
         v = getattr(err, attr, None)
@@ -180,8 +193,11 @@ class FastDownloader:
             try:
                 resp = self.urlopen(url, dict(self.headers))
                 try:
-                    if not self.total:
-                        self.total = int(_header(resp, 'Content-Length') or 0)
+                    # 服务器给的 Content-Length 才是准数；total_hint 只是估算（如 filesize_approx），
+                    # 不能拿来判断下没下完：实际 17 字节、估算 19 时，下完了也会报「下载不完整」
+                    exact = int(_header(resp, 'Content-Length') or 0)
+                    if exact:
+                        self.total = exact
                     with open(self.path, 'wb') as f:
                         while True:
                             self._check_cancel()
@@ -192,8 +208,10 @@ class FastDownloader:
                             self._add(len(block))
                 finally:
                     resp.close()
-                if self.total and self.done < self.total:
-                    raise DownloadFailed(f'下载不完整（{self.done}/{self.total}）')
+                if exact and self.done < exact:
+                    raise DownloadFailed(f'下载不完整（{self.done}/{exact}）')
+                if not exact:
+                    self.total = self.done          # 不知道总大小：下完的就是全部
                 return
             except Cancelled:
                 raise
@@ -267,6 +285,7 @@ class FastDownloader:
                     try:
                         if _status(resp) != 206:
                             raise DownloadFailed(f'服务器没有按分段返回（HTTP {_status(resp)}）')
+                        _check_range(resp, start, self.total)
                         f.seek(start)
                         w_t, w_bytes = time.monotonic(), 0
                         bs = 64 * KB
