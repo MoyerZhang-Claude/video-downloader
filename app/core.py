@@ -48,9 +48,14 @@ def extract_urls(text):
     """从分享文本中提取所有链接（去重、保持顺序）。"""
     urls, seen = [], set()
     for m in _URL_RE.finditer(text or ''):
-        u = m.group(0).rstrip('.,;:!?\'")]}')
-        if u.count('(') < u.count(')'):
-            u = u.rstrip(')')
+        u = m.group(0)
+        # 去掉结尾粘上的标点；括号只去不配对的那个（「…/movie_(cut)」是完整链接，「(见 https://a.com/x)」才要去）
+        while u and u[-1] in '.,;:!?\'")]}':
+            close = u[-1]
+            pair = {')': '(', ']': '[', '}': '{'}.get(close)
+            if pair and u.count(pair) >= u.count(close):
+                break
+            u = u[:-1]
         if len(u) > 10 and u not in seen:
             seen.add(u)
             urls.append(u)
