@@ -1081,11 +1081,12 @@ def app_check(current):
     return json.dumps({'ok': True, **(rel or {'version': ''})})
 
 
-def comments_fetch(url, opts_json, out_root, callback):
+def comments_fetch(url, opts_json, out_root, callback, yt_key=''):
     """抓评论区并导出到 out_root（App 缓存目录）；Kotlin 端再把文件存进「下载/链接解析下载器/评论」。
     网页把图片、头像、表情嵌在里面（只有一个文件，手机上打开、发给别人都能看到图）。
     callback（Kotlin 对象）：on_progress(json 字符串)、is_cancelled()。
-    返回 {ok, folder, out_dir, files: {html/xlsx/csv: 文件名}, pics: [图片的相对路径], title, n_main, n_sub, n_pics,
+    yt_key：YouTube Data API v3 密钥（可选；空 = 用 yt-dlp 抓）。
+    返回 {ok, key, folder, out_dir, files: {html/xlsx/csv: 文件名}, pics: [图片的相对路径], title, n_main, n_sub, n_pics,
          stopped, notes} 或 {error}"""
     from app import comments
     try:
@@ -1114,7 +1115,7 @@ def comments_fetch(url, opts_json, out_root, callback):
 
     threading.Thread(target=watch, daemon=True).start()
     try:
-        r = comments.Fetcher(o, '', progress, cancel).fetch(url)
+        r = comments.Fetcher(o, '', progress, cancel, settings=_settings(), yt_key=yt_key or '').fetch(url)
     except comments.CommentError as e:
         return json.dumps({'error': str(e)}, ensure_ascii=False)
     except Exception as e:  # noqa: BLE001
@@ -1122,7 +1123,8 @@ def comments_fetch(url, opts_json, out_root, callback):
     finally:
         done.set()
     return json.dumps({
-        'ok': True, 'out_dir': r.out_dir, 'folder': os.path.basename(r.out_dir),
+        'ok': True, 'key': comments.video_key(r.meta.get('url') or url), 'out_dir': r.out_dir,
+        'folder': os.path.basename(r.out_dir),
         'files': {k: os.path.basename(v) for k, v in r.files.items()},
         'pics': sorted({rel for rel in r.media.values() if rel.startswith('图片/')}),
         'title': r.meta.get('title') or '', 'n_main': r.n_main, 'n_sub': r.n_sub, 'n_pics': r.n_pics,

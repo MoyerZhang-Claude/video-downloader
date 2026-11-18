@@ -71,11 +71,34 @@ data class CommentOpts(
     }
 }
 
+/** 抓好的结果。fresh = 这次刚抓的；false = 以前抓的（重新打开窗口时显示「上次抓取」） */
 class CommentResult(val title: String, val folder: String, val html: Uri?, val xlsx: Uri?, val csv: Uri?,
-                    val summary: String, val notes: List<String>)
+                    val summary: String, val notes: List<String>, val time: Long = System.currentTimeMillis(),
+                    val fresh: Boolean = true) {
+    fun toJson(): JSONObject = JSONObject().put("title", title).put("folder", folder).put("html", html?.toString() ?: "")
+        .put("xlsx", xlsx?.toString() ?: "").put("csv", csv?.toString() ?: "").put("summary", summary).put("time", time)
+
+    companion object {
+        /** 以前抓的：文件都被删了就返回 null */
+        fun fromJson(ctx: Context, j: JSONObject): CommentResult? {
+            fun uri(k: String) = j.optString(k).takeIf { it.isNotEmpty() }?.let(Uri::parse)?.takeIf { exists(ctx, it) }
+            val html = uri("html"); val xlsx = uri("xlsx"); val csv = uri("csv")
+            if (html == null && xlsx == null && csv == null) return null
+            return CommentResult(j.optString("title"), j.optString("folder"), html, xlsx, csv, j.optString("summary"),
+                emptyList(), j.optLong("time"), fresh = false)
+        }
+
+        private fun exists(ctx: Context, uri: Uri): Boolean = runCatching {
+            ctx.contentResolver.query(uri, arrayOf(android.provider.MediaStore.MediaColumns._ID), null, null, null)
+                ?.use { it.moveToFirst() } == true
+        }.getOrDefault(false)
+    }
+}
 
 /** 一次抓评论：进度、结果。窗口关了也在后台继续（抓完弹提示） */
 class CommentJob(val url: String, val title: String, val count: Int) {
+    val youtube = commentPlatform(url) == "youtube"
+    val pf = if (youtube) "YouTube" else "B站"
     var running by mutableStateOf(false)
     var status by mutableStateOf("")
     var frac by mutableStateOf(0f)
@@ -91,15 +114,22 @@ class CommentJob(val url: String, val title: String, val count: Int) {
         val main = d.optInt("main"); val mainTarget = d.optInt("main_target"); val mainTotal = d.optInt("main_total")
         val sub = d.optInt("sub"); val subTarget = d.optInt("sub_target")
         val media = d.optInt("media"); val mediaTotal = d.optInt("media_total")
+        val count = d.optInt("count"); val countGoal = d.optInt("count_goal")
         val parts = mutableListOf<String>()
-        if (mainTarget > 0 && stage == "main") parts += "主评论 $main / $mainTarget" else if (stage != "start") parts += "主评论 $main"
+        if (stage == "all") {             // YouTube 内置方式：主评论和回复一起来
+            parts += "已抓 $count 条（含回复）"
+            if (main > 0) parts += "正在第 $main" + (if (mainTarget > 0) " / $mainTarget" else "") + " 条主评论"
+        } else if (mainTarget > 0 && stage == "main") parts += "主评论 $main / $mainTarget"
+        else if (stage != "start" && main > 0) parts += "主评论 $main"
         if (stage in setOf("sub", "media", "export") && subTarget > 0) parts += "楼中楼 $sub / $subTarget"
         if (stage in setOf("media", "export") && mediaTotal > 0) parts += "图片 $media / $mediaTotal"
         if (stage == "export") parts += "正在生成文件…"
-        if (d.optInt("wait") > 0) parts += "B站说太频繁了，等 ${d.optInt("wait")} 秒再继续"
+        if (d.optInt("wait") > 0) parts += "$pf 说太频繁了，等 ${d.optInt("wait")} 秒再继续"
         status = parts.joinToString(" · ").ifEmpty { "正在获取视频信息…" }
         val mainGoal = (if (mainTarget > 0) mainTarget.toFloat() else mainTotal * 0.35f).coerceAtLeast(1f)
         frac = when (stage) {
+            "all" -> 0.8f * (if (mainTarget > 0 && main > 0) main.toFloat() / mainTarget else count.toFloat() / countGoal.coerceAtLeast(1))
+                .coerceAtMost(1f)
             "main" -> 0.35f * (main / mainGoal).coerceAtMost(1f)
             "sub" -> 0.35f + 0.45f * (sub / subTarget.coerceAtLeast(1).toFloat()).coerceAtMost(1f)
             "media" -> 0.8f + 0.17f * (media / mediaTotal.coerceAtLeast(1).toFloat()).coerceAtMost(1f)
@@ -117,10 +147,28 @@ class CommentCallback(private val onProgress: (JSONObject) -> Unit) {
     fun is_cancelled(): Boolean = cancelled
 }
 
-/** 能抓评论的链接（和 Python 端 comments.supported 一致）：B站视频、番剧的某一集、b23.tv 短链 */
-fun commentSupported(url: String): Boolean =
-    Regex("(bilibili\\.com/(video|bangumi/play|list/)|b23\\.tv/|bili2233\\.cn/|\\bBV[0-9A-Za-z]{10}\\b|\\bav\\d+\\b|\\bep\\d+\\b)",
-        RegexOption.IGNORE_CASE).containsMatchIn(url)
+private val BILI_RE = Regex("(bilibili\\.com/(video|bangumi/play|list/)|b23\\.tv/|bili2233\\.cn/|\\bBV[0-9A-Za-z]{10}\\b|\\bav\\d+\\b|\\bep\\d+\\b)",
+    RegexOption.IGNORE_CASE)
+private val YT_RE = Regex("(?:youtube\\.com/(?:watch\\?(?:.*&)?v=|shorts/|live/|embed/)|youtu\\.be/)([0-9A-Za-z_-]{11})")
+
+/** 和 Python 端 comments.platform_of 一致：youtube / bili / "" */
+fun commentPlatform(url: String): String = when {
+    YT_RE.containsMatchIn(url) -> "youtube"
+    BILI_RE.containsMatchIn(url) -> "bili"
+    else -> ""
+}
+
+/** 能抓评论的链接：B站视频、番剧的某一集、b23.tv 短链；YouTube 视频 */
+fun commentSupported(url: String): Boolean = commentPlatform(url).isNotEmpty()
+
+/** 同一个视频不同写法的链接 → 同一个键（和 Python 端 comments.video_key 一致），记住上次抓的结果用 */
+fun commentKey(url: String): String {
+    YT_RE.find(url)?.let { return "yt:" + it.groupValues[1] }
+    Regex("\\b(BV[0-9A-Za-z]{10})").find(url)?.let { return "bili:" + it.groupValues[1] }
+    Regex("\\bav(\\d+)", RegexOption.IGNORE_CASE).find(url)?.let { return "bili:av" + it.groupValues[1] }
+    Regex("\\bep(\\d+)", RegexOption.IGNORE_CASE).find(url)?.let { return "bili:ep" + it.groupValues[1] }
+    return url.substringBefore('#')
+}
 
 /** Python 导出到缓存目录的文件 → 「下载/链接解析下载器/评论/<视频标题> 的评论 <时间>/」 */
 fun saveCommentFiles(ctx: Context, r: JSONObject): CommentResult {
@@ -141,8 +189,8 @@ fun saveCommentFiles(ctx: Context, r: JSONObject): CommentResult {
         if (f.isFile) runCatching { Storage.saveToDownloads(ctx, f, f.name, Storage.mimeOf(f.extension), "$sub/图片") }
     }
     val nPics = r.optInt("n_pics")
-    var summary = "已保存：主评论 ${r.optInt("n_main")} 条、楼中楼 ${r.optInt("n_sub")} 条" + if (nPics > 0) "、图片 $nPics 张" else ""
-    r.optString("stopped").takeIf { it.isNotEmpty() }?.let { summary = "没有抓完（$it）。$summary" }
+    var summary = "主评论 ${r.optInt("n_main")} 条、楼中楼 ${r.optInt("n_sub")} 条" + if (nPics > 0) "、图片 $nPics 张" else ""
+    r.optString("stopped").takeIf { it.isNotEmpty() }?.let { summary = "没有抓完（$it）：$summary" }
     val notes = r.optJSONArray("notes")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList()
     return CommentResult(r.optString("title"), folder, html, xlsx, csv, summary, notes)
 }
@@ -155,21 +203,31 @@ fun CommentScreen(job: CommentJob, vm: MainViewModel) {
     var o by remember { mutableStateOf(vm.commentOpts) }
     val presets = listOf(100, 500, 1000, 0)
     var customMain by remember { mutableStateOf(o.maxMain !in presets) }
-    val locked = job.running || job.result != null
+    val locked = job.running             // 抓完了也能改设置，再点「重新抓取」
+    var editKey by remember { mutableStateOf(false) }
     BackHandler { vm.closeComments() }
 
     Dialog(onDismissRequest = { vm.closeComments() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(Modifier.fillMaxSize().background(P.bg).systemBarsPadding().imePadding()) {
-            TopBar("抓取评论", { vm.closeComments() })
+            TopBar("抓取 ${job.pf} 评论", { vm.closeComments() })
             Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
                 Text(job.title.ifEmpty { job.url }, fontSize = 16.sp, color = P.text, maxLines = 2, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(horizontal = 4.dp))
-                Text(if (job.count > 0) "B站显示 ${job.count} 条评论（包括楼中楼）" else "评论数开始抓取后才知道",
+                Text(if (job.count > 0) "${job.pf} 显示 ${job.count} 条评论（包括楼中楼）" else "评论数开始抓取后才知道",
                     fontSize = 13.sp, color = P.text3, modifier = Modifier.padding(4.dp, 4.dp, 4.dp, 12.dp))
 
                 Column {
+                        if (job.youtube) SettingsGroup("抓取方式") {
+                            val key = vm.ytApiKey
+                            SettingsRow(null, if (key.isEmpty()) "内置方式" else "官方 API（密钥 …${key.takeLast(4)}）",
+                                if (key.isEmpty()) "不需要密钥。时间是按「几天前」估算的，点赞数是约数。点这里可以填 YouTube Data API v3 密钥改用官方接口"
+                                else "时间、点赞数准确；用不了（额度用完、密钥无效）时自动换内置方式。点这里更换或清空密钥",
+                                divider = false, onClick = { if (!locked) editKey = true }) {
+                                LIcon(LineIcons.ChevronRight, P.text3, 18.dp)
+                            }
+                        }
                         SettingsGroup("抓哪些") {
-                            SettingsRow(null, "排序", if (o.sort == "hot") "按热度，和 B站默认一样" else "按时间，最新的在前") {
+                            SettingsRow(null, "排序", if (o.sort == "hot") "按热度，和 ${job.pf} 默认一样" else "按时间，最新的在前") {
                                 Pills(listOf("hot" to "热度", "time" to "最新"), o.sort, !locked) { o = o.copy(sort = it) }
                             }
                             SettingsRow(null, "主评论", when {
@@ -191,7 +249,11 @@ fun CommentScreen(job: CommentJob, vm: MainViewModel) {
                             }
                             if (o.subMode == "limit") NumberRow("每层最多", o.subLimit, !locked, divider = false) { o = o.copy(subLimit = it) }
                         }
-                        SettingsGroup("图片") {
+                        if (job.youtube) SettingsGroup("头像") {
+                            SettingsRow(null, "保存头像", "网页里显示每个人的头像，每个只有几 KB", divider = false) {
+                                Switch(o.avatars, { o = o.copy(avatars = it) }, enabled = !locked)
+                            }
+                        } else SettingsGroup("图片") {
                             SettingsRow(null, "保存评论里的图片", "动图不保存（体积大）", divider = true) {
                                 Switch(o.images, { o = o.copy(images = it) }, enabled = !locked)
                             }
@@ -203,7 +265,7 @@ fun CommentScreen(job: CommentJob, vm: MainViewModel) {
                             }
                         }
                         SettingsGroup("导出") {
-                            SettingsRow(null, "网页", "像 B站评论区一样看：楼中楼能展开收起、能搜索、看对话、看大图。只有一个文件，图片都在里面，发给别人也能看") {
+                            SettingsRow(null, "网页", "像评论区一样看：楼中楼能展开收起、能搜索、看对话、看大图。只有一个文件，图片都在里面，发给别人也能看") {
                                 Switch(o.html, { o = o.copy(html = it) }, enabled = !locked)
                             }
                             SettingsRow(null, "Excel", "一行一条评论，楼中楼可以折叠；方便排序、筛选") {
@@ -214,13 +276,14 @@ fun CommentScreen(job: CommentJob, vm: MainViewModel) {
                             }
                         }
                 }
-                Text("保存到「下载/链接解析下载器/评论」，每次一个文件夹。" + estimate(job.count, o),
+                Text("保存到「下载/链接解析下载器/评论」，每次一个文件夹。" + estimate(job, o, vm.ytApiKey.isNotEmpty()),
                     fontSize = 12.sp, color = P.text3, lineHeight = 18.sp, modifier = Modifier.padding(6.dp, 0.dp, 6.dp, 6.dp))
-                if (vm.bili?.loggedIn != true) Text("还没有登录 B站：B站只给没登录的人看前几条评论。在设置页顶部扫码登录后能抓完整。",
+                if (!job.youtube && vm.bili?.loggedIn != true) Text("还没有登录 B站：B站只给没登录的人看前几条评论。在设置页顶部扫码登录后能抓完整。",
                     fontSize = 12.sp, color = P.err, lineHeight = 18.sp, modifier = Modifier.padding(6.dp, 0.dp, 6.dp, 6.dp))
                 Spacer(Modifier.height(12.dp))
             }
 
+            if (editKey) YtKeyDialog(vm) { editKey = false }
             // 底部：开始 / 进度 / 结果
             CardBox(Modifier.padding(12.dp)) {
                 val res = job.result
@@ -236,7 +299,8 @@ fun CommentScreen(job: CommentJob, vm: MainViewModel) {
                         }
                     }
                     res != null -> {
-                        Text(res.summary, fontSize = 14.sp, color = P.text)
+                        Text((if (res.fresh) "已保存：" else "上次抓取（" + java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA)
+                            .format(java.util.Date(res.time)) + "）：") + res.summary, fontSize = 14.sp, color = P.text)
                         res.notes.forEach { Text(it, fontSize = 12.sp, color = P.text3, modifier = Modifier.padding(top = 4.dp)) }
                         Text("在「下载/链接解析下载器/评论/${res.folder}」", fontSize = 12.sp, color = P.text3,
                             modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
@@ -253,9 +317,17 @@ fun CommentScreen(job: CommentJob, vm: MainViewModel) {
                                 }
                             }
                         }
-                        if (res.html != null && (res.xlsx != null || res.csv != null)) Row(Modifier.padding(top = 4.dp)) {
-                            res.xlsx?.let { u -> TextButton(onClick = { openUri(ctx, u, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", vm) }) { Text("打开 Excel", color = P.text2) } }
-                            res.csv?.let { u -> TextButton(onClick = { openUri(ctx, u, "text/csv", vm) }) { Text("打开 CSV", color = P.text2) } }
+                        Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (res.html != null) {
+                                res.xlsx?.let { u -> TextButton(onClick = { openUri(ctx, u, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", vm) }) { Text("打开 Excel", color = P.text2) } }
+                                res.csv?.let { u -> TextButton(onClick = { openUri(ctx, u, "text/csv", vm) }) { Text("打开 CSV", color = P.text2) } }
+                            }
+                            Spacer(Modifier.weight(1f))
+                            val ok = o.html || o.xlsx || o.csv
+                            TextButton(onClick = { if (ok) vm.startComments(job, o) else vm.toast("至少选一种导出格式") }) {
+                                LIcon(LineIcons.Refresh, P.accent, 16.dp)
+                                Text(" 重新抓取", color = P.accent)
+                            }
                         }
                     }
                     else -> {
@@ -270,8 +342,29 @@ fun CommentScreen(job: CommentJob, vm: MainViewModel) {
     }
 }
 
-private fun estimate(count: Int, o: CommentOpts): String {
-    if (count <= 0) return "每页之间会停半秒左右，免得被 B站限流。"
+@Composable
+private fun YtKeyDialog(vm: MainViewModel, onDone: () -> Unit) {
+    var text by remember { mutableStateOf(vm.ytApiKey) }
+    androidx.compose.material3.AlertDialog(onDismissRequest = onDone, containerColor = P.surface, shape = RoundedCornerShape(22.dp),
+        title = { Text("YouTube Data API v3 密钥", color = P.text, fontSize = 18.sp) },
+        text = {
+            Column {
+                Text("可选。填了以后用官方接口抓 YouTube 评论：时间、点赞数准确，也更快；每天有免费额度。\n" +
+                    "获取：电脑上打开谷歌云控制台（console.cloud.google.com）→ 选一个项目 →「API 和服务」→「库」里启用 " +
+                    "YouTube Data API v3 →「凭据」→「创建凭据」→「API 密钥」。\n清空 = 改回内置方式。",
+                    fontSize = 13.sp, color = P.text3, lineHeight = 19.sp)
+                Spacer(Modifier.height(10.dp))
+                androidx.compose.material3.OutlinedTextField(text, { text = it.trim() }, singleLine = true, shape = RoundedCornerShape(12.dp),
+                    placeholder = { Text("AIza…") })
+            }
+        },
+        confirmButton = { TextButton(onClick = { vm.changeYtApiKey(text); onDone() }) { Text("保存", color = P.accent) } },
+        dismissButton = { TextButton(onClick = onDone) { Text("取消", color = P.text2) } })
+}
+
+private fun estimate(job: CommentJob, o: CommentOpts, hasKey: Boolean): String {
+    val count = job.count
+    if (count <= 0) return if (job.youtube) "" else "每页之间会停半秒左右，免得被 B站限流。"
     val mains = count * 0.35
     val want = if (o.maxMain > 0) minOf(mains, o.maxMain.toDouble()) else mains
     val share = if (mains > 0) want / mains else 0.0
@@ -281,7 +374,13 @@ private fun estimate(count: Int, o: CommentOpts): String {
         if (o.subMode == "limit") subs = minOf(subs, want * minOf(o.subLimit, 8))
         reqs += want * 0.18 + subs / 20
     }
-    val sec = reqs * 0.9 + (want + (count - mains) * share) * 0.01 + 3
+    var sec = reqs * 0.9 + (want + (count - mains) * share) * 0.01 + 3
+    if (job.youtube) {
+        val subs = if (o.subMode == "none") 0.0 else (count - mains) * share
+        sec = if (hasKey) 3 + want / 100 + (if (o.subMode == "none") 0.0 else want * 0.04)
+              else 10 + want / 20 * 1.2 + (if (o.subMode == "none") 0.0 else want * 0.3 + subs / 10 * 1.2)
+        return (if (sec < 60) "预计不到 1 分钟" else "预计大约 ${ceil(sec / 60).toInt()} 分钟") + "（只是估计）。"
+    }
     return (if (sec < 60) "预计不到 1 分钟" else "预计大约 ${ceil(sec / 60).toInt()} 分钟") + "（只是估计），每页之间会停半秒左右，免得被 B站限流。"
 }
 

@@ -156,7 +156,7 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:poin
 .quote .qt .emo{width:1.4em;height:1.4em;vertical-align:-.34em}
 .quote .qt{font:15px/1.65 var(--serif);color:var(--text2);display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;
   overflow:hidden;word-break:break-word;white-space:pre-wrap}
-.quote .qa{font-size:12.5px;color:var(--text3);display:flex;gap:8px;align-items:center;margin-top:auto}
+.quote .qa{font-size:12.5px;color:var(--text3);display:flex;gap:4px 8px;align-items:center;margin-top:auto;flex-wrap:wrap}
 .quote .qa .i{color:var(--accent)}
 .bars{display:flex;flex-direction:column;gap:7px}
 .bar-row{display:grid;grid-template-columns:4.2em 1fr 4.6em;gap:10px;align-items:center;font-size:13px}
@@ -217,6 +217,8 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:poin
 .hd{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:22px}
 .name{font-weight:600;font-size:14px;color:var(--text2)}
 .name.vip{color:var(--vip)}
+.vf{font-size:11px;font-weight:700;color:var(--text3);margin-left:-2px}
+.bar-row.who{grid-template-columns:9em 1fr 3.4em}
 .lv{font:700 9.5px/1 var(--sans);padding:2px 4px 2px;border-radius:4px;border:1px solid currentColor;letter-spacing:.02em}
 .lv0,.lv1{color:var(--lv0)}.lv2{color:var(--lv2)}.lv3{color:var(--lv3)}.lv4{color:var(--lv4)}.lv5{color:var(--lv5)}.lv6{color:var(--lv6)}
 .badge{font-size:11px;line-height:1;padding:3px 6px;border-radius:5px;font-weight:600}
@@ -396,6 +398,9 @@ footer .logo svg{width:100%;height:100%}
 (function () {
 'use strict';
 var D = JSON.parse(document.getElementById('data').textContent);
+var PF = (D.meta && D.meta.platform) || 'B站', YT = PF === 'YouTube';
+var UPN = YT ? '作者' : 'UP 主';                       // 视频作者的叫法
+var APPROX = !!(D.meta && D.meta.time_approx);       // 时间是按「几天前」估算的（YouTube 内置方式）
 var MEDIA = {};
 try { MEDIA = JSON.parse(document.getElementById('media').textContent) || {}; } catch (e) {}
 function M(p) { return (p && MEDIA[p]) || p; }       // 图片嵌在网页里时（手机版）按路径取
@@ -464,6 +469,8 @@ D.comments.forEach(function (c, i) {
 });
 var nSub = ALL.length - D.comments.length;
 var nPics = 0; ALL.forEach(function (x) { x.pics.forEach(function (p) { if (p.src) nPics++; }); });
+var nPeople = 0, seenPeople = {};
+ALL.forEach(function (x) { var k = x.uid || x.name; if (k && !seenPeople[k]) { seenPeople[k] = 1; nPeople++; } });
 
 // ---------------- 文字（表情、链接、搜索高亮），全部用文本节点，不拼 HTML
 var TOKEN = /(\[[^\[\]\n]{1,24}\])|(https?:\/\/[^\s<>"'，。！？）】]+)/g;
@@ -504,11 +511,11 @@ function nameNode(x) {
 // ---------------- 头像、图片
 function avatar(x, size) {
   var letter = function () {
-    var ch = Array.from((x.name || '?').trim())[0] || '?';
+    var ch = Array.from((x.name || '?').replace(/^@/, '').trim())[0] || '?';
     return h('span', {class: 'av letter s' + size, style: '--h:' + (hash(x.name || '') % 360), 'aria-hidden': 'true'}, ch);
   };
   if (!x.avatar) return letter();
-  var img = h('img', {class: 'av s' + size, src: M(x.avatar), alt: '', loading: 'lazy'});
+  var img = h('img', {class: 'av s' + size, src: M(x.avatar), alt: '', loading: 'lazy', referrerpolicy: 'no-referrer'});
   img.addEventListener('error', function () { img.replaceWith(letter()); });
   return img;
 }
@@ -534,8 +541,10 @@ function picsNode(x) {
 
 // ---------------- 一条评论
 function head(x, host) {
-  var hd = h('div', {class: 'hd'}, nameNode(x), h('span', {class: 'lv lv' + Math.min(6, x.level || 0)}, 'LV' + (x.level || 0)));
-  if (x.up) hd.append(h('span', {class: 'badge up', title: '视频作者'}, 'UP'));
+  var hd = h('div', {class: 'hd'}, nameNode(x),
+    x.verified ? h('span', {class: 'vf', title: '已认证'}, '✓') : null,
+    x.level != null ? h('span', {class: 'lv lv' + Math.min(6, x.level || 0)}, 'LV' + (x.level || 0)) : null);
+  if (x.up) hd.append(h('span', {class: 'badge up', title: '视频作者'}, YT ? '作者' : 'UP'));
   if (host && x.uid && x.uid === host.uid && !x.up) hd.append(h('span', {class: 'badge op', title: '这一层的楼主'}, '层主'));
   if (x.pinned) hd.append(h('span', {class: 'badge pin'}, '置顶'));
   if (host && x.reply_to) {
@@ -551,10 +560,11 @@ function head(x, host) {
 function foot(x, host) {
   var ft = h('div', {class: 'ft'},
     h('span', {class: 'like' + (x.like >= 100 ? ' hot' : ''), title: x.like + ' 个赞'}, ic(x.like >= 100 ? 'heartf' : 'heart'), num(x.like)),
-    h('span', {title: date(x.time) }, date(x.time)),
+    APPROX ? h('span', {title: '按「' + (x.ago || '几天前') + '」估算，大约是 ' + date(x.time, false)}, x.ago || '约 ' + date(x.time, false))
+      : h('span', {title: date(x.time)}, date(x.time)),
     x.ip ? h('span', null, x.ip) : null);
-  if (x.up_like) ft.append(h('span', {class: 'tag'}, ic('heartf'), 'UP 主觉得很赞'));
-  if (!host && x.up_reply) ft.append(h('span', {class: 'tag'}, ic('chat'), 'UP 主回复了'));
+  if (x.up_like) ft.append(h('span', {class: 'tag'}, ic('heartf'), YT ? '作者点了爱心' : 'UP 主觉得很赞'));
+  if (!host && x.up_reply) ft.append(h('span', {class: 'tag'}, ic('chat'), UPN + '回复了'));
   if (host && x.dialog) {
     var group = host.replies.filter(function (r) { return r.dialog === x.dialog; });
     if (group.length >= 2) {
@@ -774,14 +784,14 @@ function drawTop() {
     h('button', {class: 'iconb', id: 'theme'})));
   top.querySelector('.logo').innerHTML = LOGO;
   var info = h('div', null, h('h1', null, m.title),
-    h('div', {class: 'meta'}, m.owner ? h('span', null, 'UP 主 ', h('b', null, m.owner)) : null,
+    h('div', {class: 'meta'}, m.owner ? h('span', null, UPN + ' ', h('b', null, m.owner)) : null,
       m.pubdate ? h('span', null, '发布于 ' + date(m.pubdate, false)) : null,
-      m.bvid ? h('span', null, m.bvid) : null,
-      h('a', {href: m.url, target: '_blank', rel: 'noopener noreferrer'}, '在 B站打开 ↗')));
+      (m.video_id || m.bvid) ? h('span', null, m.video_id || m.bvid) : null,
+      h('a', {href: m.url, target: '_blank', rel: 'noopener noreferrer'}, '在 ' + PF + ' 打开 ↗')));
   top.append(h('div', {class: 'hero'}, m.cover ? h('img', {class: 'cover', src: M(m.cover), alt: ''}) : null, info));
   var tiles = h('div', {class: 'tiles'});
-  [[num(m.reply_total), 'B站显示的评论数'], [num(D.comments.length), '已保存主评论'], [num(nSub), '已保存楼中楼'],
-   [num(nPics), '已保存图片']].forEach(function (t) {
+  [[m.reply_total ? num(m.reply_total) : '—', PF + ' 显示的评论数'], [num(D.comments.length), '已保存主评论'], [num(nSub), '已保存楼中楼'],
+   YT ? [num(nPeople), '参与的人'] : [num(nPics), '已保存图片']].forEach(function (t) {
     tiles.append(h('div', {class: 'tile'}, h('div', {class: 'num'}, t[0]), h('div', {class: 'lab'}, t[1])));
   });
   top.append(tiles);
@@ -829,10 +839,27 @@ function drawOverview() {
         h('span', {class: 'v'}, num(t[1]) + ' · ' + Math.round(t[1] / withIp * 100) + '%')));
     });
     card.append(bars);
-  } else card.append(h('div', {class: 'empty-s'}, '没有属地信息'));
+  } else card = whoCard();
   grid.append(card);
   grid.append(timeline());
   ov.append(grid);
+}
+function whoCard() {
+  var cnt = {};
+  ALL.forEach(function (x) { if (x.name) cnt[x.name] = (cnt[x.name] || 0) + 1; });
+  var top = Object.keys(cnt).map(function (k) { return [k, cnt[k]]; }).filter(function (t) { return t[1] > 1; })
+    .sort(function (a, b) { return b[1] - a[1]; }).slice(0, 10);
+  var card = h('div', {class: 'card'}, h('div', {class: 'card-h'}, h('span', null, '发言最多的人'),
+    h('span', null, '主评论 + 回复')));
+  if (!top.length) { card.append(h('div', {class: 'empty-s'}, '每个人都只说了一句')); return card; }
+  var bars = h('div', {class: 'bars'}), mx = top[0][1];
+  top.forEach(function (t) {
+    bars.append(h('div', {class: 'bar-row who', title: t[0] + '：' + t[1] + ' 条'}, h('span', {class: 'n'}, t[0]),
+      h('span', {class: 'track'}, h('span', {class: 'fill', style: 'display:block;width:' + Math.max(2, t[1] / mx * 100) + '%'})),
+      h('span', {class: 'v'}, t[1] + ' 条')));
+  });
+  card.append(bars);
+  return card;
 }
 function timeline() {
   var card = h('div', {class: 'card'});
@@ -868,7 +895,8 @@ function timeline() {
   bins.forEach(function (b) {
     chart.append(h('span', {class: 'b', title: label(b.d) + '：' + b.n + ' 条', style: 'height:' + (b.n ? Math.max(3, b.n / mx * 100) : 0) + '%'}));
   });
-  card.append(h('div', {class: 'card-h'}, h('span', null, '评论时间（每' + {hour: '小时', day: '天', month: '月'}[unit] + '）'),
+  card.append(h('div', {class: 'card-h'}, h('span', null, '评论时间（每' + {hour: '小时', day: '天', month: '月'}[unit] +
+      (APPROX ? '，大约' : '') + '）'),
     h('span', {class: 'peak'}, '最多：' + label(peak.d) + ' ' + peak.n + ' 条')), chart,
     h('div', {class: 'axis'}, h('span', null, label(bins[0].d)), h('span', null, label(bins[bins.length - 1].d))));
   return card;
@@ -897,6 +925,7 @@ function syncChips() {
   document.getElementById('f-up').classList.toggle('on', F_UP);
 }
 document.getElementById('f-pics').addEventListener('click', function () { F_PICS = !F_PICS; syncChips(); redraw(); });
+document.getElementById('f-up').lastChild.textContent = UPN + '参与';
 document.getElementById('f-up').addEventListener('click', function () { F_UP = !F_UP; syncChips(); redraw(); });
 
 drawTop();
@@ -939,7 +968,7 @@ function barH() {
 }
 addEventListener('resize', barH);
 
-document.getElementById('foot').append(h('span', {class: 'logo'}), '这份评论存档由「链接解析下载器」生成，数据来自 B站公开的评论区。',
+document.getElementById('foot').append(h('span', {class: 'logo'}), '这份评论存档由「链接解析下载器」生成，数据来自 ' + PF + ' 公开的评论区。',
   h('br'), '评论的内容和图片属于各自的作者，请只用于个人存档、阅读和研究。动图没有保存，点开会在浏览器里打开原图。');
 document.querySelector('#foot .logo').innerHTML = LOGO;
 drawOverview();
