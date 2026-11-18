@@ -16,11 +16,12 @@ object Muxer {
     private class Source(val extractor: MediaExtractor, val track: Int, var done: Boolean = false)
 
     /** webm = true：VP9 + Opus 合并成 WebM（MP4 装不了 VP9） */
-    fun merge(video: File, audio: File, out: File, webm: Boolean = false) =
-        mux(listOf(video to "video/", audio to "audio/"), out, webm = webm)
+    fun merge(video: File, audio: File, out: File, webm: Boolean = false, isCancelled: () -> Boolean = { false }) =
+        mux(listOf(video to "video/", audio to "audio/"), out, webm = webm, isCancelled = isCancelled)
 
     /** 把一个文件里的视频轨和音频轨原样装进 MP4 */
-    fun remux(input: File, out: File) = mux(listOf(input to "video/", input to "audio/"), out, audioOptional = true)
+    fun remux(input: File, out: File, isCancelled: () -> Boolean = { false }) =
+        mux(listOf(input to "video/", input to "audio/"), out, audioOptional = true, isCancelled = isCancelled)
 
     /** 文件实际是不是 MPEG-TS（HLS 下载的常见结果，常常名字叫 .mp4）：每 188 字节一个 0x47 同步字节 */
     fun isMpegTs(file: File): Boolean = runCatching {
@@ -30,7 +31,9 @@ object Muxer {
         }
     }.getOrDefault(false)
 
-    private fun mux(inputs: List<Pair<File, String>>, out: File, audioOptional: Boolean = false, webm: Boolean = false) {
+    /** isCancelled：每写几十个样本问一次，用户点了「取消」就停下（抛 CancellationException，输出文件由调用方删掉） */
+    private fun mux(inputs: List<Pair<File, String>>, out: File, audioOptional: Boolean = false, webm: Boolean = false,
+                    isCancelled: () -> Boolean = { false }) {
         val muxer = MediaMuxer(out.path, if (webm) MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM
                                          else MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         val sources = mutableListOf<Source>()
@@ -63,7 +66,9 @@ object Muxer {
             val buffer = ByteBuffer.allocateDirect(maxOf(maxSize, 8 * 1024 * 1024))
             val info = MediaCodec.BufferInfo()
             // 按时间戳交错写入音视频，播放器读取更顺畅
+            var n = 0
             while (true) {
+                if (++n % 64 == 0 && isCancelled()) throw java.util.concurrent.CancellationException("已取消")
                 val next = sources.filter { !it.done }.minByOrNull { it.extractor.sampleTime } ?: break
                 val ex = next.extractor
                 buffer.clear()

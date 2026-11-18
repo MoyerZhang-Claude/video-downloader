@@ -176,8 +176,35 @@ func TestCompleteAndRename(t *testing.T) {
 	}
 }
 
+// 下载目录里有不属于任何任务的同名临时文件（上次崩溃、手动删了任务列表……）：
+// 新任务以前会截断打开它；现在应该换一个名字，不碰那个文件。
+func TestNewTaskDoesNotTruncateOrphanPartial(t *testing.T) {
+	fs := &fileServer{data: randBytes(2 << 20)}
+	srv := httptest.NewServer(fs)
+	defer srv.Close()
+	dl := t.TempDir()
+	orphan := filepath.Join(dl, "a.bin"+partialExt)
+	old := []byte("上次留下的分片，不能被覆盖")
+	if err := os.WriteFile(orphan, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := newManager(t, t.TempDir(), dl, newRecorder(), nil)
+	defer m.Close()
+
+	v := addURL(t, m, srv.URL+"/a.bin")
+	waitFor(t, "下载完成", func() bool { return status(m, v.ID) == StatusCompleted })
+	got, _ := m.Get(v.ID)
+	if got.Name != "a (1).bin" {
+		t.Fatalf("应该避开遗留的临时文件，实际文件名：%s", got.Name)
+	}
+	sameFile(t, got.FilePath, fs.data)
+	sameFile(t, orphan, old)
+}
+
 func TestPauseResume(t *testing.T) {
-	fs := &fileServer{data: randBytes(4 << 20), slow: 10 * time.Millisecond}
+	// 引擎每条连接攒满 1MB（BufSize）才写盘、才计入进度：4 条连接 × 每条 1MB 时第一次有进度就已经下完了，
+	// 暂停不到中间。文件要比 连接数 × 1MB 大得多，才能在下载中途暂停。
+	fs := &fileServer{data: randBytes(16 << 20), slow: 10 * time.Millisecond}
 	srv := httptest.NewServer(fs)
 	defer srv.Close()
 	m := newManager(t, t.TempDir(), t.TempDir(), newRecorder(), nil)

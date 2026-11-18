@@ -1254,6 +1254,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var commentJob by mutableStateOf<CommentJob?>(null)
         private set
+    /** YouTube Data API v3 密钥（可选，抓 YouTube 评论用官方接口） */
+    var ytApiKey by mutableStateOf(prefs.getString("yt_api_key", "") ?: "")
+        private set
+
+    fun changeYtApiKey(key: String) {
+        ytApiKey = key.trim()
+        prefs.edit().putString("yt_api_key", ytApiKey).apply()
+        toast(if (ytApiKey.isEmpty()) "已清空密钥，YouTube 评论改用内置方式" else "已保存密钥，YouTube 评论改用官方接口")
+    }
+
+    /** 每个视频上次抓的评论（重新打开「抓取评论」时直接显示）：{视频键: 结果} */
+    private fun savedComments(): JSONObject = runCatching { JSONObject(prefs.getString("comment_exports", "{}") ?: "{}") }
+        .getOrDefault(JSONObject())
+
+    private fun rememberComments(keys: Collection<String>, res: CommentResult) {
+        val all = savedComments()
+        keys.filter { it.isNotEmpty() }.forEach { all.put(it, res.toJson()) }
+        if (all.length() > 300) {                    // 只留最近 300 个视频
+            val sorted = all.keys().asSequence().toList().sortedBy { all.getJSONObject(it).optLong("time") }
+            sorted.take(all.length() - 300).forEach { all.remove(it) }
+        }
+        prefs.edit().putString("comment_exports", all.toString()).apply()
+    }
 
     /** 打开「抓取评论」窗口；已经有一个在抓：把它打开（同时只抓一个，免得被 B站限流） */
     fun openComments(url: String, title: String, count: Int = 0) {
@@ -1263,7 +1286,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (j.url != url) toast("「${j.title.take(16)}」的评论还在抓，抓完再开始新的")
             return
         }
-        commentJob = CommentJob(url, title, count)
+        val job = CommentJob(url, title, count)
+        savedComments().optJSONObject(commentKey(url))?.let { job.result = CommentResult.fromJson(getApplication(), it) }
+        commentJob = job
     }
 
     /** 关窗口：还在抓就在后台继续，抓完提示 */
@@ -1290,7 +1315,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val app = getApplication<Application>()
         viewModelScope.launch(Dispatchers.IO) {
             val stage = java.io.File(app.cacheDir, "comments").apply { deleteRecursively(); mkdirs() }
-            val r = runCatching { PyBridge.commentsFetch(job.url, opts.toJson(), stage.absolutePath, cb) }
+            val r = runCatching { PyBridge.commentsFetch(job.url, opts.toJson(), stage.absolutePath, cb, ytApiKey) }
                 .getOrElse { JSONObject().put("error", it.message ?: "出错了") }
             val saved = if (r.has("error")) null else runCatching {
                 withContext(Dispatchers.Main) { job.status = "正在存到「下载」文件夹…"; job.frac = 0.98f }
@@ -1305,6 +1330,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     res != null -> {
                         job.result = res
                         job.frac = 1f
+                        rememberComments(listOf(commentKey(job.url), r.optString("key")), res)
                         if (!job.shown) { toast("「${res.title.take(16)}」的评论已保存，在「下载/链接解析下载器/评论」"); job.shown = true }
                     }
                     else -> {

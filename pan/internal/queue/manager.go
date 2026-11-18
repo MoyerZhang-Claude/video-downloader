@@ -585,7 +585,20 @@ func (m *Manager) download(ctx context.Context, t *Task, j *job) error {
 			m.mu.Unlock()
 			return engine.Permanent(fmt.Errorf("无法创建下载目录：%w", err))
 		}
-		t.FilePath = fsutil.UniquePath(t.SaveDir, name, m.pathTakenLocked(t.ID))
+		// 临时文件（正式文件名 + .pandl）也不能撞上：新任务会截断打开它，目录里遗留的同名 .pandl 会被覆盖
+		taken := m.pathTakenLocked(t.ID)
+		p, err := fsutil.UniquePath(t.SaveDir, name, func(p string) bool {
+			if taken(p) {
+				return true
+			}
+			_, err := os.Lstat(p + partialExt)
+			return err == nil
+		})
+		if err != nil {
+			m.mu.Unlock()
+			return engine.Permanent(err)
+		}
+		t.FilePath = p
 		t.Name = filepath.Base(t.FilePath)
 	}
 	if src.Size >= 0 {
@@ -775,7 +788,12 @@ func (m *Manager) finalize(t *Task) error {
 	final := t.FilePath
 	partial := final + partialExt
 	if _, err := os.Stat(final); err == nil { // 期间有同名文件出现了：换个名字
-		final = fsutil.UniquePath(filepath.Dir(final), filepath.Base(final), m.pathTakenLocked(t.ID))
+		p, err := fsutil.UniquePath(filepath.Dir(final), filepath.Base(final), m.pathTakenLocked(t.ID))
+		if err != nil {
+			m.mu.Unlock()
+			return engine.Permanent(fmt.Errorf("下载完成但找不到可用的文件名：%w", err))
+		}
+		final = p
 	}
 	m.mu.Unlock()
 	if err := os.Rename(partial, final); err != nil {

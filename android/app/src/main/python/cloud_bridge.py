@@ -88,7 +88,7 @@ def _sidecars(path):
     stem = os.path.splitext(base)[0]
     subs = os.path.join(d, '字幕')
     try:
-        out += [os.path.join(subs, n) for n in sorted(os.listdir(subs)) if n.startswith(stem + '.')]
+        out += [os.path.join(subs, n) for n in sorted(os.listdir(subs)) if g.is_sidecar(stem, n)]
     except OSError:
         pass
     return out

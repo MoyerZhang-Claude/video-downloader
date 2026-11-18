@@ -1,0 +1,52 @@
+# 自动检查：每次推送到 main、每个 Pull Request 都跑一遍（不联网解析真实网站，几分钟内出结果）
+name: 检查
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python 核心（${{ matrix.os }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: 安装测试依赖
+        run: python -m pip install requests
+      - name: 语法检查（电脑版和手机版的 Python 代码）
+        run: python -m compileall -q app android/app/src/main/python tools
+      - name: 软件更新测试
+        run: python tools/test_app_update.py
+      - name: 核心离线回归测试
+        run: python tools/test_core_offline.py
+
+  go:
+    name: 网盘引擎（Go）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: pan/go.mod
+          cache-dependency-path: pan/go.sum
+      - name: 格式检查
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...

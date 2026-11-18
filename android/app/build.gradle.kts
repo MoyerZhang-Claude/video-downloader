@@ -113,10 +113,19 @@ val syncPythonCore = tasks.register<Sync>("syncPythonCore") {
 tasks.named("preBuild") { dependsOn(syncPythonCore) }
 tasks.matching { it.name.endsWith("PythonSources") }.configureEach { dependsOn(syncPythonCore) }
 
+// 构建时用的 Python 3.13（只在打包时用来装 pip 依赖）：按顺序找
+//   local.properties 里的 chaquopy.buildPython=… → 环境变量 CHAQUOPY_BUILD_PYTHON → 都没有就让 Chaquopy 自己找（py -3.13 / python3.13）
+// 换电脑构建不用改这个文件（local.properties 不进 Git）
+val buildPythonPath: String? = run {
+    val local = rootProject.file("local.properties")
+    val fromLocal = if (local.exists()) Properties().apply { local.inputStream().use { load(it) } }.getProperty("chaquopy.buildPython") else null
+    (fromLocal ?: System.getenv("CHAQUOPY_BUILD_PYTHON"))?.trim()?.takeIf { it.isNotEmpty() }
+}
+
 chaquopy {
     defaultConfig {
         version = "3.13"
-        buildPython("D:/AI/Python/Python313/python.exe")
+        buildPythonPath?.let { buildPython(it) }
         pip {
             install("yt-dlp==$ytDlpVersion")
             install("yt-dlp-ejs==$ytDlpEjsVersion")
