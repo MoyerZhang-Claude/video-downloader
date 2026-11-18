@@ -530,5 +530,23 @@ class SniffReadLimitTest(unittest.TestCase):
             srv.close()
 
 
+class PortableZipTest(unittest.TestCase):
+    """免安装版 zip：程序文件夹里有个人数据（设置、登录、历史、日志……）就不生成"""
+
+    def test_personal_files_are_found(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import make_portable_zip as mpz
+        d = tempfile.mkdtemp(dir=_TMP)
+        for rel in ('链接解析下载器.exe', '_internal/app/fonts/OFL.txt', '_internal/certifi/cacert.pem', 'ffmpeg/ffmpeg.exe'):
+            os.makedirs(os.path.dirname(os.path.join(d, rel)) or d, exist_ok=True)
+            open(os.path.join(d, rel), 'wb').close()
+        self.assertEqual(mpz.find_personal(d), [])
+        for rel in ('config.json', 'history.db', 'cookies/x.txt', 'logs/app.log'):
+            os.makedirs(os.path.dirname(os.path.join(d, rel)) or d, exist_ok=True)
+            open(os.path.join(d, rel), 'wb').close()
+        found = {h.rstrip('\\/') for h in mpz.find_personal(d)}
+        self.assertEqual(found, {'config.json', 'history.db', 'cookies', 'logs'})
+
+
 if __name__ == '__main__':
     unittest.main()

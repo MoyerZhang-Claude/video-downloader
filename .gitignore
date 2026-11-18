@@ -22,6 +22,8 @@ keystore.properties
 local.properties
 /config.json
 /avatar/
+/打包前的旧数据/
+/build_keep/
 *.db
 *.db-shm
 *.db-wal

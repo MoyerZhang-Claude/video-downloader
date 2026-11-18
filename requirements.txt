@@ -1,4 +1,8 @@
-yt-dlp[default,curl-cffi]
-PySide6-Essentials
-pyinstaller
-segno
+# 电脑版依赖（锁版本：换电脑重装也是同一套组合）。更新解析内核时，yt-dlp / yt-dlp-ejs 和
+# android/app/build.gradle.kts 里的 ytDlpVersion / ytDlpEjsVersion 一起改。
+yt-dlp[default,curl-cffi]==2026.10.26
+yt-dlp-ejs==0.8.0
+curl_cffi==0.16.3
+PySide6-Essentials==6.12.0
+pyinstaller==6.22.3
+segno==1.6.6
