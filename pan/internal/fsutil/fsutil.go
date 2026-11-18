@@ -51,12 +51,17 @@ func SanitizeName(name string) string {
 	return base + ext
 }
 
+// maxUniqueTries 是 UniquePath 最多试多少个名字（正常情况下几次就够了）。
+const maxUniqueTries = 10000
+
 // UniquePath 在 dir 里找一个不冲突的文件路径：“a.zip” 已存在就用 “a (1).zip”，以此类推。
 // taken 用来排除其他任务已经占用的路径，可为 nil。
-func UniquePath(dir, name string, taken func(string) bool) string {
+// 查文件时遇到“不存在 / 已存在”以外的错误（没有权限、磁盘出错……）直接返回错误：
+// 换名字也解决不了，一直试下去会卡死调用方（调用方通常拿着队列锁）。
+func UniquePath(dir, name string, taken func(string) bool) (string, error) {
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
-	for i := 0; ; i++ {
+	for i := 0; i < maxUniqueTries; i++ {
 		n := name
 		if i > 0 {
 			n = fmt.Sprintf("%s (%d)%s", base, i, ext)
@@ -65,10 +70,15 @@ func UniquePath(dir, name string, taken func(string) bool) string {
 		if taken != nil && taken(p) {
 			continue
 		}
-		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
-			return p
+		_, err := os.Lstat(p)
+		if errors.Is(err, os.ErrNotExist) {
+			return p, nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("无法访问保存位置 %s：%w", dir, err)
 		}
 	}
+	return "", fmt.Errorf("%s 里同名文件太多，找不到可用的文件名", dir)
 }
 
 // WriteJSON 原子地把 v 写成 JSON 文件：先写临时文件再改名，写一半断电也不会损坏原文件。
