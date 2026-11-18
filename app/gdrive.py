@@ -18,6 +18,7 @@ import http.server
 import json
 import mimetypes
 import os
+import re
 import secrets
 import threading
 import time
@@ -95,6 +96,18 @@ def pan_folder(provider_name, ts, rel_dir=''):
     return [ROOT_NAME, PAN_DIR, _safe(provider_name), month_of(ts), *map(_safe, parts)]
 
 
+# 下载时会生成的附属文件：「视频名.jpg」封面、「视频名.zh-Hans.srt」字幕、「视频名.danmaku.ass / .xml」弹幕。
+# 中间那段只认语言代码和 danmaku：不然「Ep.1.mp4」会把「Ep.1.5 特别篇.mp4」「Ep.1.笔记.txt」也当成附件
+_SIDECAR_TAIL = re.compile(
+    r'(?:(?:[a-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*|ai-[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*|danmaku|live_chat)\.)?'
+    r'(?i:srt|vtt|ass|ssa|lrc|ttml|srv[123]|json3|xml|jpe?g|png|webp)')
+
+
+def is_sidecar(stem, name):
+    """name 是不是视频（主名 stem）下载时一起生成的字幕 / 弹幕 / 封面"""
+    return name.startswith(stem + '.') and bool(_SIDECAR_TAIL.fullmatch(name[len(stem) + 1:]))
+
+
 def sidecars(video_path):
     """和视频同名的附属文件（字幕 .srt、弹幕 .ass、封面 .jpg 等）：跟视频一起上传。"""
     d, base = os.path.split(video_path)
@@ -103,11 +116,32 @@ def sidecars(video_path):
     try:
         for n in os.listdir(d or '.'):
             p = os.path.join(d, n)
-            if n != base and n.startswith(stem + '.') and os.path.isfile(p) and not n.endswith(('.part', '.ytdl')):
+            if n != base and is_sidecar(stem, n) and os.path.isfile(p):
                 out.append(p)
     except OSError:
         pass
     return sorted(out)
+
+
+def _mtime(path):
+    try:
+        return round(os.path.getmtime(path), 1)
+    except OSError:
+        return None
+
+
+def file_md5(path, cancelled=lambda: False):
+    """本地文件的 MD5（和云盘的 md5Checksum 对比）；中途取消或读不了返回空字符串"""
+    h = hashlib.md5()
+    try:
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(4 << 20), b''):
+                if cancelled():
+                    return ''
+                h.update(chunk)
+    except OSError:
+        return ''
+    return h.hexdigest()
 
 
 def to_recycle_bin(path):
@@ -309,18 +343,33 @@ class Drive:
     def _q(name):
         return name.replace('\\', '\\\\').replace("'", "\\'")
 
-    def find(self, name, parent, folder=False, size=None):
+    def _list(self, name, parent, folder=False):
         q = f"name = '{self._q(name)}' and '{parent}' in parents and trashed = false"
         if folder:
             q += f" and mimeType = '{FOLDER_MIME}'"
-        r = self._call('GET', f'{API}/files', params={'q': q, 'fields': 'files(id,name,size,mimeType)', 'pageSize': 50,
-                                                       'spaces': 'drive'})
+        r = self._call('GET', f'{API}/files', params={'q': q, 'fields': 'files(id,name,size,mimeType,md5Checksum)',
+                                                       'pageSize': 50, 'spaces': 'drive'})
         if r.status_code != 200:
             raise self._error(r)
-        for f in r.json().get('files', []):
+        return r.json().get('files', [])
+
+    def find(self, name, parent, folder=False, size=None):
+        for f in self._list(name, parent, folder):
             if size is None or int(f.get('size') or -1) == int(size):
                 return f['id']
         return None
+
+    def find_same(self, path, name, parent, cancelled=lambda: False):
+        """云盘同一个文件夹里有没有和本地文件内容完全一样的（同名、同大小，并且 MD5 一样）。
+        只比名字和大小不够：同名同大小、内容不同的文件会被当成「已经传过」，跳过上传、还可能删掉本地原件。"""
+        size = os.path.getsize(path)
+        cands = [f for f in self._list(name, parent) if int(f.get('size') or -1) == size and f.get('md5Checksum')]
+        if not cands:
+            return None
+        local = file_md5(path, cancelled)
+        if not local:
+            return None
+        return next((f['id'] for f in cands if f['md5Checksum'].lower() == local), None)
 
     def ensure_folder(self, parts):
         """确保云盘上有这一串文件夹，返回最里层的 ID（有缓存；缓存的文件夹被删了会重建）。"""
@@ -504,14 +553,29 @@ class Uploader:
         return os.path.normcase(os.path.abspath(path))
 
     def uploaded_info(self, path):
-        """这个本地文件传过没有：返回 {id, folder, ts} 或 None"""
-        return self.uploaded.get(self._key(path)) if path else None
+        """这个本地文件传过没有：返回 {id, folder, ts} 或 None。
+        同一路径的文件后来被换成了别的（大小或修改时间变了）就不算传过。"""
+        if not path:
+            return None
+        rec = self.uploaded.get(self._key(path))
+        if not rec:
+            return None
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return rec                    # 本地文件已经不在了：照旧显示传过
+        mtime = _mtime(path)
+        if rec.get('size') is not None and rec['size'] != size:
+            return None
+        if rec.get('mtime') is not None and mtime is not None and abs(rec['mtime'] - mtime) > 2:
+            return None
+        return rec
 
     def add(self, path, folder, title='', group='', keep_local=True, force=False):
         """加入上传队列。同一个文件已经在队列里或已经传过（force=True 时不管传没传过）就不重复加，返回 None。"""
         key = self._key(path)
         with self._lock:
-            if (key in self.uploaded and not force) or any(self._key(j['path']) == key and j['state'] in (QUEUED, RUNNING)
+            if (not force and self.uploaded_info(path)) or any(self._key(j['path']) == key and j['state'] in (QUEUED, RUNNING)
                                            for j in self.jobs.values()):
                 return None
             try:
@@ -600,7 +664,9 @@ class Uploader:
             raise FileNotFoundError('本地文件已经不在了')
         parent = self.drive.ensure_folder(j['folder'])
         name = os.path.basename(path)
-        file_id = self.drive.find(name, parent, size=j['size']) if not j['session'] else None
+        file_id = None
+        if not j['session']:              # 上次传完了但没来得及记下来：云盘上有内容完全一样的文件就不再传
+            file_id = self.drive.find_same(path, name, parent, cancelled=lambda: j['state'] == CANCELED)
         if not file_id:
             for attempt in (1, 2):
                 if not j['session']:
@@ -618,7 +684,8 @@ class Uploader:
                     raise
         with self._lock:
             j.update(state=DONE, file_id=file_id, done=j['size'], session='')
-            self.uploaded[self._key(path)] = {'id': file_id, 'folder': j['folder'], 'ts': time.time(), 'size': j['size']}
+            self.uploaded[self._key(path)] = {'id': file_id, 'folder': j['folder'], 'ts': time.time(), 'size': j['size'],
+                                              'mtime': _mtime(path)}
             _save_json(UPLOADED_PATH, self.uploaded)
         if not j['keep_local']:
             to_recycle_bin(path)
