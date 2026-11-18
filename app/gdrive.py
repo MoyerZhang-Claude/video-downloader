@@ -26,7 +26,8 @@ import urllib.parse
 import webbrowser
 
 from .config import DATA
-from .secure_store import dpapi as _dpapi      # 只有当前 Windows 用户能解开
+from . import secure_store
+from .secure_store import dpapi as _dpapi      # 2.5 及以前的令牌文件格式（Windows），读旧文件用
 
 DIR = os.path.join(DATA, 'gdrive')
 CLIENT_PATH = os.path.join(DIR, 'client.json')        # Google Cloud 下载的 OAuth 客户端（桌面应用）
@@ -159,6 +160,10 @@ def to_recycle_bin(path):
 
 
 # ---------------------------------------------------------------- 登录
+def _write_token(token, email):
+    secure_store.write(TOKEN_PATH, json.dumps({'refresh_token': token, 'email': email or ''}).encode())
+
+
 class AuthError(Exception):
     """需要重新登录（没登录、授权被撤销或过期）"""
 
@@ -181,18 +186,37 @@ class Auth:
 
     @staticmethod
     def _load_token():
+        """令牌和 B站登录一样用 secure_store 加密（Windows：DPAPI；安卓：Keystore）。
+        2.5 及以前的文件（Windows 是不带标记的 DPAPI 密文，安卓是明文 JSON）读出来后马上换成新格式重新保存。"""
         try:
             with open(TOKEN_PATH, 'rb') as f:
-                d = json.loads(_dpapi(f.read(), False))
-            return d.get('refresh_token'), d.get('email', '')
+                blob = f.read()
+        except OSError:
+            return None, ''
+        head = blob[:4]
+        try:
+            if head in (secure_store.MAGIC, secure_store.MAGIC_PLAIN):
+                d = json.loads(secure_store.unprotect(blob))
+                migrate = head == secure_store.MAGIC_PLAIN and secure_store.available()
+            else:
+                try:
+                    raw = _dpapi(blob, False)             # Windows 的旧文件；不是 Windows 时原样返回
+                except OSError:
+                    raw = blob                            # 安卓旧版的明文 JSON
+                d = json.loads(raw)
+                migrate = True
         except (OSError, ValueError):
             return None, ''
+        token, email = d.get('refresh_token'), d.get('email', '')
+        if migrate and token:
+            try:
+                _write_token(token, email)
+            except OSError:
+                pass
+        return token, email
 
     def _save_token(self):
-        os.makedirs(DIR, exist_ok=True)
-        data = json.dumps({'refresh_token': self.refresh_token, 'email': self.email}).encode()
-        with open(TOKEN_PATH, 'wb') as f:
-            f.write(_dpapi(data, True))
+        _write_token(self.refresh_token, self.email)
 
     @property
     def logged_in(self):

@@ -45,6 +45,11 @@ def dpapi(data, protect):
         kernel32.LocalFree(out.pbData)
 
 
+def available():
+    """这台设备能不能真的加密（安卓装了 Keystore 后端，或者是 Windows）"""
+    return bool(_backend) or os.name == 'nt'
+
+
 def protect(data):
     if _backend:
         return MAGIC + _backend[0](data)
