@@ -778,6 +778,7 @@ private fun taskStatus(task: DownloadTask): Pair<String, Color> = when (task.sta
     "converting" -> "转换为 MP4…" to P.info
     "burning" -> ("生成弹幕版 ${(task.progress * 100).toInt()}%" + if (task.stage.isNotEmpty()) " · ${task.stage}" else "") to P.accent
     "saving" -> "保存到下载文件夹…" to P.info
+    "finishing" -> "正在收尾…" to P.info
     "done" -> (if (task.note.isNotEmpty()) "已完成 · ${task.note}" else "已完成") to (if (task.note.isNotEmpty()) P.warn else P.ok)
     "cancelled" -> "已取消" to P.text3
     else -> "失败：${task.error}" to P.err
@@ -789,7 +790,7 @@ private fun taskBarColor(task: DownloadTask) = when (task.status) {
     "failed" -> P.err
     "cancelled" -> P.text4
     "burning" -> P.accent
-    "merging", "converting", "saving" -> P.info
+    "merging", "converting", "saving", "finishing" -> P.info
     else -> P.brand
 }
 
@@ -815,7 +816,8 @@ private fun TaskLine(task: DownloadTask, vm: MainViewModel) {
             Spacer(Modifier.width(6.dp))
             Text(taskDetail(task), fontSize = 12.sp, color = P.text3, maxLines = 1, modifier = Modifier.weight(1f))
             when {
-                task.active -> RoundIcon(LineIcons.X, { vm.cancel(task) }, size = 32.dp, iconSize = 17.dp)
+                task.cancellable -> RoundIcon(LineIcons.X, { vm.cancel(task) }, size = 32.dp, iconSize = 17.dp)
+                task.active -> Spacer(Modifier.size(32.dp))
                 task.status == "done" -> RoundIcon(LineIcons.PlayCircle, { task.savedUri?.let { openUri(ctx, it, task.mime, vm) } },
                     size = 32.dp, iconSize = 19.dp, tint = P.ok)
                 else -> RoundIcon(LineIcons.Refresh, { vm.retry(task) }, size = 32.dp, iconSize = 17.dp)
@@ -823,7 +825,7 @@ private fun TaskLine(task: DownloadTask, vm: MainViewModel) {
         }
         Spacer(Modifier.height(4.dp))
         ProgressLine(if (task.status == "done") 1f else task.progress, taskBarColor(task),
-            indeterminate = task.status in setOf("merging", "converting", "saving"))
+            indeterminate = task.status in setOf("merging", "converting", "saving", "finishing"))
     }
 }
 
@@ -889,7 +891,7 @@ private fun TaskCard(task: DownloadTask, vm: MainViewModel) {
         }
         Spacer(Modifier.height(10.dp))
         ProgressLine(if (task.status == "done") 1f else task.progress, taskBarColor(task), height = 6.dp,
-            indeterminate = task.status in setOf("merging", "converting", "saving"))
+            indeterminate = task.status in setOf("merging", "converting", "saving", "finishing"))
         val (status, color) = taskStatus(task)
         Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -906,7 +908,8 @@ private fun TaskCard(task: DownloadTask, vm: MainViewModel) {
                     })
             }
             when {
-                task.active -> OutlineButton("取消") { vm.cancel(task) }
+                task.cancellable -> OutlineButton("取消") { vm.cancel(task) }
+                task.active -> {}
                 task.status == "done" -> {
                     TextButton(onClick = { vm.removeTask(task) }) { Text("移除", color = P.text3) }
                     PrimaryButton("打开", icon = LineIcons.PlayCircle) { task.savedUri?.let { openUri(ctx, it, task.mime, vm) } }

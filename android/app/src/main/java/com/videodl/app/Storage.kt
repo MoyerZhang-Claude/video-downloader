@@ -29,10 +29,20 @@ object Storage {
     }.getOrNull()?.takeIf { java.io.File(it).isFile }
 
     /** subfolder：在「下载/链接解析下载器」下再建一层（如「弹幕数据」）。 */
-    fun saveToDownloads(ctx: Context, src: File, displayName: String, mime: String, subfolder: String = ""): Uri {
+    /** isCancelled：大文件复制中途点了「取消」就停下，写了一半的文件删掉（抛 CancellationException） */
+    fun saveToDownloads(ctx: Context, src: File, displayName: String, mime: String, subfolder: String = "",
+                        isCancelled: () -> Boolean = { false }): Uri {
         val dir = "${Environment.DIRECTORY_DOWNLOADS}/$FOLDER" + if (subfolder.isNotEmpty()) "/$subfolder" else ""
         return save(ctx, MediaStore.Downloads.EXTERNAL_CONTENT_URI, dir, displayName, mime) { out ->
-            src.inputStream().use { it.copyTo(out, 1 shl 20) }
+            src.inputStream().use { input ->
+                val buf = ByteArray(1 shl 20)
+                while (true) {
+                    if (isCancelled()) throw java.util.concurrent.CancellationException("已取消")
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                }
+            }
         }
     }
 

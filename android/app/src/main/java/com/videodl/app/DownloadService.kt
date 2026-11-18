@@ -103,7 +103,7 @@ object Notifier {
         val running = active.filter { it.status != "queued" }
         val pan = PanEngine.tasks.values.filter { it.active }
         val total = active.sumOf { it.total } + pan.sumOf { maxOf(0L, it.size) }
-        val done = active.sumOf { if (it.status in setOf("merging", "converting", "burning", "saving")) it.total else it.done } +
+        val done = active.sumOf { if (it.status in setOf("merging", "converting", "burning", "saving", "finishing")) it.total else it.done } +
             pan.sumOf { maxOf(0L, it.downloaded) }
         val speed = running.sumOf { it.speed } + PanEngine.totalSpeed
         if (active.isEmpty() && pan.isEmpty() && CloudKeepAlive.active) return cloudProgress(ctx)
@@ -121,6 +121,7 @@ object Notifier {
             one?.status == "converting" -> "转换为 MP4…"
             one?.status == "burning" -> "生成弹幕版 ${(one.progress * 100).toInt()}%"
             one?.status == "saving" -> "保存到下载文件夹…"
+            one?.status == "finishing" -> "正在收尾…"
             else -> listOfNotNull(
                 if (total > 0) "${fmtSize(done)} / ${fmtSize(total)}" else null,
                 if (speed > 0) "${fmtSize(speed)}/s" else null,

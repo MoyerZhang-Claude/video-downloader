@@ -25,7 +25,9 @@ class DownloadTask(val id: Long, val item: VideoItem, val optIndex: Int, val bur
     val tag = item.options[optIndex].tag
     var savedTag = tag                              // 实际下载的格式（自动换格式重试时会变）
     val title = item.title
-    var status by mutableStateOf("queued")         // queued / running / merging / converting / burning / saving / done / failed / cancelled
+    // queued / running / merging / converting / burning / saving / finishing / done / failed / cancelled
+    // finishing：视频已经存好，只剩字幕、封面、记历史这些很快的收尾，不能再取消（免得「已取消」了文件却在）
+    var status by mutableStateOf("queued")
     var progress by mutableStateOf(0f)
     var done by mutableStateOf(0L)
     var total by mutableStateOf(item.options[optIndex].size)
@@ -42,9 +44,11 @@ class DownloadTask(val id: Long, val item: VideoItem, val optIndex: Int, val bur
     var diag by mutableStateOf("")                  // 弹幕版的诊断信息（源视频参数、编码器能力），任务卡片上可以查看
     var callback: DownloadCallback? = null
     val active get() = status in ACTIVE
+    val cancellable get() = status in ACTIVE && status != "finishing"
+    val isCancelled get() = callback?.cancelled == true
 
     companion object {
-        val ACTIVE = setOf("queued", "running", "merging", "converting", "burning", "saving")
+        val ACTIVE = setOf("queued", "running", "merging", "converting", "burning", "saving", "finishing")
         const val DANMAKU_SUFFIX = " 弹幕版"      // 历史记录里的清晰度后缀，用来区分原视频和弹幕版
     }
 }
@@ -124,12 +128,14 @@ object DownloadRepo {
                         return@withPermit
                     }
                     val files = r.getJSONArray("files").let { a -> List(a.length()) { File(a.getString(it)) } }
+                    val stop = { task.isCancelled }
+                    if (stop()) throw CancellationException("已取消")
                     var ext = r.optString("ext", "mp4")
                     var output = if (files.size == 2) {
                         setStatus(task, "merging")
                         val webm = ext == "webm"          // YouTube 2K/4K 的 VP9 只能合并成 WebM
                         File(work, if (webm) "merged.webm" else "merged.mp4").also {
-                            Muxer.merge(files[0], files[1], it, webm)
+                            Muxer.merge(files[0], files[1], it, webm, isCancelled = stop)
                             ext = if (webm) "webm" else "mp4"
                         }
                     } else files[0]
@@ -138,9 +144,11 @@ object DownloadRepo {
                         setStatus(task, "converting")
                         val mp4 = File(work, "remux.mp4")
                         try {
-                            Muxer.remux(output, mp4)
+                            Muxer.remux(output, mp4, isCancelled = stop)
                             output = mp4
                             ext = "mp4"
+                        } catch (e: CancellationException) {
+                            throw e
                         } catch (e: Exception) {
                             mp4.delete()
                             ext = "ts"        // 封装不了就按实际格式保存，文件名和内容一致
@@ -175,9 +183,11 @@ object DownloadRepo {
                         }
                     }
 
+                    if (stop()) throw CancellationException("已取消")
                     setStatus(task, "saving")
                     task.mime = Storage.mimeOf(ext)
-                    val uri = Storage.saveToDownloads(app, output, name, task.mime)
+                    val uri = Storage.saveToDownloads(app, output, name, task.mime, isCancelled = stop)
+                    setStatus(task, "finishing")          // 视频已经存好：剩下的收尾很快，不再响应取消
                     val savedBase = name.substringBeforeLast('.')
                     // 原始弹幕存进「弹幕数据」文件夹（和电脑版一样，留给以后的播放器用）
                     danmakuXml?.let { xml ->
@@ -215,6 +225,8 @@ object DownloadRepo {
                         onDone?.invoke(task)
                     }
                     Notifier.done(app, task)
+                } catch (e: CancellationException) {
+                    setStatus(task, "cancelled", "已取消")
                 } catch (e: Exception) {
                     setStatus(task, "failed", e.message ?: e.javaClass.simpleName)
                     Notifier.failed(app, task)
