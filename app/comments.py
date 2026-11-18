@@ -263,11 +263,12 @@ class Fetcher:
             'dialog': r.get('dialog') or 0, 'replies': [],
         }
 
-    def _main(self, meta):
+    def _main(self, meta, out):
+        """主评论逐条追加到 out（就是 result.comments）：中途停止或被限流时，已经抓到的不会丢。"""
         o = self.opts
         aid = meta['aid']
         target = o.max_main or 0
-        out, seen = [], set()
+        seen = {c['id'] for c in out}
         offset = ''
         upper_mid = meta.get('owner_mid')
         first = True
@@ -281,6 +282,7 @@ class Fetcher:
                 first = False
                 upper_mid = (d.get('upper') or {}).get('mid') or upper_mid
                 meta['owner_mid'] = upper_mid
+                meta['upper_mid'] = upper_mid
                 if cur.get('all_count'):
                     meta['reply_total'] = cur['all_count']
                     self._state['main_total'] = cur['all_count']
@@ -289,20 +291,22 @@ class Fetcher:
                 if up_top:
                     tops.insert(0, up_top)
                 for t in tops:
+                    if target and len(out) >= target:       # 置顶也算在条数里
+                        break
                     if t.get('rpid') not in seen:
                         seen.add(t['rpid'])
                         out.append(self._norm(t, upper_mid, pinned=True))
                         out[-1]['_preview'] = t.get('replies') or []
             page = d.get('replies') or []
             for r in page:
+                if target and len(out) >= target:
+                    break
                 if r.get('rpid') in seen:
                     continue
                 seen.add(r['rpid'])
                 n = self._norm(r, upper_mid)
                 n['_preview'] = r.get('replies') or []
                 out.append(n)
-                if target and len(out) >= target:
-                    break
             self._report(main=len(out))
             if (target and len(out) >= target) or cur.get('is_end') or not page:
                 break
@@ -442,8 +446,9 @@ class Fetcher:
         result = Result(meta=meta, comments=[], options=self.opts, fetched_at=time.time())
         if not self.logged_in:
             result.notes.append('没有登录 B站：B站只给未登录的人看前几页评论，左下角头像菜单里扫码登录后能抓完整')
+        meta.setdefault('upper_mid', meta.get('owner_mid'))
         try:
-            result.comments = self._main(meta)
+            self._main(meta, result.comments)
             self._subs(meta, result.comments, result)
         except Canceled:
             result.stopped = '已停止'
@@ -454,6 +459,8 @@ class Fetcher:
         for c in result.comments:
             c.pop('_preview', None)
         if not result.comments:
+            if result.stopped:
+                raise CommentError('已停止，还没抓到评论')
             raise CommentError('这个视频还没有评论' if not meta['reply_total'] else '没有拿到评论（可能需要登录 B站）')
         out_dir = make_out_dir(self.opts.out_root, meta)
         result.out_dir = out_dir
@@ -508,12 +515,24 @@ def _rows(result):
     return out
 
 
+_FORMULA_START = ('=', '+', '-', '@', '\t', '\r')
+
+
+def _csv_text(v):
+    """以 = + - @ 开头的文字（B站常见的「-阿伟-」「=_=」「+1」「@某人」）在 Excel 里会被当成公式：
+    显示成 #NAME?、吞掉符号，恶意内容还能做成可点的公式。前面加一个制表符，Excel 就按文字显示。
+    （OWASP 建议的 Excel 可靠做法：制表符放在带引号的字段里，所以写入时全部加引号）"""
+    if isinstance(v, str) and v.startswith(_FORMULA_START):
+        return '\t' + v
+    return v
+
+
 def write_csv(result, path):
     with open(path, 'w', encoding='utf-8-sig', newline='') as f:      # 带 BOM：Excel 直接双击打开不乱码
-        w = csv.writer(f)
+        w = csv.writer(f, quoting=csv.QUOTE_ALL)
         w.writerow([c for c, _ in COLUMNS])
         for _, row in _rows(result):
-            w.writerow(row)
+            w.writerow([_csv_text(v) for v in row])
 
 
 _XML_BAD = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]')
