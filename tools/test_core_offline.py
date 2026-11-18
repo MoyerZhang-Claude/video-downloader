@@ -356,5 +356,70 @@ class FastDownloadTest(unittest.TestCase):
             srv.close()
 
 
+class CommentRepliesTest(unittest.TestCase):
+    def test_stop_inside_a_thread_keeps_its_replies(self):
+        """楼中楼抓到一半停止：这一层已经抓到的回复也要保留（以前整层丢掉）"""
+        o = comments.Options(formats=('csv',), images=False, avatars=False, sub_mode='all')
+        main = dict(_reply(1), rcount=50)
+        f = _fetcher([_page([main], end=True)], opts=o)
+        main_get, calls = f._get, [0]
+
+        def get(path, params, sign=False):
+            if path != '/x/v2/reply/reply':
+                return main_get(path, params, sign)
+            calls[0] += 1
+            if calls[0] == 2:                 # 第二页回复之前点了「停止」
+                f.cancel.set()
+                raise comments.Canceled()
+            return {'replies': [dict(_reply(100 + i), root=1, parent=1) for i in range(20)]}
+        f._get = get
+        f._pause = lambda: None
+        r = f.fetch('https://www.bilibili.com/video/BV1xx411c7mD')
+        self.assertEqual((r.n_main, r.n_sub, r.stopped), (1, 20, '已停止'))
+
+
+class CsvDisplayTest(unittest.TestCase):
+    def test_floor_numbers_and_long_ids_stay_text(self):
+        """Excel 会把楼层号「1-1」认成日期、16 位 UID 丢精度：CSV 里都按文字写"""
+        main = comments.Fetcher._norm(dict(_reply(1), mid=3546123456789012), 0)
+        main['replies'].append(comments.Fetcher._norm(dict(_reply(2), root=1, parent=1), 0))
+        res = comments.Result(meta={'title': 't'}, comments=[main], options=comments.Options())
+        path = os.path.join(tempfile.mkdtemp(dir=_TMP), 'c.csv')
+        comments.write_csv(res, path)
+        with open(path, encoding='utf-8-sig', newline='') as f:
+            rows = list(csv.reader(f))[1:]
+        self.assertEqual(rows[0][3], '\t3546123456789012')
+        self.assertEqual(rows[1][0], '\t1-1')
+        self.assertEqual(rows[0][0], '1')
+
+
+class YoutubeCommentTest(unittest.TestCase):
+    def test_nested_replies_are_kept_and_linked(self):
+        """回复别人回复的那种（parent 是回复的 ID）要归到主评论这一层，并认出回复的是哪一条"""
+        raw = [{'id': 'A', 'parent': 'root', 'text': '主评论', 'author': '@a'},
+               {'id': 'A.1', 'parent': 'A', 'text': '第一条回复', 'author': '@b'},
+               {'id': 'A.2', 'parent': 'A.1', 'text': ' @b  回复 b', 'author': '@c'},
+               {'id': 'A.3', 'parent': 'A', 'text': '@c 谢谢', 'author': '@b'},
+               {'id': 'B', 'parent': 'root', 'text': '另一条', 'author': '@d', '_time_text': '3 days ago (edited)'}]
+        mains = comments.Fetcher._yt_assemble(raw, comments.Options(sub_mode='all'))
+        self.assertEqual([len(c['replies']) for c in mains], [3, 0])
+        a2, a3 = mains[0]['replies'][1], mains[0]['replies'][2]
+        self.assertEqual((a2['reply_to'], a2['parent'], a2['text']), ('b', 'A.1', '回复 b'))
+        self.assertEqual((a3['reply_to'], a3['parent']), ('c', 'A.2'))
+        self.assertEqual(a2['dialog'], a3['dialog'])          # 来回的回复串成同一段对话
+        self.assertEqual(mains[1]['ago'], '3 天前（编辑过）')
+        none = comments.Fetcher._yt_assemble(raw, comments.Options(sub_mode='none'))
+        self.assertEqual(sum(len(c['replies']) for c in none), 0)
+
+    def test_same_video_same_key(self):
+        yt = ['https://www.youtube.com/watch?v=jNQXAC9IVRw', 'https://youtu.be/jNQXAC9IVRw?t=3',
+              'https://m.youtube.com/watch?feature=share&v=jNQXAC9IVRw', 'https://www.youtube.com/shorts/jNQXAC9IVRw']
+        self.assertEqual({comments.video_key(u) for u in yt}, {'yt:jNQXAC9IVRw'})
+        self.assertEqual(comments.video_key('https://www.bilibili.com/video/BV13NWo6zE8B/?p=1'),
+                         comments.video_key('看这个 BV13NWo6zE8B'))
+        self.assertEqual(comments.platform_of('https://b23.tv/27ti8QK'), 'bili')
+        self.assertEqual(comments.platform_of('https://example.com/a'), '')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -166,6 +166,7 @@ class Settings:
     skip_app_version: str = ''      # 用户选了「跳过这个版本」的版本号
     save_subs: bool = True        # 字幕（B站 CC / YouTube 等）
     sub_langs: str = 'zh_orig'
+    yt_api_key: str = ''          # YouTube Data API v3 密钥（可选，抓 YouTube 评论用官方接口）
     font_scale: int = 100         # 设置 → 字体：整体字号（%）
     side_font_scale: int = 100    # 侧边栏字号（在整体字号的基础上，%）
     font_latin: str = ''          # 英文用的字体（空 = 自带的 VDSans）

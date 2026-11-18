@@ -2144,11 +2144,12 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
                 t = label('弹幕', 'tagAccent')
                 t.setToolTip('B站弹幕，可转成 ASS 字幕或生成「弹幕版」视频')
                 line.addWidget(t)
-            if v.platform.startswith('B站') and comments.supported(row.url):
+            cm_url = v.info.get('webpage_url') or row.url
+            if (v.platform.startswith('B站') or v.platform == 'YouTube') and comments.supported(cm_url):
                 n = v.info.get('comment_count') or 0
                 cm = Chip((f'评论 {n / 10000:.1f}万'.replace('.0万', '万') if n >= 10000 else f'评论 {n}') if n else '评论', 'chat', height=24, font_px=12,
                           tip='抓取这个视频的评论区（可以选条数、楼中楼、图片），导出成网页 / Excel / CSV')
-                cm.clicked.connect(lambda: self.open_comments(row.url, v.title, v.info.get('comment_count') or 0))
+                cm.clicked.connect(lambda: self.open_comments(cm_url, v.title, v.info.get('comment_count') or 0))
                 line.addWidget(cm)
             human, autos = core.pick_subtitles(v.info, self.settings.sub_langs)
             if human or autos:
@@ -3248,9 +3249,10 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
                 m.addAction(ic('image'), '保存封面', lambda: self._save_cover(token))
                 if self.thumbs.has_raw(row.cover_url):
                     m.addAction(ic('search'), '预览封面', lambda: self._preview_cover(token))
-            if comments.supported(row.url):
+            cm_url = row.video.info.get('webpage_url') or row.url
+            if comments.supported(cm_url):
                 v = row.video
-                m.addAction(ic('chat'), '抓取评论…', lambda: self.open_comments(row.url, v.title, v.info.get('comment_count') or 0))
+                m.addAction(ic('chat'), '抓取评论…', lambda: self.open_comments(cm_url, v.title, v.info.get('comment_count') or 0))
             m.addSeparator()
         m.addAction(ic('refresh'), '重新解析', lambda: self._start_parse(token))
         m.addAction(ic('copy'), '复制链接', lambda: QGuiApplication.clipboard().setText(row.url))

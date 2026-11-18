@@ -676,7 +676,7 @@ private fun VideoCard(item: VideoItem, vm: MainViewModel) {
             }
         }
         if (item.state == "ok") {
-            val canComments = item.platform.startsWith("B站") && commentSupported(item.url)
+            val canComments = (item.platform.startsWith("B站") || item.platform == "YouTube") && commentSupported(item.url)
             val hasChips = item.history.isNotEmpty() || item.subs.isNotEmpty() || item.collection != null || item.danmaku || canComments
             if (hasChips) FlowRow(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)) {

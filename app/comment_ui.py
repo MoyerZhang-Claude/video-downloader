@@ -1,10 +1,13 @@
 """「抓取评论」窗口：选条数、楼中楼、图片、导出格式，看进度，抓完打开网页 / 文件夹。
 
 抓取在后台线程里跑（见 comments.py）。窗口不挡主界面：抓的过程中可以关掉窗口，抓完会在主界面提示。
+同一个视频抓过的：再打开窗口直接显示上次的结果（打开网页 / 文件夹），想更新就点「重新抓取」。
+支持 B站、YouTube（YouTube 可以选填官方 API 密钥）。
 """
 import math
 import os
 import threading
+import time
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QPainterPath
@@ -45,6 +48,12 @@ def _label(text, name, wrap=True):
     return lab
 
 
+def _restyle(w, name):
+    w.setObjectName(name)
+    w.style().unpolish(w)
+    w.style().polish(w)
+
+
 class _Bridge(QObject):
     progress = Signal(dict)
     done = Signal(object)
@@ -55,25 +64,31 @@ _SCALES = [(50, '前 50 条'), (100, '前 100 条'), (200, '前 200 条'), (500,
            (0, '全部'), (-1, '自定义…')]
 
 
+def summary_text(n_main, n_sub, n_pics=0, stopped=''):
+    msg = f'主评论 {n_main:,} 条、楼中楼 {n_sub:,} 条' + (f'、图片 {n_pics} 张' if n_pics else '')
+    return f'没有抓完（{stopped}）：{msg}' if stopped else msg
+
+
 class CommentDialog(QDialog):
-    """url：视频链接；title、count：解析结果里已知的标题、评论数（不知道就留空，开始后从 B站拿）"""
+    """url：视频链接；title、count：解析结果里已知的标题、评论数（不知道就留空，开始后从网站拿）"""
 
     def __init__(self, win, url, title='', count=0):
         super().__init__(win)
         self.win, self.url = win, url
         self.count = int(count or 0)
-        self.result = None
+        self.yt = comments.platform_of(url) == 'youtube'
+        self.pf = 'YouTube' if self.yt else 'B站'
+        self.done_info = None             # 抓完 / 上次抓的结果：{files, out_dir, title}
         self.cancel = threading.Event()
         self.running = False
         self.setWindowTitle('抓取评论')
-        self.setMinimumWidth(580)
+        self.setMinimumWidth(600)
         saved = comments.Options.from_dict(win.settings.extra.get('comments'))
-        self.opts = saved
 
         v = QVBoxLayout(self)
         v.setContentsMargins(24, 20, 24, 18)
         v.setSpacing(8)
-        v.addWidget(_label('抓取评论', 'sectionTitle'))
+        v.addWidget(_label(f'抓取 {self.pf} 评论', 'sectionTitle'))
         self.title = ElidedLabel(title or url, 'rowLabel')
         v.addWidget(self.title)
         self.sub = _label(self._count_text(), 'rowDesc')
@@ -85,8 +100,17 @@ class CommentDialog(QDialog):
         f.setContentsMargins(0, 0, 0, 0)
         f.setSpacing(10)
 
+        if self.yt:                        # YouTube：内置方式（yt-dlp）或官方 API
+            self.way = _label('', 'rowDesc')
+            self.way_btn = QPushButton()
+            self.way_btn.setObjectName('link')
+            self.way_btn.setCursor(Qt.PointingHandCursor)
+            self.way_btn.clicked.connect(self._edit_key)
+            f.addLayout(self._row('方式', self.way, self.way_btn))
+            self._update_way()
+
         self.sort = Combo()
-        self.sort.addItem('按热度（和 B站默认一样）', 'hot')
+        self.sort.addItem(f'按热度（和 {self.pf} 默认一样）', 'hot')
         self.sort.addItem('按时间（最新的在前）', 'time')
         self.sort.setCurrentIndex(0 if saved.sort == 'hot' else 1)
         f.addLayout(self._row('排序', self.sort))
@@ -115,14 +139,18 @@ class CommentDialog(QDialog):
         self.quality.addItem('压缩（推荐，小很多）', 'compressed')
         self.quality.addItem('原图', 'original')
         self.quality.setCurrentIndex(0 if saved.image_quality != 'original' else 1)
-        f.addLayout(self._row('图片', self.images, self.quality))
+        img_row = QWidget()
+        img_row.setLayout(self._row('图片', self.images, self.quality))
+        img_row.layout().setContentsMargins(0, 0, 0, 0)
+        img_row.setVisible(not self.yt)               # YouTube 的评论里没有图片
+        f.addWidget(img_row)
         self.avatars = QCheckBox('保存头像（网页里显示，每个只有几 KB）')
         self.avatars.setChecked(saved.avatars)
-        f.addLayout(self._row('', self.avatars))
+        f.addLayout(self._row('头像' if self.yt else '', self.avatars))
 
         self.fmt = {}
         boxes = []
-        for key, text, tip in (('html', '网页', '像 B站评论区一样看：楼中楼能展开收起、能搜索、看对话、看大图；整个文件夹拷到哪都能打开'),
+        for key, text, tip in (('html', '网页', '像评论区一样看：楼中楼能展开收起、能搜索、看对话、看大图；整个文件夹拷到哪都能打开'),
                                ('xlsx', 'Excel', '一行一条评论，楼中楼可以在 Excel 里折叠；方便排序、筛选、统计'),
                                ('csv', 'CSV', '纯文本表格，给别的软件或程序用')):
             cb = QCheckBox(text)
@@ -143,7 +171,7 @@ class CommentDialog(QDialog):
         v.addSpacing(4)
         self.est = _label('', 'rowDesc')
         v.addWidget(self.est)
-        if not bilibili.is_logged_in():
+        if not self.yt and not bilibili.is_logged_in():
             v.addWidget(_label('还没有登录 B站：B站只给没登录的人看前几页评论。左下角头像菜单里扫码登录后能抓完整。',
                                'metaError'))
 
@@ -159,20 +187,23 @@ class CommentDialog(QDialog):
         v.addSpacing(8)
         btns = QHBoxLayout()
         btns.addStretch(1)
-        self.b_left = QPushButton('取消')
-        self.b_left.setCursor(Qt.PointingHandCursor)
-        self.b_left.clicked.connect(self._left)
-        self.b_mid = QPushButton('打开文件夹')
-        self.b_mid.setCursor(Qt.PointingHandCursor)
-        self.b_mid.clicked.connect(self._mid)
-        self.b_mid.hide()
-        self.b_go = QPushButton('开始抓取')
-        self.b_go.setObjectName('primary')
-        self.b_go.setCursor(Qt.PointingHandCursor)
-        self.b_go.setDefault(True)
-        self.b_go.clicked.connect(self._go)
-        for b in (self.b_left, self.b_mid, self.b_go):
+
+        def pb(text, slot, name=''):
+            b = QPushButton(text)
+            if name:
+                b.setObjectName(name)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(slot)
             btns.addWidget(b)
+            return b
+        self.b_left = pb('取消', self._left)
+        self.b_mid = pb('打开文件夹', self._mid)
+        self.b_redo = pb('重新抓取', self._start)
+        self.b_go = pb('开始抓取', self._go, 'primary')
+        self.b_go.setDefault(True)
+        self.b_mid.hide()
+        self.b_redo.hide()
+        self.b_redo.setToolTip('按上面的设置再抓一次（会另存一个新文件夹，上次的不会被覆盖）')
         v.addLayout(btns)
 
         for w in (self.sort, self.main, self.subm, self.quality):
@@ -185,6 +216,13 @@ class CommentDialog(QDialog):
         self.bridge.done.connect(self._on_done)
         self.bridge.failed.connect(self._on_failed)
         self._sync()
+
+        prev = comments.last_export(url)     # 这个视频抓过：直接显示上次的结果
+        if prev:
+            when = time.strftime('%Y-%m-%d %H:%M', time.localtime(prev.get('time') or 0))
+            self._show_done({'files': prev['files'], 'out_dir': prev.get('out_dir') or '', 'title': prev.get('title') or ''},
+                            f'上次抓取（{when}）：' + summary_text(prev.get('n_main', 0), prev.get('n_sub', 0),
+                                                              prev.get('n_pics', 0), prev.get('stopped', '')))
 
     # ------------------------------------------------------------ 表单
     def _spin(self, value):
@@ -208,8 +246,30 @@ class CommentDialog(QDialog):
 
     def _count_text(self):
         if self.count:
-            return f'B站显示 {self.count:,} 条评论（包括楼中楼）'
+            return f'{self.pf} 显示 {self.count:,} 条评论（包括楼中楼）'
         return '评论数开始抓取后才知道'
+
+    def _update_way(self):
+        key = (self.win.settings.yt_api_key or '').strip()
+        if key:
+            self.way.setText(f'官方 API（密钥 …{key[-4:]}）：时间、点赞数准确；用不了时自动换内置方式')
+            self.way_btn.setText('更换密钥')
+        else:
+            self.way.setText('内置方式（不需要密钥）：时间是估算的，点赞数是约数')
+            self.way_btn.setText('填写官方 API 密钥…')
+
+    def _edit_key(self):
+        from .folder_dialog import TextDialog
+        dlg = TextDialog(self, 'YouTube Data API v3 密钥', self.win.settings.yt_api_key or '',
+                         '可选。填了以后用官方接口抓 YouTube 评论：时间、点赞数准确，也更快；每天有免费额度（大约能抓几十万条）。'
+                         '\n获取：谷歌云控制台（console.cloud.google.com）→ 选一个项目 → 「API 和服务」→「库」里启用 '
+                         'YouTube Data API v3 →「凭据」→「创建凭据」→「API 密钥」，复制过来。\n清空 = 改回内置方式。',
+                         'AIza…')
+        if dlg.exec():
+            self.win.settings.yt_api_key = dlg.value.strip()
+            self.win._save_settings()
+            self._update_way()
+            self._estimate()
 
     def _collect(self):
         o = comments.Options()
@@ -218,7 +278,7 @@ class CommentDialog(QDialog):
         o.max_main = self.main_n.value() if n == -1 else n
         o.sub_mode = self.subm.currentData()
         o.sub_limit = self.sub_n.value()
-        o.images = self.images.isChecked()
+        o.images = self.images.isChecked() and not self.yt
         o.image_quality = self.quality.currentData()
         o.avatars = self.avatars.isChecked()
         o.formats = tuple(k for k, cb in self.fmt.items() if cb.isChecked())
@@ -241,57 +301,72 @@ class CommentDialog(QDialog):
 
     def _estimate(self):
         if not self.count:
-            self.est.setText('每页之间会停半秒左右，免得被 B站限流；评论多的视频要几分钟。')
+            self.est.setText('评论多的视频要几分钟。')
             return
         o = self._collect()
         total = self.count
         mains = total * 0.35                                  # 粗估：主评论大约占三分之一
         want = min(mains, o.max_main) if o.max_main else mains
         share = want / mains if mains else 0
-        reqs = math.ceil(want / 20) + 1
-        if o.sub_mode != 'none':
-            subs = (total - mains) * share
-            if o.sub_mode == 'limit':
-                subs = min(subs, want * min(o.sub_limit, 8))
-            reqs += want * 0.18 + subs / 20
-        sec = reqs * 0.9 + (want + (total - mains) * share) * 0.01 + 3
+        subs = 0 if o.sub_mode == 'none' else (total - mains) * share
+        if o.sub_mode == 'limit':
+            subs = min(subs, want * min(o.sub_limit, 8))
+        if self.yt:
+            sec = 10 + want / 20 * 1.2 + (0 if o.sub_mode == 'none' else want * 0.25 * 1.2 + subs / 10 * 1.2)
+            if (self.win.settings.yt_api_key or '').strip():
+                sec = 3 + want / 100 + (0 if o.sub_mode == 'none' else want * 0.1 * 0.4)
+            tail = ''
+        else:
+            sec = (math.ceil(want / 20) + 1 + (0 if o.sub_mode == 'none' else want * 0.18 + subs / 20)) * 0.9 \
+                + (want + subs) * 0.01 + 3
+            tail = '每页之间会停半秒左右，免得被 B站限流。'
         t = '不到 1 分钟' if sec < 60 else f'大约 {math.ceil(sec / 60)} 分钟'
-        self.est.setText(f'预计{t}（只是估计）。每页之间会停半秒左右，免得被 B站限流。')
+        self.est.setText(f'预计{t}（只是估计）。{tail}')
 
     def _validate(self):
-        self.b_go.setEnabled(any(cb.isChecked() for cb in self.fmt.values()) and not self.running)
+        self.b_go.setEnabled(not self.running and (self.done_info is not None or any(cb.isChecked() for cb in self.fmt.values())))
+        self.b_redo.setEnabled(not self.running and any(cb.isChecked() for cb in self.fmt.values()))
 
     # ------------------------------------------------------------ 抓取
     def _go(self):
-        if self.result:                        # 抓完了：「打开网页」
+        if self.done_info:                     # 抓完了 / 上次抓过：「打开网页」
             self._open_main()
             return
+        self._start()
+
+    def _start(self):
         o = self._collect()
+        if not o.formats:
+            return
         self.win.settings.extra['comments'] = o.to_dict()
         self.win._save_settings()
         self.running = True
+        self.done_info = None
         self.cancel.clear()
         self.form.setEnabled(False)
         self.bar.setValue(0)
         self.bar.show()
         self.status.setText('正在获取视频信息…')
-        self.status.setObjectName('rowDesc')
-        self.status.style().unpolish(self.status)
-        self.status.style().polish(self.status)
+        _restyle(self.status, 'rowDesc')
         self.status.show()
         self.est.hide()
         self.b_go.setEnabled(False)
         self.b_go.setText('正在抓取…')
         self.b_left.setText('停止并保存')
+        self.b_left.setEnabled(True)
         self.b_mid.setText('在后台继续')
         self.b_mid.show()
+        self.b_redo.hide()
         if not comments.LOGO_SVG:
             comments.LOGO_SVG = spark_svg()
-        proxy = (self.win.settings.proxy or '').strip()
+        st = self.win.settings
+        proxy = (st.proxy or '').strip()
 
         def work():
             try:
-                r = comments.Fetcher(o, proxy, self.bridge.progress.emit, self.cancel).fetch(self.url)
+                r = comments.Fetcher(o, proxy, self.bridge.progress.emit, self.cancel, settings=st,
+                                     yt_key=st.yt_api_key).fetch(self.url)
+                comments.remember(r, self.url)
                 self.bridge.done.emit(r)
             except comments.CommentError as e:
                 self.bridge.failed.emit(str(e))
@@ -302,66 +377,83 @@ class CommentDialog(QDialog):
     def _on_progress(self, d):
         stage = d['stage']
         parts = []
-        if d['main_target'] and stage == 'main':
+        if stage == 'all':                     # YouTube 内置方式：主评论和回复一起来
+            parts.append(f'已抓 {d["count"]:,} 条（含回复）')
+            if d['main']:
+                parts.append(f'正在第 {d["main"]:,}' + (f' / {d["main_target"]:,}' if d['main_target'] else '') + ' 条主评论')
+        elif d['main_target'] and stage == 'main':
             parts.append(f'主评论 {d["main"]:,} / {d["main_target"]:,}')
-        elif stage != 'start':
+        elif stage not in ('start',) and d['main']:
             parts.append(f'主评论 {d["main"]:,}')
         if stage in ('sub', 'media', 'export') and d['sub_target']:
             parts.append(f'楼中楼 {d["sub"]:,} / {d["sub_target"]:,}')
         if stage in ('media', 'export') and d['media_total']:
-            parts.append(f'图片 {d["media"]:,} / {d["media_total"]:,}')
+            parts.append(f'图片和头像 {d["media"]:,} / {d["media_total"]:,}')
         if stage == 'export':
             parts.append('正在生成文件…')
         if d.get('wait'):
-            parts.append(f'B站说太频繁了，等 {d["wait"]} 秒再继续')
+            parts.append(f'{self.pf} 说太频繁了，等 {d["wait"]} 秒再继续')
         self.status.setText(' · '.join(parts) or '正在获取视频信息…')
-        main_goal = d['main_target'] or d['main_total'] * 0.35 or 1       # 「全部」时按总数的三分之一粗估
-        frac = {'start': 0, 'main': 0.35 * min(1, d['main'] / max(1, main_goal)),
-                'sub': 0.35 + 0.45 * min(1, d['sub'] / max(1, d['sub_target'])),
-                'media': 0.8 + 0.18 * min(1, d['media'] / max(1, d['media_total'])), 'export': 0.98}.get(stage, 0)
-        self.bar.setValue(int(frac * 1000))
+        if stage == 'all':
+            frac = 0.8 * min(1, (d['main'] / d['main_target']) if d['main_target'] and d['main']
+                             else d['count'] / max(1, d['count_goal']))
+        else:
+            main_goal = d['main_target'] or d['main_total'] * 0.35 or 1       # 「全部」时按总数的三分之一粗估
+            frac = {'start': 0, 'main': 0.35 * min(1, d['main'] / max(1, main_goal)),
+                    'sub': 0.35 + 0.45 * min(1, d['sub'] / max(1, d['sub_target'])),
+                    'media': 0.8 + 0.18 * min(1, d['media'] / max(1, d['media_total'])), 'export': 0.98}.get(stage, 0)
+        self.bar.setValue(max(self.bar.value(), int(frac * 1000)))
+
+    def _show_done(self, info, text):
+        """抓完 / 上次抓过：状态 + 「打开网页」「打开文件夹」「重新抓取」"""
+        self.done_info = info
+        self.bar.hide()
+        self.status.setText(text)
+        _restyle(self.status, 'rowDesc')
+        self.status.show()
+        self.est.show()
+        self.form.setEnabled(True)            # 可以改设置再「重新抓取」
+        self.b_left.setText('关闭')
+        self.b_left.setEnabled(True)
+        self.b_mid.setText('打开文件夹')
+        self.b_mid.setVisible(bool(info.get('out_dir')))
+        self.b_redo.show()
+        self.b_go.setText('打开网页' if 'html' in info['files'] else '打开表格')
+        self._validate()
 
     def _on_done(self, r):
         self.running = False
-        self.b_left.setEnabled(True)
-        self.result = r
-        self.bar.setValue(1000)
-        msg = f'已保存：主评论 {r.n_main:,} 条、楼中楼 {r.n_sub:,} 条' + (f'、图片 {r.n_pics} 张' if r.n_pics else '')
-        if r.stopped:
-            msg = f'没有抓完（{r.stopped}）。{msg}'
         notes = [n for n in r.notes if not n.startswith('没有登录')]      # 没登录的提示上面已经有了
-        self.status.setText(msg + ('\n' + '\n'.join(notes) if notes else ''))
-        self.b_left.setText('关闭')
-        self.b_mid.setText('打开文件夹')
-        self.b_mid.show()
-        self.b_go.setText('打开网页' if 'html' in r.files else '打开表格')
-        self.b_go.setEnabled(True)
+        self._show_done({'files': dict(r.files), 'out_dir': r.out_dir, 'title': r.meta.get('title') or ''},
+                        '已保存：' + summary_text(r.n_main, r.n_sub, r.n_pics, r.stopped) +
+                        ('\n' + '\n'.join(notes) if notes else ''))
+        if r.meta.get('reply_total') and not self.count:
+            self.count = r.meta['reply_total']
+            self.sub.setText(self._count_text())
         if not self.isVisible():                     # 在后台抓完的：主界面提示
-            self.win.notice.show_notice(f'「{r.meta["title"][:20]}」的评论已保存', '打开', self._open_main)
+            self.win.notice.show_notice(f'「{(r.meta.get("title") or "")[:20]}」的评论已保存', '打开', self._open_main)
 
     def _on_failed(self, msg):
         self.running = False
-        self.b_left.setEnabled(True)
         self.bar.hide()
         self.status.setText(msg)
-        self.status.setObjectName('metaError')
-        self.status.style().unpolish(self.status)
-        self.status.style().polish(self.status)
+        _restyle(self.status, 'metaError')
         self.form.setEnabled(True)
         self.b_left.setText('关闭')
+        self.b_left.setEnabled(True)
         self.b_mid.hide()
         self.b_go.setText('重试')
-        self.b_go.setEnabled(True)
         self.est.show()
+        self._validate()
         if not self.isVisible():
             self.win.notify(f'评论没抓到：{msg}', 'error')
 
     # ------------------------------------------------------------ 按钮
     def _open_main(self):
-        r = self.result
-        if not r:
+        info = self.done_info
+        if not info:
             return
-        path = r.files.get('html') or r.files.get('xlsx') or r.files.get('csv')
+        path = info['files'].get('html') or info['files'].get('xlsx') or info['files'].get('csv')
         if path and os.path.exists(path):
             os.startfile(path)
         self.win.notice.hide()
@@ -384,8 +476,8 @@ class CommentDialog(QDialog):
             self.hide()
             self.win.notify('评论在后台继续抓，抓完会提示你')
             return
-        if self.result and self.result.out_dir:
-            os.startfile(self.result.out_dir)
+        if self.done_info and self.done_info.get('out_dir') and os.path.isdir(self.done_info['out_dir']):
+            os.startfile(self.done_info['out_dir'])
 
     def closeEvent(self, e):
         if self.running:                       # 抓取中关窗口 = 在后台继续
