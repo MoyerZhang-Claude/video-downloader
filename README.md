@@ -339,7 +339,8 @@ pan\            网盘账号（加密）、网盘下载任务和设置
 
 1. 改版本号：`app\__init__.py` 的 `APP_VERSION`、`android\app\build.gradle.kts` 的 `versionName` / `versionCode`
    （安装包的版本号由 `打包.bat` 传给 `installer.iss`）。
-2. 跑 `测试解析.bat` 和 `.venv\Scripts\python.exe tools\test_app_update.py`，再 `打包.bat` 生成电脑版的安装包和 zip，安卓用 `gradlew assembleRelease`。
+2. 跑 `测试解析.bat`、`.venv\Scripts\python.exe tools\test_app_update.py` 和 `.venv\Scripts\python.exe tools\test_core_offline.py`，再 `打包.bat` 生成电脑版的安装包和 zip，安卓用 `gradlew assembleRelease`。
+   离线测试和网盘引擎的 `go test` 在 GitHub 上每次推送、每个 Pull Request 都会自动跑（仓库的 Actions 页面看结果）。
 3. 在 GitHub 新建 Release，上传 `LinkDownloader-x.y.z-windows-setup.exe`、`LinkDownloader-x.y.z-windows.zip`、`LinkDownloader-x.y.z-android.apk`
    （文件名里的版本号就是软件判断有没有新版的依据；电脑版和安卓版可以不同时更新）。
    安装包的 sha256 由 GitHub 自动算出（API 里的 `digest`），软件内更新靠它校验，不需要另外上传校验文件。
