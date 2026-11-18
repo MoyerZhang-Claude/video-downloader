@@ -301,7 +301,8 @@ class SniffMixin:
             if site is None or not site_login.logged_in(site.key):
                 return None
             from . import secure_store
-            return {c.name: c.value for c in secure_store.load_cookies(site_login.path_of(site.key)) if c.value}
+            # 保留每个 Cookie 的域名、路径和 Secure：读网页时按地址挑着带（iframe、重定向到别的网站不会带上）
+            return [c for c in secure_store.load_cookies(site_login.path_of(site.key)) if c.value] or None
         except Exception:  # noqa: BLE001
             return None
 

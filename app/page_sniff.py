@@ -152,16 +152,79 @@ def _init_info(data):
     return codec, height
 
 
+# 两段式后缀：a.sina.com.cn 的主域名是 sina.com.cn，不是 com.cn（和 site_login.main_domain 一致；手机版没有 site_login.py）
+_SUFFIX2 = {'co.uk', 'org.uk', 'ac.uk', 'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn', 'com.hk', 'com.tw', 'co.jp',
+            'ne.jp', 'or.jp', 'co.kr', 'com.au', 'com.br', 'com.sg', 'co.in', 'com.mx', 'com.tr', 'com.ru'}
+
+
+def _main_domain(host):
+    parts = (host or '').lower().strip('.').split('.')
+    if len(parts) >= 3 and '.'.join(parts[-2:]) in _SUFFIX2:
+        return '.'.join(parts[-3:])
+    return '.'.join(parts[-2:]) if len(parts) >= 2 else (host or '').lower()
+
+
 def _same_site(a, b):
-    ha, hb = (urlparse(a).hostname or '').split('.'), (urlparse(b).hostname or '').split('.')
-    return ha[-2:] == hb[-2:]
+    ha, hb = urlparse(a).hostname or '', urlparse(b).hostname or ''
+    return bool(ha and hb) and _main_domain(ha) == _main_domain(hb)
+
+
+def _path_match(req_path, cookie_path):
+    """RFC 6265 5.1.4：/a 匹配 /a、/a/、/a/b，不匹配 /ab"""
+    cp = cookie_path or '/'
+    if req_path == cp:
+        return True
+    return req_path.startswith(cp) and (cp.endswith('/') or req_path[len(cp)] == '/')
+
+
+def _cookie_matches(c, url):
+    u = urlparse(url)
+    host = (u.hostname or '').lower()
+    dom = (c.domain or '').lower().lstrip('.')
+    if not host or not dom:
+        return False
+    if c.domain_specified or (c.domain or '').startswith('.'):
+        if host != dom and not host.endswith('.' + dom):
+            return False
+    elif host != dom:                          # 只给这个主机的 Cookie
+        return False
+    if c.secure and u.scheme != 'https':
+        return False
+    if c.is_expired():
+        return False
+    return _path_match(u.path or '/', c.path)
+
+
+def _cookies_for(url, cookies):
+    """这个地址该带哪些 Cookie。cookies 是 http.cookiejar.Cookie 列表（带域名、路径、Secure），
+    逐个按 RFC 6265 的规则匹配；同名的取路径最长的那个。旧的「名字 → 值」字典原样返回。"""
+    if not cookies:
+        return None
+    if isinstance(cookies, dict):
+        return dict(cookies)
+    picked = {}
+    for c in sorted((c for c in cookies if c.value and _cookie_matches(c, url)), key=lambda c: len(c.path or '/')):
+        picked[c.name] = c.value
+    return picked or None
+
+
+_REDIRECTS = (301, 302, 303, 307, 308)
 
 
 def _fetch(session, url, referer=None, cookies=None, timeout=20):
     headers = {'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8', 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.6'}
     if referer:
         headers['Referer'] = referer
-    r = session.get(url, headers=headers, cookies=cookies or None, timeout=timeout, allow_redirects=True)
+    if not cookies:
+        return session.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+    # 带登录 Cookie 时自己跟重定向：每一跳重新挑 Cookie，跳到别的网站就不会带上这个网站的登录信息
+    for _ in range(8):
+        r = session.get(url, headers=headers, cookies=_cookies_for(url, cookies), timeout=timeout,
+                        allow_redirects=False)
+        loc = r.headers.get('Location')
+        if r.status_code not in _REDIRECTS or not loc:
+            return r
+        url = urljoin(str(r.url or url), loc)
     return r
 
 
