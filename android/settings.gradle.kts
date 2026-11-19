@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "VideoDownloader"
+rootProject.name = "LinkDownloader"
 include(":app")

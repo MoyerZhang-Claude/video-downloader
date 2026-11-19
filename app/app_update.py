@@ -26,7 +26,7 @@ import urllib.request
 
 from . import APP_VERSION
 
-REPO = 'MoyerZhang-Claude/video-downloader'
+REPO = 'MoyerZhang-Claude/link-downloader'
 RELEASES_PAGE = f'https://github.com/{REPO}/releases/latest'
 _API = f'https://api.github.com/repos/{REPO}/releases/latest'
 

@@ -48,7 +48,7 @@ from .widgets import CoverDialog, CoverView, ElidedLabel, ThumbLoader, cover_url
 
 log = logging.getLogger('app')
 
-GITHUB_URL = 'https://github.com/MoyerZhang-Claude/video-downloader'
+GITHUB_URL = 'https://github.com/MoyerZhang-Claude/link-downloader'
 RETRY_PATH = os.path.join(DATA, 'retry_urls.json')     # 更新内核后重启：要自动重新解析的链接
 
 # 输入框下方的清晰度预设：(键, 名称, 取值, 说明)

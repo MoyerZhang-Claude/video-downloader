@@ -1,4 +1,4 @@
-# PyInstaller 打包配置：  .venv\Scripts\pyinstaller build.spec --noconfirm
+# PyInstaller 打包配置：  .venv\Scripts\python.exe -m PyInstaller build.spec --noconfirm
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 hiddenimports = collect_submodules('yt_dlp_ejs') + ['curl_cffi']

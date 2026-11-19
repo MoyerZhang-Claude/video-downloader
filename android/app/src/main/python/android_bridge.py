@@ -992,7 +992,7 @@ def _register_v8_provider():
         PROVIDER_NAME = 'android-v8'
         JS_RUNTIME_NAME = 'android-v8'
         PROVIDER_VERSION = '1.0'
-        BUG_REPORT_LOCATION = '视频解析下载器'
+        BUG_REPORT_LOCATION = '链接解析下载器'
 
         @property
         def runtime_info(self):

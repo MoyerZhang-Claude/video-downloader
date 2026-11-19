@@ -50,7 +50,8 @@ for %%n in (config.json history.db) do if exist "%SRC%\%%n" (
     set "MOVED=1"
 )
 if defined MOVED echo 程序文件夹里的旧数据已备份到「%KEEP%」文件夹（不会打进安装包和 zip）
-".venv\Scripts\pyinstaller.exe" build.spec --noconfirm --clean
+rem 用 python -m 调 PyInstaller：.venv\Scripts 里的 pyinstaller.exe 记着建虚拟环境时的文件夹路径，项目文件夹改名后就打不开了
+".venv\Scripts\python.exe" -m PyInstaller build.spec --noconfirm --clean
 if errorlevel 1 (
     echo 打包失败
     pause

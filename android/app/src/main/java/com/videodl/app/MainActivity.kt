@@ -62,7 +62,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-const val GITHUB_URL = "https://github.com/MoyerZhang-Claude/video-downloader"
+const val GITHUB_URL = "https://github.com/MoyerZhang-Claude/link-downloader"
 
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()

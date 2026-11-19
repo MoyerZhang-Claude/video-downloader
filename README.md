@@ -20,7 +20,7 @@
 
 ## 下载
 
-到 [Releases 发布页](https://github.com/MoyerZhang-Claude/video-downloader/releases/latest) 下载最新版：
+到 [Releases 发布页](https://github.com/MoyerZhang-Claude/link-downloader/releases/latest) 下载最新版：
 
 - **电脑版（推荐）**：`LinkDownloader-x.x.x-windows-setup.exe` 安装包，双击安装，装好后桌面和开始菜单里都有「链接解析下载器」
   （Windows 10/11，不需要管理员权限；以后有新版时软件左下角会提示，点「下载并安装」就能升级）
