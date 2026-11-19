@@ -657,6 +657,43 @@ class AccountButton(ui._HoverButton):
 
 # ---------------------------------------------------------------- 主窗口
 
+class _SideGrip(QWidget):
+    """侧边栏右边那条分界线上一条看不见的窄条：按住左右拖改侧边栏宽度，双击恢复默认宽度。"""
+
+    def __init__(self, win, parent):
+        super().__init__(parent)
+        self.win = win
+        self._drag = None
+        self.setCursor(Qt.SizeHorCursor)
+        self.setProperty('titlebarInteractive', True)     # 窗口顶部那一段也是拖分界线，不是拖窗口
+        self.setToolTip('拖动调整侧边栏宽度（双击恢复默认）')
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.place()
+
+    def place(self):
+        sb = self.win.sidebar
+        self.setGeometry(sb.x() + sb.width() - 3, 0, 7, self.parentWidget().height())
+        self.raise_()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._drag = (e.globalPosition().x(), self.win.sidebar.width())
+
+    def mouseMoveEvent(self, e):
+        if self._drag:
+            x0, w0 = self._drag
+            self.win.set_side_width(w0 + e.globalPosition().x() - x0)
+
+    def mouseReleaseEvent(self, e):
+        if self._drag and e.button() == Qt.LeftButton:
+            self._drag = None
+            self.win.set_side_width(self.win.sidebar.width(), save=True)
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.win.set_side_width(self.win.SIDE_W, save=True)
+
+
 class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
     def __init__(self, instance=None):
         super().__init__()
@@ -798,6 +835,7 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         for w in self.pages.values():
             self.stack.addWidget(w)
         self.setCentralWidget(central)
+        self.side_grip = _SideGrip(self, central)      # 侧边栏和主页的分界线：拖动改侧边栏宽度
         self.toast = ui.Toast(central)
         self.notice = ui.NoticeBar(central)
         self.frameless = Frameless(self)          # 去掉系统标题栏，右上角自己画窗口按钮
@@ -825,12 +863,12 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
         top.setContentsMargins(6, 0, 0, 0)
         top.setSpacing(8)
         self.side_spark = Spark(24)
-        self.brand = label(APP_NAME, 'brandName')
+        self.brand = ElidedLabel(APP_NAME, 'brandName')      # 侧边栏窄、字号大时显示省略号，不被硬切掉
         self.collapse_btn = IconButton('sidebar', '收起侧边栏', size=32, icon_size=18)
         self.collapse_btn.clicked.connect(lambda: self._set_collapsed(not self.settings.sidebar_collapsed, save=True))
         top.addWidget(self.side_spark)
-        top.addWidget(self.brand)
-        top.addStretch(1)
+        top.addWidget(self.brand, 1)
+        top.addStretch(0)                 # 收起时（名字隐藏）按钮仍靠右
         top.addWidget(self.collapse_btn)
         self.side_top = top
         v.addLayout(top)
@@ -912,10 +950,31 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
                 self.bridge.ui_call.emit(lambda: done(res))
         self._io.submit(run)
 
+    SIDE_W, SIDE_MIN, SIDE_MAX = 260, 200, 520
+
+    def side_width(self):
+        """展开时侧边栏的宽度：默认 260，拖分界线改（记在设置里）。调大侧边栏字号不再自动变宽"""
+        try:
+            w = int(self.settings.extra.get('sidebar_width') or self.SIDE_W)
+        except (TypeError, ValueError):
+            w = self.SIDE_W
+        return max(self.SIDE_MIN, min(self.SIDE_MAX, w))
+
+    def set_side_width(self, w, save=False):
+        w = max(self.SIDE_MIN, min(self.SIDE_MAX, min(int(w), self.width() // 2)))
+        self.settings.extra['sidebar_width'] = w
+        if not self.settings.sidebar_collapsed:
+            self.sidebar.setFixedWidth(w)
+            self.side_grip.place()
+        if save:
+            self._save_settings()
+
     def _set_collapsed(self, on, save=False):
         self.settings.sidebar_collapsed = on
-        # 侧边栏字号调大时跟着变宽（最多宽 40%），标题、分区名不会被切掉
-        self.sidebar.setFixedWidth(ui.side_h(60) if on else round(260 * min(1.4, max(1.0, theme.font_factor('side')))))
+        self.sidebar.setFixedWidth(ui.side_h(60) if on else self.side_width())
+        if getattr(self, 'side_grip', None) is not None:
+            self.side_grip.setVisible(not on)
+            self.side_grip.place()
         for w in (self.brand, self.side_spark, self.recent_scroll):
             w.setVisible(not on)
         self.side_fill.setVisible(on)
@@ -1815,6 +1874,8 @@ class MainWindow(CloudMixin, PanMixin, SniffMixin, QMainWindow):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._place_toast()
+        if getattr(self, 'side_grip', None) is not None:
+            self.side_grip.place()
 
     def changeEvent(self, e):
         super().changeEvent(e)
